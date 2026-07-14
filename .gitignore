@@ -1,0 +1,46 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Secrets and local runtime
+.env
+runtime/
+.logs/
+.DS_Store
+
+# Agent scratch (not part of the product tree)
+.docs/
+.superpowers/
+.remember/
+.claude/
+.cursor/
+
+# Held local experiments — not shipped in this lineage
+_old/
+
+# LiteRT / LiteRT-LM track (frozen; not the adopted runtime)
+nova/engine/
+nova/server/app.py
+nova/server/metrics.py
+nova/server/workers.py
+tests/engine/
+tests/audio/
+tests/server/test_app.py
+tests/server/test_metrics.py
+tests/scripts/test_latency_graph.py
+scripts/latency_graph.py
+
+# Model weights and large binaries (build or download locally)
+*.litertlm
+*.gguf
+*.onnx
+
+# cloned/ research checkouts; speech-to-speech is a git submodule
+cloned/*
+!cloned/speech-to-speech
+!cloned/speech-to-speech/**

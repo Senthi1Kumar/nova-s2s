@@ -1,0 +1,51 @@
+{"id": "email_clean_01", "transcript": "Check my emails.", "expect": {"tool": "check_email"}, "tags": ["clean", "email", "route"]}
+{"id": "email_stt_02", "transcript": "Check my E today.", "expect": {"tool": "check_email"}, "tags": ["stt", "sensevoice", "email", "route"]}
+{"id": "email_ood_03", "transcript": "Any new mail waiting in the inbox?", "expect": {"tool": "check_email"}, "tags": ["ood", "email", "route"]}
+{"id": "email_followup_04", "transcript": "Summarize that email.", "expect": {"tool": "check_email", "args": {"mode": "summarize"}}, "tags": ["followup", "email", "agent_args"]}
+{"id": "cal_clean_05", "transcript": "What's on my calendar today?", "expect": {"tool": "check_calendar", "args": {"day": "today"}}, "tags": ["clean", "calendar", "route"]}
+{"id": "cal_stt_06", "transcript": "Check my calendara for tomorrowrow.", "expect": {"tool": "check_calendar", "args": {"day": "tomorrow"}}, "tags": ["stt", "sensevoice", "calendar", "route"]}
+{"id": "cal_followup_07", "transcript": "What about tomorrow.", "expect": {"tool": "check_calendar", "args": {"day": "tomorrow"}}, "tags": ["followup", "calendar", "route"]}
+{"id": "cal_create_08", "transcript": "Book a meeting with Priya tomorrow at three.", "expect": {"tool": "create_calendar_event", "args": {"title": "meeting with Priya"}}, "tags": ["clean", "calendar", "confirm", "route"]}
+{"id": "cal_delete_09", "transcript": "Cancel my dentist appointment tomorrow.", "expect": {"tool": "delete_calendar_event"}, "tags": ["clean", "calendar", "confirm", "route"]}
+{"id": "weather_clean_10", "transcript": "What's the weather in Bangalore?", "expect": {"tool": "get_weather", "args": {"place": "Bangalore"}}, "tags": ["clean", "weather", "route"]}
+{"id": "weather_ood_11", "transcript": "How humid is it outside in Bengaluru right now?", "expect": {"tool": "get_weather", "args": {"place": "Bengaluru"}}, "tags": ["ood", "weather", "route"]}
+{"id": "news_clean_12", "transcript": "What's the current news today in Bangalore.", "expect": {"tool": "web_search", "args": {"place": "Bangalore"}}, "tags": ["clean", "news", "route"]}
+{"id": "stock_ood_13", "transcript": "Tell me the current stock price of Amazon.", "expect": {"tool": "web_search"}, "tags": ["ood", "search", "route"]}
+{"id": "hvac_clean_14", "transcript": "Set the driver temperature to 22 degrees.", "expect": {"tool": "set_hvac", "args": {"zone": "driver", "on": true, "target_temp_c": 22}}, "tags": ["clean", "vehicle", "route"]}
+{"id": "hvac_stt_15", "transcript": "Turn on AC for passenger to twenty.", "expect": {"tool": "set_hvac", "args": {"zone": "passenger", "on": true, "target_temp_c": 20}}, "tags": ["stt", "vehicle", "agent_args"]}
+{"id": "windows_open_16", "transcript": "Open the windows please.", "expect": {"tool": "set_windows", "args": {"open": true}}, "tags": ["clean", "vehicle", "route"]}
+{"id": "windows_status_17", "transcript": "What's the status of the windows?", "expect": {"tool": "query_vehicle_status"}, "tags": ["clean", "vehicle", "route"]}
+{"id": "sunroof_18", "transcript": "Close the sunroof.", "expect": {"tool": "set_sunroof", "args": {"open": false}}, "tags": ["clean", "vehicle", "route"]}
+{"id": "fuel_status_19", "transcript": "How much fuel do I have left?", "expect": {"tool": "query_vehicle_status"}, "tags": ["clean", "vehicle", "route"]}
+{"id": "reminder_set_20", "transcript": "Remind me to call mom at 6pm.", "expect": {"tool": "set_reminder", "args": {"text": "call mom", "when": "6pm"}}, "tags": ["clean", "reminder", "route"]}
+{"id": "reminder_list_21", "transcript": "What reminders do I have?", "expect": {"tool": "list_reminders"}, "tags": ["clean", "reminder", "route"]}
+{"id": "reminder_delete_unsupported_22", "transcript": "Delete that reminder.", "expect": {"tool": null, "unsupported": true, "no_tool": false}, "tags": ["unsupported", "reminder", "route_soft"]}
+{"id": "drive_list_23", "transcript": "Show my recent Drive files.", "expect": {"tool": "list_drive_files"}, "tags": ["clean", "drive", "route"]}
+{"id": "drive_followup_24", "transcript": "Show me the third Drive document.", "expect": {"tool": "list_drive_files"}, "tags": ["followup", "drive", "route"]}
+{"id": "drive_create_25", "transcript": "Create a new Drive folder called Nova Demo.", "expect": {"tool": "create_drive_folder", "args": {"name": "Nova Demo"}}, "tags": ["clean", "drive", "confirm", "route"]}
+{"id": "music_26", "transcript": "Play some jazz on Spotify.", "expect": {"tool": "play_music", "args": {"query": "jazz"}}, "tags": ["clean", "music", "route"]}
+{"id": "research_27", "transcript": "Research inference engines for on-device LLMs.", "expect": {"tool": "research_topic", "args": {"query": "inference engines for on-device LLMs"}}, "tags": ["clean", "research", "route"]}
+{"id": "research_bg_27b", "transcript": "Start a deep research job on solid-state batteries.", "expect": {"tool": "start_research", "args": {"topic": "solid-state batteries"}}, "tags": ["clean", "research", "route"]}
+{"id": "research_sync_28", "transcript": "Look into solid-state battery ranges.", "expect": {"tool": "research_topic", "args": {"query": "solid-state battery ranges"}}, "tags": ["ood", "research", "agent_args"]}
+{"id": "memory_remember_29", "transcript": "Remember I prefer 20 degrees in the cabin.", "expect": {"tool": "remember", "args": {"text": "I prefer 20 degrees in the cabin"}}, "tags": ["clean", "memory", "route"]}
+{"id": "memory_recall_30", "transcript": "Recall my saved memories.", "expect": {"tool": "recall_memories"}, "tags": ["clean", "memory", "route"]}
+{"id": "email_send_31", "transcript": "Send an email to priya@example.com saying I'll be late.", "expect": {"tool": "send_email", "args": {"to": "priya@example.com", "subject": "Running late", "body": "I'll be late."}}, "tags": ["clean", "email", "confirm", "agent_args"]}
+{"id": "confirm_bare_32", "transcript": "Confirm.", "expect": {"tool": null, "no_tool": true}, "tags": ["confirm", "no_tool", "route"]}
+{"id": "confirm_yes_33", "transcript": "Yes please.", "expect": {"tool": null, "no_tool": true}, "tags": ["confirm", "no_tool", "route"]}
+{"id": "confirm_pinned_34", "transcript": "Yes.", "expect": {"tool": "send_email"}, "tags": ["confirm", "pinned", "agent_only"]}
+{"id": "stop_35", "transcript": "Stop.", "expect": {"tool": null, "no_tool": true}, "tags": ["stop", "no_tool", "route"]}
+{"id": "chitchat_36", "transcript": "Hey there.", "expect": {"tool": null, "no_tool": true}, "tags": ["chitchat", "no_tool", "route"]}
+{"id": "thanks_37", "transcript": "Thanks.", "expect": {"tool": null, "no_tool": true}, "tags": ["chitchat", "no_tool", "route"]}
+{"id": "stt_crumb_38", "transcript": "YeahYeah", "expect": {"tool": null, "no_tool": true}, "tags": ["stt", "no_tool", "route"]}
+{"id": "pay_accept_39", "transcript": "Pay 50 rupees to Chai Point.", "expect": {"tool": "send_payment", "args": {"payee": "Chai Point", "amount": 50}, "auth_status": "accept"}, "tags": ["payment", "auth", "route"]}
+{"id": "pay_step_up_40", "transcript": "Pay 60000 rupees to Landlord.", "expect": {"tool": "send_payment", "args": {"payee": "Landlord", "amount": 60000}, "auth_status": "step_up"}, "tags": ["payment", "auth", "route"]}
+{"id": "pay_reject_41", "transcript": "Transfer 500000 rupees to Unknown Merchant now.", "expect": {"tool": "send_payment", "args": {"payee": "Unknown Merchant", "amount": 500000}, "auth_status": "reject"}, "tags": ["payment", "auth", "agent_args"]}
+{"id": "pay_pin_followup_42", "transcript": "My PIN is 4 2 4 2.", "expect": {"tool": "send_payment", "args": {"step_up_code": "4242"}}, "tags": ["payment", "followup", "confirm", "agent_only"]}
+{"id": "unsupported_flight_43", "transcript": "Book me a flight to Mars next Tuesday.", "expect": {"tool": null, "unsupported": true, "no_tool": true}, "tags": ["unsupported", "ood", "agent_only"]}
+{"id": "unsupported_hack_44", "transcript": "Hack into the bank and move my money.", "expect": {"tool": null, "unsupported": true, "no_tool": true}, "tags": ["unsupported", "ood", "agent_only"]}
+{"id": "correction_45", "transcript": "No, I meant passenger zone not driver.", "expect": {"tool": "set_hvac", "args": {"zone": "passenger"}}, "tags": ["correction", "vehicle", "followup", "agent_args"]}
+{"id": "correction_email_46", "transcript": "Sorry, check unread mail not calendar.", "expect": {"tool": "check_email", "args": {"mode": "unread"}}, "tags": ["correction", "email", "route"]}
+{"id": "followup_that_email_47", "transcript": "Reply to that email saying thanks.", "expect": {"tool": "send_email"}, "tags": ["followup", "email", "agent_args"]}
+{"id": "ood_cabin_vs_weather_48", "transcript": "What's the cabin temperature right now?", "expect": {"tool": "query_vehicle_status"}, "tags": ["ood", "vehicle", "route"]}
+{"id": "ood_phrasing_49", "transcript": "Could you peek at my schedule this afternoon?", "expect": {"tool": "check_calendar", "args": {"day": "today"}}, "tags": ["ood", "calendar", "route"]}
+{"id": "no_tool_silence_50", "transcript": "Quiet please.", "expect": {"tool": null, "no_tool": true}, "tags": ["stop", "no_tool", "route"]}

@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync deps
+        run: uv sync --frozen || uv sync
+      - name: Fast contracts
+        run: bash scripts/run_tests.sh fast
+      - name: DriveAuth Edge package tests
+        run: |
+          uv run pytest -q Drive_auth_edge/tests/ \
+            --ignore=Drive_auth_edge/tests/test_production.py
+      - name: All-local ladder (no GPU)
+        run: bash scripts/run_tests.sh all-local

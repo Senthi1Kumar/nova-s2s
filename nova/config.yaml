@@ -1,0 +1,48 @@
+# Nova demo config. Consumed by scripts/run_demo.py.
+# Override path: NOVA_CONFIG=nova/config.thor.yaml (single GGUF + full toolbox).
+
+# Small-GPU default: dual LFM (350M speak + 230M tool agent). For Thor, use config.thor.yaml.
+llm_profile: lfm2.5-350m-f16
+# Alternatives (see nova/launch/models.yaml):
+# llm_profile: gemma-4-e2b-it-q2
+# llm_profile: gemma-4-e2b-it-q4
+
+# STT model
+stt: sensevoice
+stt_device: cuda
+sensevoice_model: FunAudioLLM/SenseVoiceSmall
+sensevoice_language: en
+
+# TTS model
+tts: kokoro
+tts_device: cuda
+
+# s2s realtime WebSocket server bind address
+ws_host: 127.0.0.1
+ws_port: 8766
+
+# Tool service host and port
+tool_service_host: 127.0.0.1
+tool_service_port: 8000
+
+# Enable all tools and tool_choice=auto. No lexical force, no :8081
+tools_enabled: all
+
+# model — dual LFM: /tools/agent on :8081, speak model tools=[]
+# full  — one GGUF sees every tool (Thor); no lexical force / short-circuit
+# force — lexical named tool_choice (legacy)
+tool_route_mode: model
+
+# Router LLM profile
+router_llm_profile: lfm2.5-230m-q4
+
+# Chat size
+chat_size: 8
+
+# DriveAuth configuration
+driveauth:
+  # Use mock data for testing
+  use_mock: true
+  seed_mature: true
+  store_dir: runtime/driveauth_store
+  driver_id: driver1

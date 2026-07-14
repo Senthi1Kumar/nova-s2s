@@ -1,0 +1,118 @@
+# Model profiles for the llama.cpp (llama-server) launcher (nova/launch/llama_supervisor.py).
+#
+# Each profile is a full description of one llama-server invocation. Flags below were confirmed
+# against the actual built binary (`cloned/llama.cpp/llama-server --help`): `-m`/`-c`/`-ngl`/
+# `--host`/`--port` all match; `--jinja` is redundant (jinja templating is on by default) but kept
+# explicit since s2s's `chat-completions` LLM backend needs native tool-call rendering, which
+# depends on the model's jinja chat template supporting tool role turns.
+#
+# Target hardware here has 4096 MiB total VRAM (~3.5 GiB free) -- `gemma-4-e2b-it-q2` (2.3 GiB) is
+# the safe default for full GPU offload (n_gpu_layers: 999). ctx: 8192 (raised from 4096 after a
+# real crash: s2s's chat_size history trim fires on USER-TURN COUNT, not tokens, so a handful of
+# verbose turns can blow past a small ctx before any trim happens -- see run_demo.py's --chat_size
+# flag for the paired fix). `gemma-4-e2b-it-q4` (3.2 GiB) is higher quality but leaves little
+# headroom and may need a smaller `n_gpu_layers` or `ctx` on this box. `qwen3-0.6b` is a small,
+# fast profile for iterating on the launcher/pipeline itself without waiting on Gemma-4 load times.
+models:
+  - name: gemma-4-e2b-it-q2
+    gguf_path: runtime/models/gemma-4-E2B-it-UD-Q2_K_XL.gguf
+    ctx: 8192
+    n_gpu_layers: 999
+    port: 8080
+    args:
+      - "--jinja"
+      - "-fa"
+      - "on"
+      - "--cache-reuse"
+      - "256"
+
+  # Thor / full-toolbox default in nova/config.thor.yaml — edit gguf_path on-box.
+  - name: gemma-4-e2b-it-q4
+    gguf_path: /home/nsk/.lmstudio/models/lmstudio-community/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_K_M.gguf
+    ctx: 16384
+    n_gpu_layers: 999
+    port: 8080
+    args:
+      - "--jinja"
+      - "-fa"
+      - "on"
+      - "--cache-reuse"
+      - "256"
+
+  - name: qwen3-0.6b
+    gguf_path: runtime/models/qwen3-0.6b-gguf/Qwen3-0.6B-Q8_0.gguf
+    ctx: 8192
+    n_gpu_layers: 999
+    port: 8080
+    args:
+      - "--jinja"
+      - "-fa"
+      - "on"
+      - "--cache-reuse"
+      - "256"
+
+  - name: gemma-4-e2b-it-qat-q4
+    gguf_path: runtime/models/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+    ctx: 8192   # or 16384 if VRAM allows with Kokoro CUDA
+    n_gpu_layers: 999
+    port: 8080
+    args:
+      - "--jinja"
+      - "-fa"
+      - "on"
+      - "--cache-reuse"
+      - "256"
+      # optional MTP once drafter is on disk:
+      - "--spec-type"
+      - "draft-mtp"
+      - "--spec-draft-n-max"
+      - "4"
+      - "--model-draft"
+      - "runtime/models/mtp-gemma-4-E2B-it.gguf"
+
+  # Liquid LFM2.5-350M FP16 — tiny edge model (~0.7 GiB weights) for latency /
+  # VRAM headroom tests beside Kokoro CUDA. Native tool-call tokens via jinja;
+  # llama.cpp needs a recent enough build for LFM2.5 tool parsing. Sampling
+  # matches Liquid/Unsloth guidance (low temp / top-p).
+  - name: lfm2.5-350m-f16
+    gguf_path: runtime/models/LFM2.5-350M-F16.gguf
+    ctx: 16384
+    n_gpu_layers: 999
+    port: 8080
+    args:
+      - "--jinja"
+      - "-fa"
+      - "on"
+      - "--cache-reuse"
+      - "256"
+      - "--temp"
+      - "0.1"
+      - "--top-k"
+      - "50"
+      - "--top-p"
+      - "0.1"
+      - "--repeat-penalty"
+      - "1.05"
+
+  # LFM2.5-230M Q4_K_M — CPU tool-agent sidecar (port 8081). Sees full toolbox;
+  # speak stays on 350M GPU. Prefer Q4_K_M (~153 MB).
+  - name: lfm2.5-230m-q4
+    gguf_path: runtime/models/LFM2.5-230M-Q4_K_M.gguf
+    ctx: 4096
+    n_gpu_layers: 0
+    port: 8081
+    args:
+      - "--jinja"
+      - "-fa"
+      - "on"
+      - "--cache-reuse"
+      - "256"
+      - "--temp"
+      - "0.1"
+      - "--top-k"
+      - "50"
+      - "--top-p"
+      - "0.1"
+      - "--repeat-penalty"
+      - "1.05"
+

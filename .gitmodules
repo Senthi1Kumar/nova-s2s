@@ -1,0 +1,8 @@
+[submodule "cloned/speech-to-speech"]
+	path = cloned/speech-to-speech
+	url = git@github.com:Senthi1Kumar/speech-to-speech.git
+	branch = nova-s2s
+
+[submodule "Drive_auth_edge"]
+	path = Drive_auth_edge
+	url = git@github.com:Senthi1Kumar/Drive_auth_edge.git
