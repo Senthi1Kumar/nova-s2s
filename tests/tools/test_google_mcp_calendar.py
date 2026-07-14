@@ -144,11 +144,13 @@ def test_check_calendar_tomorrow_filters_and_speak(tmp_path: Path):
     )
     provider = GoogleTokenProvider(config=cfg, store=store)
 
-    # IST wall-clock; relative to "now" so the test does not rot across days.
-    ist = timezone(timedelta(hours=5, minutes=30))
-    today = datetime.now(ist).replace(hour=14, minute=30, second=0, microsecond=0)
-    tomorrow = today + timedelta(days=1)
-    tomorrow = tomorrow.replace(hour=11, minute=0, second=0, microsecond=0)
+    # Match calendar.py: target day = now_utc.astimezone().date() (+1 for tomorrow).
+    # Do not hardcode IST — CI runners are UTC and day boundaries disagree.
+    local_now = datetime.now(timezone.utc).astimezone()
+    today = local_now.replace(hour=14, minute=30, second=0, microsecond=0)
+    tomorrow = (local_now + timedelta(days=1)).replace(
+        hour=11, minute=0, second=0, microsecond=0
+    )
 
     def fake_get(url, params=None, headers=None, timeout=None):
         return _FakeResp(
