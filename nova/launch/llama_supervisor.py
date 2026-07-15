@@ -26,6 +26,9 @@ from pathlib import Path
 
 import httpx
 import yaml
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class LlamaSupervisorError(RuntimeError):

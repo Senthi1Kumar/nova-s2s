@@ -4,7 +4,7 @@
 # Point llm_profile at a profile in nova/launch/models.yaml whose gguf_path
 # exists on the board (override paths in models.yaml or symlink under runtime/models/).
 
-llm_profile: gemma-4-e2b-it-q4
+llm_profile: gemma-4-12b-it-q4
 
 stt: sensevoice
 stt_device: cuda

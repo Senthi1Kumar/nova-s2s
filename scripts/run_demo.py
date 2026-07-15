@@ -28,6 +28,9 @@ from types import FrameType
 import httpx
 import websockets
 import yaml
+from dotenv import load_dotenv
+
+load_dotenv()
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
