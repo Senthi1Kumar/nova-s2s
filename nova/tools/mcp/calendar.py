@@ -1,55 +1,37 @@
-"""Personal Google Calendar via OAuth + Calendar JSON API.
+"""Personal Google Calendar via OAuth + Workspace Calendar MCP.
 
-Caller: nova/server/tool_service.py build_registry (replaces CalendarStubTool).
-
-Workspace remote MCP ``tools/call`` still returns permission denied even with
-``roles/mcp.toolUser`` (Developer Preview). The same OAuth token works against
-``calendar.googleapis.com`` REST, so reads/writes go through REST. MCP client
-stays available for later when Google opens tool calls.
-
-Create/delete need ``https://www.googleapis.com/auth/calendar.events`` —
-re-auth after upgrading from readonly scopes.
+Caller: nova/server/tool_service.py build_registry.
+Uses remote MCP tools/call (list_events / create_event / delete_event).
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
 import re
-
-import httpx
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Protocol
 
 from nova.tools.base import NovaTool
+from nova.tools.mcp.client import CALENDAR_MCP_URL, GoogleMcpClient
 from nova.tools.mcp.oauth import GoogleTokenProvider
+from nova.tools.mcp.runtime import oauth_ready_or_error, unpack_mcp_result
 
 _UNSET: Any = object()
-CALENDAR_EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+
+
+class _McpCaller(Protocol):
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any: ...
 
 
 def _oauth_access_or_error(tokens: GoogleTokenProvider | None) -> str | dict[str, Any]:
-    if tokens is None or not tokens.configured():
-        return {
-            "status": "unavailable",
-            "reason": "google_oauth_not_configured",
-            "hint": "Set GOOGLE_OAUTH_CLIENT_ID/SECRET in .env, then connect Google in Settings.",
-        }
-    if not tokens.authenticated():
-        return {
-            "status": "unavailable",
-            "reason": "google_oauth_not_authenticated",
-            "hint": "Open Settings → Connect with Google (work Chrome profile).",
-        }
-    access = tokens.get_access_token()
-    if not access:
-        return {
-            "status": "unavailable",
-            "reason": "google_oauth_token_refresh_failed",
-            "hint": "Reconnect Google Calendar in Settings.",
-        }
-    return access
+    """Back-compat alias used by gmail/drive imports — prefer oauth_ready_or_error."""
+    err = oauth_ready_or_error(tokens)
+    if err is not None:
+        return err
+    assert tokens is not None
+    return tokens.get_access_token() or ""
 
 
 class CheckCalendarTool(NovaTool):
-    """Upcoming personal calendar events (Google Calendar, OAuth)."""
+    """Upcoming personal calendar events (Google Calendar MCP)."""
 
     name = "check_calendar"
     description = (
@@ -78,19 +60,28 @@ class CheckCalendarTool(NovaTool):
         self,
         tokens: GoogleTokenProvider | None = _UNSET,
         timeout: float = 20.0,
-        http_get=None,
+        mcp: _McpCaller | None = None,
+        http_get: Callable[..., Any] | None = None,
     ):
         if tokens is _UNSET:
             self._tokens = GoogleTokenProvider()
         else:
             self._tokens = tokens
         self._timeout = timeout
-        self._http_get = http_get or httpx.get
+        self._mcp = mcp
+        _ = http_get  # REST path retired; kw kept for older call sites
+
+    def _client(self) -> _McpCaller:
+        if self._mcp is not None:
+            return self._mcp
+        return GoogleMcpClient(
+            CALENDAR_MCP_URL, tokens=self._tokens, timeout=self._timeout
+        )
 
     def execute(self, day: str = "week", on_date: str = "") -> dict[str, Any]:
-        access = _oauth_access_or_error(self._tokens)
-        if isinstance(access, dict):
-            return access
+        err = oauth_ready_or_error(self._tokens)
+        if err is not None:
+            return err
 
         day_key = (day or "week").strip().lower()
         if day_key not in {"today", "tomorrow", "day_after_tomorrow", "week"}:
@@ -100,27 +91,18 @@ class CheckCalendarTool(NovaTool):
             on_date_s = on_date_s[:10]
 
         now = datetime.now(timezone.utc)
-        # Fetch far enough to cover "day after tomorrow" and named dates this week.
         later = now + timedelta(days=10)
+        args: dict[str, Any] = {
+            "startTime": now.isoformat().replace("+00:00", "Z"),
+            "endTime": later.isoformat().replace("+00:00", "Z"),
+        }
         try:
-            resp = self._http_get(
-                CALENDAR_EVENTS_URL,
-                params={
-                    "singleEvents": "true",
-                    "orderBy": "startTime",
-                    "maxResults": 25,
-                    "timeMin": now.isoformat().replace("+00:00", "Z"),
-                    "timeMax": later.isoformat().replace("+00:00", "Z"),
-                },
-                headers={"Authorization": f"Bearer {access}"},
-                timeout=self._timeout,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
+            raw = self._client().call_tool("list_events", args)
+            payload = unpack_mcp_result(raw)
         except Exception as exc:  # noqa: BLE001 — voice loop must not crash
             return {
                 "status": "unavailable",
-                "reason": "calendar_api_error",
+                "reason": "calendar_mcp_error",
                 "error": str(exc)[:300],
             }
 
@@ -135,7 +117,7 @@ class CheckCalendarTool(NovaTool):
             "event_count": len(events),
             "events": events[:10],
             "speak": speak,
-            "source": "google_calendar_api",
+            "source": "google_calendar_mcp",
             "window": {"from": now.isoformat(), "to": later.isoformat()},
         }
 
@@ -174,6 +156,7 @@ class CreateCalendarEventTool(NovaTool):
         self,
         tokens: GoogleTokenProvider | None = _UNSET,
         timeout: float = 20.0,
+        mcp: _McpCaller | None = None,
         http_post: Callable[..., Any] | None = None,
     ):
         if tokens is _UNSET:
@@ -181,7 +164,15 @@ class CreateCalendarEventTool(NovaTool):
         else:
             self._tokens = tokens
         self._timeout = timeout
-        self._http_post = http_post or httpx.post
+        self._mcp = mcp
+        _ = http_post
+
+    def _client(self) -> _McpCaller:
+        if self._mcp is not None:
+            return self._mcp
+        return GoogleMcpClient(
+            CALENDAR_MCP_URL, tokens=self._tokens, timeout=self._timeout
+        )
 
     def execute(
         self,
@@ -190,9 +181,9 @@ class CreateCalendarEventTool(NovaTool):
         end: str = "",
         description: str = "",
     ) -> dict[str, Any]:
-        access = _oauth_access_or_error(self._tokens)
-        if isinstance(access, dict):
-            return access
+        err = oauth_ready_or_error(self._tokens)
+        if err is not None:
+            return err
 
         title = (title or "").strip()
         start = (start or "").strip()
@@ -204,47 +195,39 @@ class CreateCalendarEventTool(NovaTool):
             }
 
         end_s = (end or "").strip() or _default_end(start)
-        body: dict[str, Any] = {
+        args: dict[str, Any] = {
             "summary": title,
-            "start": {"dateTime": start},
-            "end": {"dateTime": end_s},
+            "startTime": start,
+            "endTime": end_s,
         }
         if description and description.strip():
-            body["description"] = description.strip()
+            args["description"] = description.strip()
 
         try:
-            resp = self._http_post(
-                CALENDAR_EVENTS_URL,
-                json=body,
-                headers={
-                    "Authorization": f"Bearer {access}",
-                    "Content-Type": "application/json",
-                },
-                timeout=self._timeout,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
+            raw = self._client().call_tool("create_event", args)
+            payload = unpack_mcp_result(raw)
         except Exception as exc:  # noqa: BLE001
             return {
                 "status": "unavailable",
-                "reason": "calendar_api_error",
+                "reason": "calendar_mcp_error",
                 "error": str(exc)[:300],
                 "hint": (
-                    "If this is a 403 insufficient scopes, Disconnect then Connect "
+                    "If this is a scope/permission error, Disconnect then Connect "
                     "Google again so write scope calendar.events is granted."
                 ),
             }
 
+        eid = str(payload.get("id") or payload.get("eventId") or "")
         return {
             "status": "success",
             "action": "created",
             "event": {
-                "id": str(payload.get("id") or ""),
+                "id": eid,
                 "title": str(payload.get("summary") or title),
                 "start": start,
                 "end": end_s,
             },
-            "source": "google_calendar_api",
+            "source": "google_calendar_mcp",
         }
 
 
@@ -277,6 +260,7 @@ class DeleteCalendarEventTool(NovaTool):
         self,
         tokens: GoogleTokenProvider | None = _UNSET,
         timeout: float = 20.0,
+        mcp: _McpCaller | None = None,
         http_get=None,
         http_delete: Callable[..., Any] | None = None,
     ):
@@ -285,13 +269,20 @@ class DeleteCalendarEventTool(NovaTool):
         else:
             self._tokens = tokens
         self._timeout = timeout
-        self._http_get = http_get or httpx.get
-        self._http_delete = http_delete or httpx.delete
+        self._mcp = mcp
+        _ = http_get, http_delete
+
+    def _client(self) -> _McpCaller:
+        if self._mcp is not None:
+            return self._mcp
+        return GoogleMcpClient(
+            CALENDAR_MCP_URL, tokens=self._tokens, timeout=self._timeout
+        )
 
     def execute(self, event_id: str = "", title: str = "") -> dict[str, Any]:
-        access = _oauth_access_or_error(self._tokens)
-        if isinstance(access, dict):
-            return access
+        err = oauth_ready_or_error(self._tokens)
+        if err is not None:
+            return err
 
         event_id = (event_id or "").strip()
         title = (title or "").strip()
@@ -304,7 +295,7 @@ class DeleteCalendarEventTool(NovaTool):
                     "reason": "missing_event",
                     "hint": "Pass event_id from check_calendar, or title to match.",
                 }
-            found = self._find_by_title(access, title)
+            found = self._find_by_title(title)
             if found is None:
                 return {
                     "status": "error",
@@ -316,21 +307,15 @@ class DeleteCalendarEventTool(NovaTool):
             event_id = found["id"]
             matched_title = found["title"]
 
-        url = f"{CALENDAR_EVENTS_URL}/{event_id}"
         try:
-            resp = self._http_delete(
-                url,
-                headers={"Authorization": f"Bearer {access}"},
-                timeout=self._timeout,
-            )
-            resp.raise_for_status()
+            self._client().call_tool("delete_event", {"eventId": event_id})
         except Exception as exc:  # noqa: BLE001
             return {
                 "status": "unavailable",
-                "reason": "calendar_api_error",
+                "reason": "calendar_mcp_error",
                 "error": str(exc)[:300],
                 "hint": (
-                    "If this is a 403 insufficient scopes, Disconnect then Connect "
+                    "If this is a scope/permission error, Disconnect then Connect "
                     "Google again so write scope calendar.events is granted."
                 ),
             }
@@ -339,46 +324,37 @@ class DeleteCalendarEventTool(NovaTool):
             "status": "success",
             "action": "deleted",
             "event": {"id": event_id, "title": matched_title},
-            "source": "google_calendar_api",
+            "source": "google_calendar_mcp",
         }
 
-    def _find_by_title(self, access: str, title: str) -> dict[str, Any] | None:
+    def _find_by_title(self, title: str) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
         later = now + timedelta(days=14)
         try:
-            resp = self._http_get(
-                CALENDAR_EVENTS_URL,
-                params={
-                    "singleEvents": "true",
-                    "orderBy": "startTime",
-                    "maxResults": 25,
-                    "timeMin": now.isoformat().replace("+00:00", "Z"),
-                    "timeMax": later.isoformat().replace("+00:00", "Z"),
+            raw = self._client().call_tool(
+                "list_events",
+                {
+                    "startTime": now.isoformat().replace("+00:00", "Z"),
+                    "endTime": later.isoformat().replace("+00:00", "Z"),
                 },
-                headers={"Authorization": f"Bearer {access}"},
-                timeout=self._timeout,
             )
-            resp.raise_for_status()
-            payload = resp.json()
+            payload = unpack_mcp_result(raw)
         except Exception as exc:  # noqa: BLE001
             return {
                 "status": "unavailable",
-                "reason": "calendar_api_error",
+                "reason": "calendar_mcp_error",
                 "error": str(exc)[:300],
             }
 
         needle = title.casefold()
-        for item in payload.get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            summary = str(item.get("summary") or "")
+        for item in _normalize_events(payload):
+            summary = item.get("title") or ""
             if needle in summary.casefold():
-                return {"id": str(item.get("id") or ""), "title": summary or title}
+                return {"id": item.get("id") or "", "title": summary or title}
         return None
 
 
 def _default_end(start: str) -> str:
-    """Parse start ISO and return start+1h; on parse failure return start unchanged."""
     try:
         s = start.replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
@@ -391,7 +367,6 @@ def _parse_event_start(start_s: str) -> datetime | None:
     if not start_s:
         return None
     try:
-        # All-day dates are YYYY-MM-DD
         if len(start_s) == 10 and start_s[4] == "-":
             return datetime.fromisoformat(start_s).replace(tzinfo=timezone.utc)
         return datetime.fromisoformat(start_s.replace("Z", "+00:00"))
@@ -437,7 +412,6 @@ _HOUR_WORDS = {
 
 
 def _speak_clock(dt: datetime) -> str:
-    """Phonetically friendly clock for TTS (e.g. 'two thirty PM')."""
     local = dt.astimezone()
     h24 = local.hour
     minute = local.minute
@@ -456,7 +430,6 @@ def _speak_clock(dt: datetime) -> str:
 
 
 def _speak_events(events: list[dict[str, str]], day_key: str) -> str:
-    """Ready-to-speak summary — model must read this aloud, not invent dates."""
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_key or ""):
         label = day_key
         empty = f"You have no events on {day_key}."
@@ -501,7 +474,7 @@ def _speak_events(events: list[dict[str, str]], day_key: str) -> str:
 
 
 def _normalize_events(result: Any) -> list[dict[str, str]]:
-    """Flatten Calendar API / MCP-shaped result into speakable {id, title, start} rows."""
+    """Flatten Calendar MCP result into speakable {id, title, start} rows."""
     raw_items: list[Any] = []
     if isinstance(result, dict):
         structured = result.get("structuredContent") or result.get("structured_content")
@@ -516,7 +489,7 @@ def _normalize_events(result: Any) -> list[dict[str, str]]:
         raw_items = result
 
     out: list[dict[str, str]] = []
-    for item in raw_items[:10]:
+    for item in raw_items[:25]:
         if not isinstance(item, dict):
             continue
         title = str(

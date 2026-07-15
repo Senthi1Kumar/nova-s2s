@@ -1,21 +1,23 @@
-"""Google Drive via OAuth + Drive JSON API.
+"""Google Drive via OAuth + Workspace Drive MCP.
 
 Caller: nova/server/tool_service.py build_registry.
-List is read-only; create_drive_folder needs drive.file (re-auth if missing).
+Uses remote MCP tools/call (list_recent_files / search_files / create_file).
 """
 from __future__ import annotations
 
-from typing import Any, Callable
-
-import httpx
+from typing import Any, Callable, Protocol
 
 from nova.tools.base import NovaTool
-from nova.tools.mcp.calendar import _oauth_access_or_error
+from nova.tools.mcp.client import DRIVE_MCP_URL, GoogleMcpClient
 from nova.tools.mcp.oauth import GoogleTokenProvider
+from nova.tools.mcp.runtime import oauth_ready_or_error, unpack_mcp_result
 
 _UNSET: Any = object()
-DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
 FOLDER_MIME = "application/vnd.google-apps.folder"
+
+
+class _McpCaller(Protocol):
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any: ...
 
 
 class ListDriveFilesTool(NovaTool):
@@ -42,6 +44,7 @@ class ListDriveFilesTool(NovaTool):
         self,
         tokens: GoogleTokenProvider | None = _UNSET,
         timeout: float = 20.0,
+        mcp: _McpCaller | None = None,
         http_get=None,
     ):
         if tokens is _UNSET:
@@ -49,50 +52,45 @@ class ListDriveFilesTool(NovaTool):
         else:
             self._tokens = tokens
         self._timeout = timeout
-        self._http_get = http_get or httpx.get
+        self._mcp = mcp
+        _ = http_get
+
+    def _client(self) -> _McpCaller:
+        if self._mcp is not None:
+            return self._mcp
+        return GoogleMcpClient(DRIVE_MCP_URL, tokens=self._tokens, timeout=self._timeout)
 
     def execute(self, query: str = "") -> dict[str, Any]:
-        access = _oauth_access_or_error(self._tokens)
-        if isinstance(access, dict):
-            return access
+        err = oauth_ready_or_error(self._tokens)
+        if err is not None:
+            return {
+                **err,
+                "speak": "Google Drive is unavailable. Reconnect Google in Settings.",
+            }
 
-        q_parts = ["trashed=false"]
         needle = (query or "").strip()
         for prefix in ("named as ", "named ", "called ", "as "):
             if needle.lower().startswith(prefix):
                 needle = needle[len(prefix) :].strip()
                 break
-        if needle:
-            safe = needle.replace("\\", "\\\\").replace("'", "\\'")
-            q_parts.append(f"name contains '{safe}'")
-        params = {
-            "pageSize": 8,
-            "fields": "files(id,name,mimeType,modifiedTime)",
-            "orderBy": "modifiedTime desc",
-            "q": " and ".join(q_parts),
-        }
+
         try:
-            resp = self._http_get(
-                DRIVE_FILES_URL,
-                params=params,
-                headers={"Authorization": f"Bearer {access}"},
-                timeout=self._timeout,
-            )
-            resp.raise_for_status()
-            files = [
-                {
-                    "id": str(f.get("id") or ""),
-                    "name": str(f.get("name") or "untitled"),
-                    "mime_type": str(f.get("mimeType") or ""),
-                    "modified": str(f.get("modifiedTime") or ""),
-                }
-                for f in (resp.json().get("files") or [])
-                if isinstance(f, dict)
-            ]
+            if needle:
+                safe = needle.replace("\\", "\\\\").replace("'", "\\'")
+                raw = self._client().call_tool(
+                    "search_files",
+                    {"query": f"title contains '{safe}'", "pageSize": 8},
+                )
+            else:
+                raw = self._client().call_tool(
+                    "list_recent_files",
+                    {"pageSize": 8, "orderBy": "lastModified"},
+                )
+            payload = unpack_mcp_result(raw)
         except Exception as exc:  # noqa: BLE001
             return {
                 "status": "unavailable",
-                "reason": "drive_api_error",
+                "reason": "drive_mcp_error",
                 "error": str(exc)[:300],
                 "hint": (
                     "If 403 insufficient scopes, Disconnect then Connect Google again "
@@ -101,12 +99,14 @@ class ListDriveFilesTool(NovaTool):
                 "speak": "Google Drive is unavailable. Reconnect Google in Settings.",
             }
 
+        files = _normalize_files(payload)
         speak = _speak_files(files, needle)
         return {
             "status": "success",
             "file_count": len(files),
             "files": files,
             "speak": speak,
+            "source": "google_drive_mcp",
         }
 
 
@@ -133,6 +133,7 @@ class CreateDriveFolderTool(NovaTool):
         self,
         tokens: GoogleTokenProvider | None = _UNSET,
         timeout: float = 20.0,
+        mcp: _McpCaller | None = None,
         http_post: Callable[..., Any] | None = None,
     ):
         if tokens is _UNSET:
@@ -140,12 +141,24 @@ class CreateDriveFolderTool(NovaTool):
         else:
             self._tokens = tokens
         self._timeout = timeout
-        self._http_post = http_post or httpx.post
+        self._mcp = mcp
+        _ = http_post
+
+    def _client(self) -> _McpCaller:
+        if self._mcp is not None:
+            return self._mcp
+        return GoogleMcpClient(DRIVE_MCP_URL, tokens=self._tokens, timeout=self._timeout)
 
     def execute(self, name: str) -> dict[str, Any]:
-        access = _oauth_access_or_error(self._tokens)
-        if isinstance(access, dict):
-            return access
+        err = oauth_ready_or_error(self._tokens)
+        if err is not None:
+            return {
+                **err,
+                "speak": (
+                    "Could not create the Drive folder. "
+                    "Reconnect Google in Settings for write access."
+                ),
+            }
 
         folder_name = (name or "").strip()
         if not folder_name:
@@ -156,21 +169,15 @@ class CreateDriveFolderTool(NovaTool):
             }
 
         try:
-            resp = self._http_post(
-                DRIVE_FILES_URL,
-                json={"name": folder_name, "mimeType": FOLDER_MIME},
-                headers={
-                    "Authorization": f"Bearer {access}",
-                    "Content-Type": "application/json",
-                },
-                timeout=self._timeout,
+            raw = self._client().call_tool(
+                "create_file",
+                {"title": folder_name, "mimeType": FOLDER_MIME},
             )
-            resp.raise_for_status()
-            payload = resp.json()
+            payload = unpack_mcp_result(raw)
         except Exception as exc:  # noqa: BLE001
             return {
                 "status": "unavailable",
-                "reason": "drive_api_error",
+                "reason": "drive_mcp_error",
                 "error": str(exc)[:300],
                 "hint": (
                     "If 403 insufficient scopes, Disconnect then Connect Google again "
@@ -186,9 +193,32 @@ class CreateDriveFolderTool(NovaTool):
         return {
             "status": "success",
             "action": "created",
-            "folder": {"id": fid, "name": str(payload.get("name") or folder_name)},
+            "folder": {
+                "id": fid,
+                "name": str(payload.get("title") or payload.get("name") or folder_name),
+            },
             "speak": f"Created Drive folder {folder_name}.",
+            "source": "google_drive_mcp",
         }
+
+
+def _normalize_files(payload: dict[str, Any]) -> list[dict[str, str]]:
+    raw = payload.get("files") or []
+    out: list[dict[str, str]] = []
+    for f in raw:
+        if not isinstance(f, dict):
+            continue
+        out.append(
+            {
+                "id": str(f.get("id") or ""),
+                "name": str(f.get("title") or f.get("name") or "untitled"),
+                "mime_type": str(f.get("mimeType") or f.get("mime_type") or ""),
+                "modified": str(
+                    f.get("modifiedTime") or f.get("modified_time") or ""
+                ),
+            }
+        )
+    return out
 
 
 def _speak_files(files: list[dict[str, str]], query: str) -> str:

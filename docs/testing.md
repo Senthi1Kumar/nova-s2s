@@ -9,6 +9,10 @@ GitHub Actions (`.github/workflows/ci.yml`) runs **only**:
 
 It does **not** start `run_demo.py`, download GGUFs, or run live WebSocket E2E. That stays operator-run.
 
+Google Calendar/Gmail/Drive unit tests use in-memory MCP fakes (`ya29.fake`); they
+never load `.env` or call Google. Live OAuth/MCP checks are manual
+(`scripts/google_mcp_auth.py`) — see [google_workspace.md](google_workspace.md).
+
 ## Local ladder
 
 ```bash

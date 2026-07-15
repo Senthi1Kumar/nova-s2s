@@ -144,7 +144,7 @@ def build_registry(
         WeatherTool(),
         research,
         CheckEmailTool(),
-        CheckCalendarTool(),  # Google Calendar REST when OAuth present; else unavailable
+        CheckCalendarTool(),  # Google Calendar MCP when OAuth present; else unavailable
         CreateCalendarEventTool(),
         DeleteCalendarEventTool(),
         ListDriveFilesTool(),

@@ -43,7 +43,7 @@ CALENDAR_READ_SCOPES = (
 )
 
 # calendar.events covers list/create/update/delete; keep freebusy + list.readonly.
-# Gmail/Drive readonly for Workspace inbox + files (REST; MCP tools/call still preview-gated).
+# Gmail/Drive scopes for Workspace inbox + files (MCP tools/call).
 CALENDAR_SCOPES = (
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
     "https://www.googleapis.com/auth/calendar.events.freebusy",

@@ -117,6 +117,7 @@ flowchart LR
 | Doc | Contents |
 |-----|----------|
 | [docs/setup.md](docs/setup.md) | Install, llama.cpp, env, first run |
+| [docs/google_workspace.md](docs/google_workspace.md) | GCP OAuth, API enablement, Workspace MCP (Calendar/Gmail/Drive) |
 | [docs/pipeline.md](docs/pipeline.md) | Dual-LFM vs full turn paths, DriveAuth gates |
 | [docs/testing.md](docs/testing.md) | Test ladder, CI vs local, release gates |
 | [docs/milestones.md](docs/milestones.md) | M0–M6 status for this lineage |

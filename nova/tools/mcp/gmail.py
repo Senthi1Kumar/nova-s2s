@@ -1,27 +1,27 @@
-"""Personal Gmail inbox via OAuth + Gmail JSON API (read-only).
+"""Personal Gmail via OAuth + Workspace Gmail MCP.
 
-Caller: nova/server/tool_service.py build_registry (replaces GmailStubTool).
-Same pattern as calendar.py — REST until Workspace MCP tools/call unlocks.
+Caller: nova/server/tool_service.py build_registry.
+Uses remote MCP tools/call (search_threads / get_message).
 """
 from __future__ import annotations
 
-import base64
 import re
-from typing import Any
-
-import httpx
+from typing import Any, Protocol
 
 from nova.tools.base import NovaTool
-from nova.tools.mcp.calendar import _oauth_access_or_error
+from nova.tools.mcp.client import GMAIL_MCP_URL, GoogleMcpClient
 from nova.tools.mcp.oauth import GoogleTokenProvider
+from nova.tools.mcp.runtime import oauth_ready_or_error, unpack_mcp_result
 
 _UNSET: Any = object()
-GMAIL_MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
-GMAIL_MESSAGE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}"
+
+
+class _McpCaller(Protocol):
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any: ...
 
 
 class CheckEmailTool(NovaTool):
-    """Gmail inbox (OAuth + Gmail API): unread, latest, or summarize one message."""
+    """Gmail inbox (OAuth + Gmail MCP): unread, latest, or summarize one message."""
 
     name = "check_email"
     description = (
@@ -45,6 +45,7 @@ class CheckEmailTool(NovaTool):
         self,
         tokens: GoogleTokenProvider | None = _UNSET,
         timeout: float = 20.0,
+        mcp: _McpCaller | None = None,
         http_get=None,
     ):
         if tokens is _UNSET:
@@ -52,49 +53,40 @@ class CheckEmailTool(NovaTool):
         else:
             self._tokens = tokens
         self._timeout = timeout
-        self._http_get = http_get or httpx.get
+        self._mcp = mcp
+        _ = http_get
+
+    def _client(self) -> _McpCaller:
+        if self._mcp is not None:
+            return self._mcp
+        return GoogleMcpClient(GMAIL_MCP_URL, tokens=self._tokens, timeout=self._timeout)
 
     def execute(self, mode: str = "unread") -> dict[str, Any]:
-        access = _oauth_access_or_error(self._tokens)
-        if isinstance(access, dict):
-            return access
+        err = oauth_ready_or_error(self._tokens)
+        if err is not None:
+            return {
+                **err,
+                "speak": "Gmail is unavailable. Reconnect Google in Settings.",
+            }
 
         mode_key = (mode or "unread").strip().lower()
         if mode_key not in {"unread", "latest", "summarize"}:
             mode_key = "unread"
 
-        headers = {"Authorization": f"Bearer {access}"}
         if mode_key == "summarize":
-            return self._summarize(headers)
+            return self._summarize()
 
         q = "is:unread" if mode_key == "unread" else "in:inbox"
         max_n = 5 if mode_key == "unread" else 3
         try:
-            listed = self._http_get(
-                GMAIL_MESSAGES_URL,
-                params={"q": q, "maxResults": max_n},
-                headers=headers,
-                timeout=self._timeout,
+            raw = self._client().call_tool(
+                "search_threads", {"query": q, "pageSize": max_n}
             )
-            listed.raise_for_status()
-            ids = [m["id"] for m in (listed.json().get("messages") or []) if m.get("id")]
+            payload = unpack_mcp_result(raw)
         except Exception as exc:  # noqa: BLE001
             return _gmail_error(exc)
 
-        messages: list[dict[str, str]] = []
-        for mid in ids[:max_n]:
-            try:
-                resp = self._http_get(
-                    GMAIL_MESSAGE_URL.format(id=mid),
-                    params={"format": "metadata", "metadataHeaders": ["From", "Subject"]},
-                    headers=headers,
-                    timeout=self._timeout,
-                )
-                resp.raise_for_status()
-                messages.append(_normalize_message(resp.json()))
-            except Exception:  # noqa: BLE001
-                continue
-
+        messages = _threads_to_messages(payload)[:max_n]
         speak = _speak_messages(messages, mode_key)
         return {
             "status": "success",
@@ -102,37 +94,37 @@ class CheckEmailTool(NovaTool):
             "message_count": len(messages),
             "messages": messages,
             "speak": speak,
+            "source": "google_gmail_mcp",
         }
 
-    def _summarize(self, headers: dict[str, str]) -> dict[str, Any]:
-        """Fetch body of first unread, else latest inbox message."""
+    def _summarize(self) -> dict[str, Any]:
         for q in ("is:unread", "in:inbox"):
             try:
-                listed = self._http_get(
-                    GMAIL_MESSAGES_URL,
-                    params={"q": q, "maxResults": 1},
-                    headers=headers,
-                    timeout=self._timeout,
+                raw = self._client().call_tool(
+                    "search_threads", {"query": q, "pageSize": 1}
                 )
-                listed.raise_for_status()
-                msgs = listed.json().get("messages") or []
-                if not msgs or not msgs[0].get("id"):
-                    continue
-                mid = msgs[0]["id"]
-                resp = self._http_get(
-                    GMAIL_MESSAGE_URL.format(id=mid),
-                    params={"format": "full"},
-                    headers=headers,
-                    timeout=self._timeout,
-                )
-                resp.raise_for_status()
-                payload = resp.json()
+                payload = unpack_mcp_result(raw)
             except Exception as exc:  # noqa: BLE001
                 return _gmail_error(exc)
 
-            meta = _normalize_message(payload)
-            body = _extract_body_text(payload)
-            body_short = _clip_for_speech(body, 600)
+            messages = _threads_to_messages(payload)
+            if not messages:
+                continue
+            meta = messages[0]
+            mid = meta.get("id") or ""
+            body_short = ""
+            if mid:
+                try:
+                    raw_msg = self._client().call_tool(
+                        "get_message",
+                        {"messageId": mid, "messageFormat": "FULL_CONTENT"},
+                    )
+                    msg_payload = unpack_mcp_result(raw_msg)
+                    body_short = _clip_for_speech(_extract_mcp_body(msg_payload), 600)
+                    meta = {**meta, **_normalize_mcp_message(msg_payload)}
+                except Exception:  # noqa: BLE001
+                    body_short = _clip_for_speech(meta.get("preview") or "", 600)
+
             sender = (meta.get("from") or "unknown").split("<")[0].strip().rstrip(",")
             subject = meta.get("subject") or "no subject"
             if body_short:
@@ -148,6 +140,7 @@ class CheckEmailTool(NovaTool):
                 "mode": "summarize",
                 "message": {**meta, "body": body_short},
                 "speak": speak,
+                "source": "google_gmail_mcp",
             }
 
         return {
@@ -155,13 +148,14 @@ class CheckEmailTool(NovaTool):
             "mode": "summarize",
             "message": None,
             "speak": "There is no email to summarize.",
+            "source": "google_gmail_mcp",
         }
 
 
 def _gmail_error(exc: Exception) -> dict[str, Any]:
     return {
         "status": "unavailable",
-        "reason": "gmail_api_error",
+        "reason": "gmail_mcp_error",
         "error": str(exc)[:300],
         "hint": (
             "If 403 insufficient scopes, Disconnect then Connect Google again "
@@ -171,55 +165,54 @@ def _gmail_error(exc: Exception) -> dict[str, Any]:
     }
 
 
-def _header_map(payload: dict[str, Any]) -> dict[str, str]:
-    headers = ((payload.get("payload") or {}).get("headers")) or []
-    out: dict[str, str] = {}
-    for h in headers:
-        if isinstance(h, dict) and h.get("name"):
-            out[str(h["name"]).lower()] = str(h.get("value") or "")
+def _threads_to_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+    threads = payload.get("threads") or []
+    out: list[dict[str, str]] = []
+    for thread in threads:
+        if not isinstance(thread, dict):
+            continue
+        msgs = thread.get("messages") or []
+        if msgs and isinstance(msgs[0], dict):
+            out.append(_normalize_mcp_message(msgs[0]))
+        else:
+            out.append(
+                {
+                    "id": str(thread.get("id") or ""),
+                    "from": "unknown",
+                    "subject": "(no subject)",
+                    "preview": "",
+                }
+            )
     return out
 
 
-def _normalize_message(payload: dict[str, Any]) -> dict[str, str]:
-    headers = _header_map(payload)
+def _normalize_mcp_message(payload: dict[str, Any]) -> dict[str, str]:
+    sender = (
+        payload.get("sender")
+        or payload.get("from")
+        or payload.get("from_")
+        or "unknown"
+    )
+    subject = payload.get("subject") or "(no subject)"
+    preview = str(payload.get("snippet") or payload.get("preview") or "")[:160]
+    mid = payload.get("id") or payload.get("messageId") or ""
     return {
-        "id": str(payload.get("id") or ""),
-        "from": headers.get("from") or "unknown",
-        "subject": headers.get("subject") or "(no subject)",
-        "preview": str(payload.get("snippet") or "")[:160],
+        "id": str(mid),
+        "from": str(sender),
+        "subject": str(subject),
+        "preview": preview,
     }
 
 
-def _extract_body_text(payload: dict[str, Any]) -> str:
-    """Walk Gmail payload parts for text/plain (fallback text/html stripped)."""
-    plain: list[str] = []
-    html: list[str] = []
-
-    def walk(part: dict[str, Any]) -> None:
-        mime = str(part.get("mimeType") or "")
-        body = part.get("body") or {}
-        data = body.get("data")
-        if data and mime.startswith("text/"):
-            try:
-                raw = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-            except Exception:  # noqa: BLE001
-                raw = ""
-            if mime == "text/plain":
-                plain.append(raw)
-            elif mime == "text/html":
-                html.append(raw)
-        for child in part.get("parts") or []:
-            if isinstance(child, dict):
-                walk(child)
-
-    root = payload.get("payload")
-    if isinstance(root, dict):
-        walk(root)
-    text = "\n".join(plain).strip()
-    if not text and html:
-        text = re.sub(r"<[^>]+>", " ", html[0])
-        text = re.sub(r"\s+", " ", text).strip()
-    return text
+def _extract_mcp_body(payload: dict[str, Any]) -> str:
+    for key in ("plaintextBody", "plaintext_body", "body", "text"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    msg = payload.get("message")
+    if isinstance(msg, dict):
+        return _extract_mcp_body(msg)
+    return str(payload.get("snippet") or "")
 
 
 def _clip_for_speech(text: str, limit: int) -> str:

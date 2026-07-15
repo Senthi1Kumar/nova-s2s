@@ -49,10 +49,12 @@ Opens the tool UI at `http://127.0.0.1:8000/`. This is a process supervisor, not
 | Variable | Tool |
 |----------|------|
 | `TAVILY_API_KEY` / `BRAVE_API_KEY` / `SERPER_API_KEY` | Web search / research |
-| `GOOGLE_OAUTH_CLIENT_ID` / `SECRET` | Calendar, Gmail, Drive |
+| `GOOGLE_CLOUD_PROJECT` / `GOOGLE_OAUTH_CLIENT_ID` / `SECRET` | Calendar, Gmail, Drive (Workspace MCP) |
 | `DRIVEAUTH_*` | Payment auth (mock defaults are fine for demos) |
 
 Missing keys degrade the related tool to an explicit unavailable result; they do not crash the voice loop.
+
+Google Cloud Console steps (APIs, OAuth consent, MCP): [google_workspace.md](google_workspace.md).
 
 ## Thor single-model (full toolbox)
 

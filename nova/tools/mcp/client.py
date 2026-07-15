@@ -67,13 +67,27 @@ class GoogleMcpClient:
         if "text/event-stream" in ctype:
             data = _parse_sse_json(resp.text)
         else:
-            resp.raise_for_status()
-            data = resp.json()
-        if not resp.is_success and "error" not in (data or {}):
-            resp.raise_for_status()
+            try:
+                data = resp.json()
+            except Exception:  # noqa: BLE001
+                resp.raise_for_status()
+                raise
+        # MCP may return HTTP 4xx with a JSON-RPC result.isError body — prefer that.
         if isinstance(data, dict) and "error" in data:
             err = data["error"]
             raise RuntimeError(f"mcp_error: {err}")
+        if isinstance(data, dict) and "result" in data:
+            result = data.get("result")
+            if isinstance(result, dict) and result.get("isError"):
+                text = ""
+                for block in result.get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = str(block.get("text") or "")
+                        break
+                raise RuntimeError(text or "mcp_tool_error")
+            return data
+        if not resp.is_success:
+            resp.raise_for_status()
         return data if isinstance(data, dict) else {"result": data}
 
     def initialize(self) -> dict[str, Any]:

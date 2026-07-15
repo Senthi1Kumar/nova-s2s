@@ -258,16 +258,25 @@ def test_execute_preserves_drive_speak_filenames(tmp_path, monkeypatch):
 
     monkeypatch.setenv("DRIVEAUTH_USE_MOCK", "1")
 
-    def fake_get(url, params=None, headers=None, timeout=None):
-        return SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {
-                "files": [
-                    {"id": "a", "name": "Q3 Budget.xlsx", "mimeType": "application/vnd.ms-excel"},
-                    {"id": "b", "name": "Nova S notes.md", "mimeType": "text/markdown"},
-                ]
-            },
-        )
+    class _FakeMcp:
+        def call_tool(self, name, arguments=None):
+            assert name == "list_recent_files"
+            return {
+                "structuredContent": {
+                    "files": [
+                        {
+                            "id": "a",
+                            "title": "Q3 Budget.xlsx",
+                            "mimeType": "application/vnd.ms-excel",
+                        },
+                        {
+                            "id": "b",
+                            "title": "Nova S notes.md",
+                            "mimeType": "text/markdown",
+                        },
+                    ]
+                }
+            }
 
     registry = build_registry(VehicleDB(tmp_path / "vehicle.db"), driveauth_store=tmp_path / "da")
     registry["list_drive_files"] = ListDriveFilesTool(
@@ -276,7 +285,7 @@ def test_execute_preserves_drive_speak_filenames(tmp_path, monkeypatch):
             authenticated=lambda: True,
             get_access_token=lambda: "tok",
         ),
-        http_get=fake_get,
+        mcp=_FakeMcp(),
     )
     app.dependency_overrides[get_registry] = lambda: registry
     try:
