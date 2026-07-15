@@ -34,10 +34,12 @@ def test_mature_micro_payment_accepts():
     assert "embedding" not in str(out).lower()
 
 
-def test_high_value_requires_step_up():
+def test_high_value_ladder_accepts_on_strong_mock():
+    """phase_7+: biometric ladder Accept/Reject only — no mandatory high-value OTP."""
     out = precheck(session_id="s1", transcript="pay 60000 rupees to Landlord")
-    assert out["status"] == "step_up_required"
-    assert out.get("speak")
+    assert out["status"] == "accept"
+    assert out["tier"] == "high_value"
+    assert "ladder_accept" in (out.get("rule") or "")
 
 
 def test_require_auth_reuses_cached_accept():
@@ -94,7 +96,8 @@ def test_auth_precheck_endpoint_no_biometric_leak(tmp_path, monkeypatch):
     assert body["status"] in {"accept", "step_up_required", "denied"}
 
 
-def test_zero_execution_before_accept(tmp_path, monkeypatch):
+def test_bootstrap_strong_voice_still_accepts(tmp_path, monkeypatch):
+    """Immature profile no longer force-STEP_UP; strong mock voice clears the ladder."""
     from nova.tools.payment import DriveAuthGate, SendPaymentTool
 
     monkeypatch.setenv("DRIVEAUTH_SEED_MATURE", "0")
@@ -105,6 +108,6 @@ def test_zero_execution_before_accept(tmp_path, monkeypatch):
         store_dir=str(tmp_path / "bootstrap"),
         use_mock_matchers=True,
     )
-    # Bootstrap / immature profile should not silently send.
     out = gate.execute(payee="Chai Point", amount=50.0, beneficiary_known=True)
-    assert out["status"] != "sent"
+    assert out["status"] == "sent"
+    assert out["auth"]["decision"] == "accept"

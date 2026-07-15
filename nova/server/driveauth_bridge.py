@@ -247,10 +247,32 @@ def require_payment_auth(
     beneficiary_known: bool = False,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Second-layer gate at send_payment execute (may reuse cached ACCEPT)."""
+    """Second-layer gate at send_payment execute (may reuse cached ACCEPT).
+
+    In production (``DRIVEAUTH_USE_MOCK=0``), only a fresh sensor-backed
+    precheck ACCEPT may authorize. DriveAuth's per-modality mock fallbacks
+    must never silently ACCEPT an unenrolled store.
+    """
     auth = get_auth()
     if session_id and auth.session_id != session_id:
         auth._session_id = session_id
+
+    if not _mock_enabled():
+        if auth._can_reuse_cached(float(amount), bool(beneficiary_known)):
+            return _normalize(auth._last_result)
+        return {
+            "status": "denied",
+            "decision": "REJECT",
+            "trust": 0.0,
+            "risk": 1.0,
+            "tier": "payment",
+            "rule": "missing_sensor_evidence",
+            "session_id": session_id or auth.session_id,
+            "explanations": ["production execute requires prior sensor-backed ACCEPT"],
+            "speak": "I couldn't verify your identity for that payment. Stopping.",
+            "reason": "missing_sensor_evidence",
+        }
+
     result = auth.require_auth(
         tier="payment",
         amount=float(amount),

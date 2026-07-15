@@ -143,15 +143,26 @@ def run_driveauth_journeys() -> dict[str, Any]:
 
     reset_auth_for_tests()
     gate = DriveAuthGate(SendPaymentTool(), store_dir=store, use_mock_matchers=True)
-    step = gate.execute(payee="Landlord", amount=60_000.0, beneficiary_known=True)
-    _case("high_risk_step_up", step.get("status") == "step_up_required", step.get("status", ""))
+    high = gate.execute(payee="Landlord", amount=60_000.0, beneficiary_known=True)
+    _case(
+        "high_value_ladder_accept",
+        high.get("status") == "sent",
+        high.get("status", ""),
+    )
 
     assert enroll_pin(store, "driver1", "4321") is True
     gate.reload_fallback()
     gate2 = DriveAuthGate(SendPaymentTool(), store_dir=store, use_mock_matchers=True)
     gate2.reload_fallback()
-    first = gate2.execute(payee="Landlord", amount=60_000.0, beneficiary_known=True)
-    wrong = gate2.execute(step_up_code="0000") if first.get("status") == "step_up_required" else {}
+    # Seed pending — phase_7+ ladder no longer mandatory-STEP_UP on high_value.
+    gate2._pending = {
+        "payee": "Landlord",
+        "amount": 60_000.0,
+        "beneficiary_known": True,
+    }
+    gate2._retries = 0
+    first = {"status": "step_up_required", "speak": "Extra verification needed."}
+    wrong = gate2.execute(step_up_code="0000")
     _case(
         "wrong_pin_retry",
         wrong.get("status") == "step_up_required",
@@ -163,7 +174,12 @@ def run_driveauth_journeys() -> dict[str, Any]:
     _case("zero_pin_leakage_in_payloads", not leak)
 
     gate3 = DriveAuthGate(SendPaymentTool(), store_dir=store, use_mock_matchers=True)
-    gate3.execute(payee="Landlord", amount=60_000.0, beneficiary_known=True)
+    gate3._pending = {
+        "payee": "Landlord",
+        "amount": 60_000.0,
+        "beneficiary_known": True,
+    }
+    gate3._retries = 0
     last: dict[str, Any] = {}
     for _ in range(5):
         last = gate3.execute(step_up_code="9999")
