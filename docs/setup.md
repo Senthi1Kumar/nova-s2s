@@ -55,7 +55,7 @@ hf download AutoArk-AI/Audio8-ASR-0.1B
 NOVA_CONFIG=nova/config.audio8.yaml uv run python scripts/run_demo.py
 ```
 
-Revert anytime by unsetting `NOVA_CONFIG` (or setting `stt: sensevoice` again). Audio8 is non-streaming full-segment ASR after Silero VAD — same contract as SenseVoice.
+Revert anytime by unsetting `NOVA_CONFIG` (or setting `stt: sensevoice` again). Audio8 is non-streaming full-segment ASR after Silero VAD — same contract as SenseVoice (Audio8 itself has no VAD). `config.audio8.yaml` uses the official HF ASR prompt and `audio8_skip_progressive: true`. If transcripts collapse to `English English…`, you hit a known Audio8-0.1B prompt-regurgitation bug — switch back to SenseVoice (`unset NOVA_CONFIG`).
 
 ## Optional keys
 

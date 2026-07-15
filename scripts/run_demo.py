@@ -232,6 +232,8 @@ class DemoStack:
             ]
         elif stt == "audio8":
             # Opt-in A/B vs SenseVoice. CC-BY-NC-4.0 (research/demo).
+            # Official HF prompt (no language word in prompt — avoids English loops).
+            # skip_progressive: Audio8 has no VAD; Silero owns turn boundaries.
             argv += [
                 "--audio8_stt_model_name",
                 cfg.get("audio8_model", "AutoArk-AI/Audio8-ASR-0.1B"),
@@ -241,7 +243,16 @@ class DemoStack:
                 str(cfg.get("audio8_max_new_tokens", 128)),
                 "--audio8_stt_attn_impl",
                 str(cfg.get("audio8_attn_impl", "eager")),
+                "--audio8_stt_language",
+                str(cfg.get("audio8_language", "en")),
             ]
+            prompt = cfg.get("audio8_prompt")
+            if prompt:
+                argv += ["--audio8_stt_prompt", str(prompt)]
+            if cfg.get("audio8_skip_progressive", True):
+                argv += ["--audio8_stt_skip_progressive"]
+            else:
+                argv += ["--no_audio8_stt_skip_progressive"]
         elif stt == "paraformer":
             # Legacy FunASR Paraformer / Fun-ASR-Nano path.
             argv += [

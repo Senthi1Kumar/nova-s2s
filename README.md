@@ -4,7 +4,7 @@
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://docs.astral.sh/uv/)
 [![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
 
-On-device in-vehicle voice assistant: **cascaded** SenseVoice → llama.cpp GGUF(s) → Kokoro, with a FastAPI tool service and mock-first DriveAuth for payments.
+On-device in-vehicle voice assistant: **cascaded** STT (SenseVoice default; Audio8 opt-in) → llama.cpp GGUF(s) → Kokoro, with a FastAPI tool service and mock-first DriveAuth for payments.
 
 **Default (small GPU):** dual LFM — 230M tool agent (`:8081`) + 350M articulator (`:8080`).  
 **Thor / single GGUF:** `NOVA_CONFIG=nova/config.thor.yaml` — one model, full toolbox (`tool_route_mode: full`), no `:8081`.
@@ -13,7 +13,7 @@ On-device in-vehicle voice assistant: **cascaded** SenseVoice → llama.cpp GGUF
 flowchart TB
   UI["Browser UI :8000"]
   WS["s2s realtime WS :8766"]
-  STT["SenseVoice STT"]
+  STT["STT: SenseVoice / Audio8"]
   AUTH["DriveAuth precheck"]
   R230["LFM 230M tool agent :8081"]
   TOOLS["Tool service :8000"]
@@ -39,6 +39,7 @@ The speak model must stay free to stream TTS while tools run. A single native-au
 | [speech-to-speech](https://github.com/huggingface/speech-to-speech) | Hugging Face (git submodule `cloned/speech-to-speech`) | Realtime VAD/STT/LLM/TTS loop; Nova patches add route/agent/DriveAuth hooks |
 | [DriveAuth Edge](https://github.com/Senthi1Kumar/Drive_auth_edge) | Parth's upstream ([`couder-04/Drive_auth_edge`](https://github.com/couder-04/Drive_auth_edge)); submodule tracks this repo (fork) | **Core** payment Trust/Risk gate; Nova owns only the HTTP adapter |
 | llama.cpp `llama-server` | **Build locally** — do not commit the binary | Serves GGUFs on `:8080` (and `:8081` in dual-LFM mode) |
+| [Audio8-ASR-0.1B](https://huggingface.co/AutoArk-AI/Audio8-ASR-0.1B) | AutoArk (CC-BY-NC-4.0) | Opt-in STT A/B via `nova/config.audio8.yaml` — research/demo only |
 
 LiteRT / LiteRT-LM wrappers from early experiments are **not** part of this runtime and are excluded from the published tree.
 
@@ -80,11 +81,23 @@ Open **http://127.0.0.1:8000/** → **Call**. `Ctrl-C` stops the stack.
 
 `scripts/run_demo.py` is the **launcher** (not a test). It starts llama-server(s), the tool service, and s2s, then waits.
 
+
+## STT: SenseVoice (default) vs Audio8 (opt-in)
+
+Default `nova/config.yaml` uses **SenseVoiceSmall**. For an A/B try of **Audio8-ASR-0.1B** (CC-BY-NC-4.0 — research/demo only):
+
+```bash
+hf download AutoArk-AI/Audio8-ASR-0.1B
+NOVA_CONFIG=nova/config.audio8.yaml uv run python scripts/run_demo.py
+```
+
+Uses the official HF prompt (`Please transcribe this audio.`), final-only decode after Silero VAD. Revert with `unset NOVA_CONFIG`. Details: [docs/setup.md](docs/setup.md#stt-sensevoice-default-vs-audio8-opt-in-ab).
+
 ## Tests (map)
 
 | Layer | Command | Models / GPU? | What it covers |
 |-------|---------|---------------|----------------|
-| **CI (GitHub Actions)** | `.github/workflows/ci.yml` | No | `fast` + DriveAuth mock unit tests only |
+| **CI (GitHub Actions)** | `.github/workflows/ci.yml` | No | Offline: `fast` + DriveAuth package + `all-local` (no live E2E) |
 | **Fast** | `bash scripts/run_tests.sh fast` | No | Deterministic Nova contracts |
 | **All local** | `bash scripts/run_tests.sh all-local` | No | Component + s2s regressions + eval + integration |
 | **DriveAuth package** | `uv run pytest -q Drive_auth_edge/tests` | No | Standalone Trust/Risk suite (Parth’s package) |
@@ -107,7 +120,9 @@ flowchart LR
 
 | File | Purpose |
 |------|---------|
-| `nova/config.yaml` | STT/TTS devices, WS ports, `tool_route_mode`, DriveAuth demo flags |
+| `nova/config.yaml` | Default demo: SenseVoice STT, dual LFM, DriveAuth |
+| `nova/config.audio8.yaml` | Opt-in Audio8 ASR A/B (`NOVA_CONFIG=…`) |
+| `nova/config.thor.yaml` | Single GGUF + full toolbox |
 | `nova/launch/models.yaml` | GGUF profiles (`gguf_path`, ctx, GPU layers, ports) |
 | `.env` | `LLAMA_SERVER_BIN`, Google OAuth, Tavily/Brave, `DRIVEAUTH_*` |
 | `prompts/soul.md` | Articulator system persona |
@@ -128,6 +143,7 @@ flowchart LR
 - **DriveAuth Edge** — authored by **Parth** ([couder-04](https://github.com/couder-04/Drive_auth_edge)); this repository vendors the [`Senthi1Kumar/Drive_auth_edge`](https://github.com/Senthi1Kumar/Drive_auth_edge) fork as submodule `Drive_auth_edge` and wires it into the payment path. Nova does not reimplement Trust/Risk/policy.
 - **speech-to-speech** — [Hugging Face](https://github.com/huggingface/speech-to-speech), adapted for Nova hooks.
 - **llama.cpp** — build `llama-server` locally.
+- **Audio8-ASR** — [AutoArk-AI/Audio8-ASR-0.1B](https://huggingface.co/AutoArk-AI/Audio8-ASR-0.1B) (CC-BY-NC-4.0), opt-in STT only.
 
 ## Single model (Thor / Jetson — full toolbox)
 

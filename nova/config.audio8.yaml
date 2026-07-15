@@ -9,8 +9,13 @@ llm_profile: lfm2.5-350m-f16
 stt: audio8
 stt_device: cuda
 audio8_model: AutoArk-AI/Audio8-ASR-0.1B
-audio8_max_new_tokens: 128
+audio8_max_new_tokens: 64
 audio8_attn_impl: eager
+# language tag only; prompt is official HF "Please transcribe this audio."
+# (Do not put "English" in audio8_prompt — causes English-English loops.)
+audio8_language: en
+# Final-only decode. Audio8 has no built-in VAD; Silero owns turn boundaries.
+audio8_skip_progressive: true
 
 # Keep SenseVoice keys for easy flip back without editing this file elsewhere.
 sensevoice_model: FunAudioLLM/SenseVoiceSmall

@@ -115,7 +115,7 @@ models:
       - "1.05"
 
   # LFM2.5-230M Q4_K_M — CPU tool-agent sidecar (port 8081). Sees full toolbox;
-  # speak stays on 350M GPU. Prefer Q4_K_M (~153 MB).
+  # speak stays on 350M GPU. Prefer Q4_K_M (~153 MB). Kept as alternate profile.
   - name: lfm2.5-230m-q4
     gguf_path: runtime/models/LFM2.5-230M-Q4_K_M.gguf
     ctx: 4096
@@ -133,6 +133,30 @@ models:
       - "50"
       - "--top-p"
       - "0.1"
+      - "--repeat-penalty"
+      - "1.05"
+
+  # FunctionGemma 270M Q4_0 — default CPU tool-agent sidecar (port 8081).
+  # Specialized for function calling; speak stays on LFM 350M GPU (:8080).
+  # GGUF: unsloth/functiongemma-270m-it-GGUF (Q4_0 ~242 MB). Low temp for
+  # stable tool picks; --jinja required for chat-completions tool schemas.
+  - name: functiongemma-270m-q4
+    gguf_path: runtime/models/functiongemma-270m-it-Q4_0.gguf
+    ctx: 4096
+    n_gpu_layers: 0
+    port: 8081
+    args:
+      - "--jinja"
+      - "-fa"
+      - "on"
+      - "--cache-reuse"
+      - "256"
+      - "--temp"
+      - "0.1"
+      - "--top-k"
+      - "64"
+      - "--top-p"
+      - "0.95"
       - "--repeat-penalty"
       - "1.05"
 
