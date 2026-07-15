@@ -142,14 +142,14 @@ class DemoStack:
         return base_url
 
     def _start_router_llm(self, cfg: dict) -> str | None:
-        """Optional second llama-server for tool_route_mode=model (230M CPU)."""
+        """Optional second llama-server for tool_route_mode=model (CPU sidecar)."""
         route_mode = str(
             cfg.get("tool_route_mode") or os.environ.get("NOVA_TOOL_ROUTE_MODE") or "full"
         )
         if route_mode not in {"model", "agent", "router"}:
             self._router_base_url = None
             return None
-        profile = str(cfg.get("router_llm_profile") or "lfm2.5-230m-q4")
+        profile = str(cfg.get("router_llm_profile") or "functiongemma-270m-q4")
         print(f"Starting tool-router llama-server (profile={profile!r}) ...")
         try:
             base_url = self.router_supervisor.start(profile, health_timeout=60.0)
@@ -229,6 +229,18 @@ class DemoStack:
                 stt_device,
                 "--sensevoice_stt_language",
                 str(cfg.get("sensevoice_language", "en")),
+            ]
+        elif stt == "audio8":
+            # Opt-in A/B vs SenseVoice. CC-BY-NC-4.0 (research/demo).
+            argv += [
+                "--audio8_stt_model_name",
+                cfg.get("audio8_model", "AutoArk-AI/Audio8-ASR-0.1B"),
+                "--audio8_stt_device",
+                stt_device,
+                "--audio8_stt_max_new_tokens",
+                str(cfg.get("audio8_max_new_tokens", 128)),
+                "--audio8_stt_attn_impl",
+                str(cfg.get("audio8_attn_impl", "eager")),
             ]
         elif stt == "paraformer":
             # Legacy FunASR Paraformer / Fun-ASR-Nano path.

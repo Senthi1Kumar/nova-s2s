@@ -44,6 +44,19 @@ uv run python scripts/run_demo.py
 
 Opens the tool UI at `http://127.0.0.1:8000/`. This is a process supervisor, not a test.
 
+### STT: SenseVoice (default) vs Audio8 (opt-in A/B)
+
+Default [`nova/config.yaml`](../nova/config.yaml) uses **SenseVoiceSmall** (`stt: sensevoice`). That path stays supported.
+
+To try **Audio8-ASR-0.1B** ([HF](https://huggingface.co/AutoArk-AI/Audio8-ASR-0.1B), CC-BY-NC-4.0 — research/demo only) without changing the default:
+
+```bash
+hf download AutoArk-AI/Audio8-ASR-0.1B
+NOVA_CONFIG=nova/config.audio8.yaml uv run python scripts/run_demo.py
+```
+
+Revert anytime by unsetting `NOVA_CONFIG` (or setting `stt: sensevoice` again). Audio8 is non-streaming full-segment ASR after Silero VAD — same contract as SenseVoice.
+
 ## Optional keys
 
 | Variable | Tool |
