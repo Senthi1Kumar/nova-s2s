@@ -25,7 +25,7 @@ dependencies = [
     "misaki[en]>=0.9.4",
     "kokoro>=0.9.4",
     "speech-to-speech",
-    "driveauth-edge",
+    "driveauth-edge[face]",
     "funasr>=1.1.6",
 ]
 
