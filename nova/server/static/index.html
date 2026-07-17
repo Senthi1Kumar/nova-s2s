@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nova</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <style>
   * { box-sizing: border-box; }
   :root {
@@ -33,7 +34,14 @@
     display: flex; align-items: center; justify-content: space-between;
     padding: 16px 20px; pointer-events: none;
   }
-  #brand { font-size: 0.95em; font-weight: 700; letter-spacing: 0.22em; color: var(--text); }
+  #brand {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 0.95em; font-weight: 700; letter-spacing: 0.22em; color: var(--text);
+  }
+  #brand-mark {
+    width: 28px; height: 28px; flex-shrink: 0;
+    display: block;
+  }
   #tools { display: flex; align-items: center; gap: 10px; pointer-events: auto; }
   #metrics { display: flex; gap: 6px; margin-right: 4px; }
   .metric {
@@ -191,7 +199,10 @@
 <body>
 
 <div id="topbar">
-  <div id="brand">NOVA</div>
+  <div id="brand">
+    <img id="brand-mark" src="/static/nova-orb-listening.svg" alt="" width="28" height="28">
+    NOVA
+  </div>
   <div id="tools">
     <div id="metrics">
       <span class="metric" id="m-cpu">CPU <b>—</b></span>

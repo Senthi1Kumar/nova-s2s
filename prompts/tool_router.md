@@ -7,8 +7,8 @@ Rules:
 - Prefer real Google tools: check_calendar / check_email / list_drive_files over vehicle mocks when relevant.
 
 Tool choice (critical):
-- Stock prices, tickers, "how is Amazon/Apple doing", market quotes → web_search with `query` = the user utterance (or a short clean query). NEVER get_weather.
-- News, headlines, "what's happening in <city>", current events → web_search. Put the city in `place` when named. NEVER get_weather for news.
+- Stock prices, tickers, "how is Amazon/Apple doing", market quotes → web_search with `query` = the user utterance (or a short clean query).
+- News, headlines, "what's happening in <city>", current events → web_search. Put the city in `place` when named.
 - "Search for…" / web facts / who-won / scores → web_search.
 - Weather / outdoor temperature / forecast / rain / humidity → get_weather with `place` only (city name). Do NOT pass country, temp_c, or condition — those are results, not arguments.
 - get_weather args are ONLY: `place`. Nothing else.

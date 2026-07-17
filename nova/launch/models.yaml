@@ -160,3 +160,48 @@ models:
       - "--repeat-penalty"
       - "1.05"
 
+  # prism-ml/Bonsai-27B-gguf — 1-bit Qwen3.6-27B (~3.9 GB). Thor / Jetson
+  # single-model path. Needs PrismML llama.cpp: https://github.com/PrismML-Eng/llama.cpp
+  #   `hf download prism-ml/Bonsai-27B-gguf Bonsai-27B-Q1_0.gguf --local-dir runtime/models`
+  # Sampling from HF README. Point config.thor.yaml: llm_profile: bonsai-27b-q1
+  - name: bonsai-27b-q1
+    gguf_path: runtime/models/Bonsai-27B-Q1_0.gguf
+    ctx: 8192
+    n_gpu_layers: 999
+    port: 8080
+    args:
+      - "--jinja"
+      - "-fa"
+      - "on"
+      - "--cache-reuse"
+      - "256"
+      - "--temp"
+      - "0.7"
+      - "--top-p"
+      - "0.95"
+      - "--top-k"
+      - "20"
+
+  # Same + DSpark Q4_1 drafter (~1.79 GB) — Thor only (~5.7 GB weights + KV).
+  # HF claims ~1.37x decode on CUDA. Draft flags match our MTP-style profile.
+  #   hf download prism-ml/Bonsai-27B-gguf Bonsai-27B-dspark-Q4_1.gguf --local-dir runtime/models
+  - name: bonsai-27b-q1-dspark
+    gguf_path: runtime/models/Bonsai-27B-Q1_0.gguf
+    ctx: 8192
+    n_gpu_layers: 999
+    port: 8080
+    args:
+      - "--jinja"
+      - "-fa"
+      - "on"
+      - "--cache-reuse"
+      - "256"
+      - "--temp"
+      - "0.7"
+      - "--top-p"
+      - "0.95"
+      - "--top-k"
+      - "20"
+      - "--model-draft"
+      - "runtime/models/Bonsai-27B-dspark-Q4_1.gguf"
+

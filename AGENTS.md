@@ -14,7 +14,7 @@ Do not import or revive the LiteRT / LiteRT-LM track (`nova/engine`, `nova/serve
 
 ## DriveAuth
 
-Package: `Drive_auth_edge` (Parth / couder-04). Nova owns only `nova/server/driveauth_bridge.py` and payment wiring. Do not copy Trust/Risk/policy logic into Nova.
+Package: `Drive_auth_edge`. Nova owns only `nova/server/driveauth_bridge.py` and payment wiring. Do not copy Trust/Risk/policy logic into Nova.
 
 ## Verification
 
@@ -28,5 +28,4 @@ See [docs/testing.md](docs/testing.md), [docs/pipeline.md](docs/pipeline.md), [d
 
 - Do not commit `.env`, GGUFs, `llama-server` binaries, or `runtime/`.
 - Do not `git commit` unless the user explicitly asks; prefer proposing the message and file list.
-- User runs long GPU/demo jobs and pastes output back.
 - Pin fastapi / starlette / uvicorn together when touching HTTP deps.

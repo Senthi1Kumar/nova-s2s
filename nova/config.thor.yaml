@@ -4,12 +4,31 @@
 # Point llm_profile at a profile in nova/launch/models.yaml whose gguf_path
 # exists on the board (override paths in models.yaml or symlink under runtime/models/).
 
-llm_profile: gemma-4-12b-it-q4
+# Single LLM: Bonsai 1-bit (~3.9 GB). Needs PrismML llama.cpp + GGUF on disk.
+# Flip to bonsai-27b-q1-dspark after Q1 alone loads cleanly.
+# llm_profile: gemma-4-e2b-it-q2
+# llm_profile: gemma-4-12b-it-q4
+llm_profile: bonsai-27b-q1
 
-stt: sensevoice
+stt: audio8
 stt_device: cuda
+audio8_model: AutoArk-AI/Audio8-ASR-0.1B
+audio8_max_new_tokens: 64
+audio8_attn_impl: eager
+# language tag only; prompt is official HF "Please transcribe this audio."
+# (Do not put "English" in audio8_prompt — causes English-English loops.)
+audio8_language: en
+# Final-only decode. Audio8 has no built-in VAD; Silero owns turn boundaries.
+audio8_skip_progressive: true
+
+# Keep SenseVoice keys for easy flip back without editing this file elsewhere.
 sensevoice_model: FunAudioLLM/SenseVoiceSmall
 sensevoice_language: en
+
+# stt: sensevoice
+# stt_device: cuda
+# sensevoice_model: FunAudioLLM/SenseVoiceSmall
+# sensevoice_language: en
 
 tts: kokoro
 tts_device: cuda

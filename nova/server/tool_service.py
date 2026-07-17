@@ -38,6 +38,7 @@ import psutil
 import yaml
 from fastapi import Depends, FastAPI
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from nova.harness.jobs import JobManager
@@ -272,6 +273,7 @@ app = FastAPI(title="Nova Tool Service")
 # track (imports ``nova.engine`` and loads a real model at startup); this
 # demo path must never touch it (see CLAUDE.md).
 _STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 _SOUL_PATH = Path(__file__).parent.parent.parent / "prompts" / "soul.md"
 _CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
 
