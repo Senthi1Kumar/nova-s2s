@@ -1,0 +1,58 @@
+# Nova-Hailo OEM rollback — PTT local chat only (no tools / no KWS)
+# Callers: NOVA_HAILO_PROFILE=oem_rollback scripts/run_demo_oem.sh
+
+model:
+  llm_hef: qwen2
+  whisper_hef: base
+  tts_engine: piper
+  piper_onnx: models/piper/en_US-amy-low.onnx
+  max_tokens: 24
+  temperature: 0.15
+  seed: 42
+  no_think: true
+
+llm:
+  no_think: true
+
+pipeline:
+  tool_route_mode: off
+  multi_tool_rounds: 0
+  clear_context_each_turn: true
+  sequential_stt: false
+  stream_tts: true
+  voice_one_sentence: true
+  first_chunk_min_chars: 20
+  max_history_turns: 0
+  session_idle_sec: 30
+  validate_before_speak: true
+  genai_serial: true
+
+auth:
+  enabled: false
+  payment_keywords: []
+  confirm_keywords: []
+  deny_keywords: []
+
+voice:
+  vad: true
+  no_tts: false
+  wait_tts: false
+  wait_tts_drain: true
+  playback: browser
+
+web:
+  host: 0.0.0.0
+  port: 8766
+
+wake:
+  mode: ptt
+  kws_enabled: false
+
+pvad:
+  enabled: false
+
+tools:
+  enable_in_prompt: false
+  profile: off
+  enabled: []
+  write_enabled: false

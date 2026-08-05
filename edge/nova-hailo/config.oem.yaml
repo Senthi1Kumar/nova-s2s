@@ -1,0 +1,114 @@
+# Nova-Hailo OEM profile
+# Callers: AppConfig.load when NOVA_HAILO_CONFIG / NOVA_HAILO_PROFILE=oem
+# Stable measured: Whisper-Base × Qwen2-1.5B × Silero × Piper; HailoRT 5.1.1
+
+model:
+  llm_hef: qwen2
+  # CPU STT via parakeet.cpp C API. Measured on a recorded real-mic corpus:
+  # WER 0.167 near / 0.20 far vs Whisper-Base 0.333 / 0.60, 292ms vs 344ms, and
+  # the only engine that transcribes "Nova". Set whisper_hef to roll back.
+  stt_engine: parakeet
+  parakeet_decoder: tdt
+  # ASR A/B: point at any parakeet.cpp gguf. f16 is upstream-recommended and
+  # measured ~14% faster than q8_0 with identical near-field transcripts.
+  parakeet_model: models/parakeet/tdt_ctc-110m-f16.gguf
+  # parakeet_model: models/parakeet/tdt-0.6b-v2-f16.gguf           # best far-field WER 0.154, ~6.9s/utt
+  # parakeet_model: models/parakeet/realtime_eou_120m-v1-f16.gguf  # streaming + end-of-utterance
+  whisper_hef: base
+  # Inflect-Nano-v2 ONNX, 24 kHz mono, torch-free. Measured on the Pi: RTF ~0.18
+  # (351 ms for 1.95 s audio), init 0.72 s. Piper stays the one-line rollback.
+  tts_engine: inflect
+  inflect_speed: 1.0
+  inflect_variation: 0.667
+  inflect_seed: 7
+  kokoro_voice: af_sarah
+  piper_onnx: models/piper/en_US-amy-low.onnx
+  max_tokens: 64
+  temperature: 0.5
+  seed: 42
+  no_think: true
+
+llm:
+  no_think: true
+
+pipeline:
+  tool_route_mode: allowlist
+  multi_tool_rounds: 1
+  clear_context_each_turn: false
+  # Device-side KV reuse: send only the new user turn after seeding; compact at
+  # 70% of the compiled 2048 ceiling. Set false to fall back to re-prefill.
+  native_context: true
+  ctx_compact_ratio: 0.7
+  sequential_stt: false
+  stream_tts: true
+  # Stop at the first complete sentence. Was false only to work around the
+  # double-playback truncation, which is fixed; leaving it false made every
+  # turn run the full token budget (~9s at 6.95 tok/s).
+  voice_one_sentence: true
+  first_chunk_min_chars: 24
+  max_history_turns: 2
+  session_idle_sec: 45
+  validate_before_speak: true
+  genai_serial: true
+
+auth:
+  enabled: false
+  payment_keywords: []
+  confirm_keywords: []
+  deny_keywords: []
+
+voice:
+  vad: true
+  vad_aggressiveness: 1
+  vad_energy_threshold: 0.2
+  no_tts: false
+  wait_tts: false
+  wait_tts_drain: true
+  # Speaker feeds the mic on this hat and browser AEC does not cancel it, so VAD
+  # hears Nova and self-barges (echo + chopped playback). Keep false until pVAD
+  # or hardware AEC is proven; the UI stop button still interrupts.
+  barge_in_while_speaking: false
+  echo_tail_ms: 400
+  input_device: wm8960
+  output_device: wm8960
+  # "both" plays every clause twice ~1s apart (once via ALSA, once via the
+  # browser's WM8960 output through PipeWire), which desyncs and re-feeds the
+  # mic so echo never clears -- measured, see CHANGELOG.md. browser alone
+  # drives the WM8960 speaker through PipeWire.
+  playback: browser
+
+web:
+  host: 0.0.0.0
+  port: 8766
+
+wake:
+  mode: ptt
+  kws_enabled: false
+  kws_threshold: 0.65
+
+pvad:
+  enabled: false
+  model_dir: models/FireRedChat-pvad
+  barge_in_threshold: 0.55
+  barge_in_frames: 2
+
+tools:
+  # v0.0.1 is conversation-only. web_search/deep_research/summarizer are built
+  # and tested (see nova_hailo/tools/search_mcp.py, research_jobs.py,
+  # search_summarizer.py) but gated off here until v0.0.2 -- profile:
+  # conversation keeps the deterministic identity/capability/smalltalk router
+  # (do not set profile: off) while enabled: [] disables the tools themselves.
+  enable_in_prompt: false
+  profile: conversation
+  enabled: []
+  write_enabled: false
+  timeout_sec: 1.5
+  research_poll_timeout_sec: 45
+  summarize_search: true
+  summarizer_max_tokens: 48
+  # Dedicated summarizer HEF (2nd GenAI agent). Prefer a different alias than
+  # model.llm_hef so chat KV is not used for search speak. Falls back to chat HEF
+  # if missing / same path / load fails.
+  summarizer_hef: qwen2
+  brave_primary: true
+  serper_fallback: true

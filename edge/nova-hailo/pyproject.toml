@@ -1,0 +1,70 @@
+[project]
+name = "nova-hailo"
+version = "0.0.1"
+description = "Nova-s2s style cascaded voice agent on Hailo-10H"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "python-dotenv",
+    "sounddevice==0.5.1",
+    "soundfile",
+    "webrtcvad-wheels",
+    "piper-tts<=1.3.0",
+    "kokoro-onnx>=0.4.9",
+    "requests",
+    "psutil",
+    "onnxruntime",
+    "kaldi_native_fbank",
+    "huggingface_hub",
+    "fastapi==0.115.6",
+    "starlette==0.41.3",
+    "uvicorn[standard]==0.32.1",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.6"]
+# Matrix ASR bakeoff only (Moonshine / HF transformers). Not for OEM demo.
+#   uv sync --extra asr-bench
+# Cohere GGUF bakeoff does NOT need this — use transcribe.cpp CLI instead.
+asr-bench = [
+    "torch",
+    "transformers>=4.49",
+    "onnxruntime-genai",
+]
+
+[project.scripts]
+nova-hailo = "main:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["nova_hailo*"]
+
+[tool.uv]
+# hailo_platform / pyhailort come from system packages (apt)
+package = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["cloned", "hailo-docs", "docs", "asr-bench2"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = [
+    "E501",  # line length handled by formatter/reviewer judgment, not a hard gate
+    "UP038",  # isinstance(x, (A, B)) is faster than isinstance(x, A | B); keep the tuple form
+]
