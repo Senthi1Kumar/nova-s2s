@@ -27,12 +27,28 @@ from nova_hailo.tools.search_clean import (
     SearchResultCleaner,
     is_numeric_fact_query,
     literal_number,
+    pick_stock_price,
 )
 
 TAVILY_URL = "https://api.tavily.com/search"
 RESEARCH_FILLER = "Looking that up."
 DEFAULT_SEARCH_TIMEOUT = 1.5
 DEFAULT_TAVILY_TIMEOUT = 12.0
+
+
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MD_HEADER_RE = re.compile(r"^#{1,6}\s*", flags=re.MULTILINE)
+_MD_EMPHASIS_RE = re.compile(r"[*_`]{1,3}")
+
+
+def _strip_markdown(text: str) -> str:
+    """Exa's raw page-text extraction can include literal markdown ('#
+    Weather for...', '**bold**') that would be spoken aloud as-is by TTS.
+    Brave/Serper snippets are already HTML-derived and rarely contain this,
+    so applying it uniformly in _compact() is a no-op for them."""
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _MD_HEADER_RE.sub("", text)
+    return _MD_EMPHASIS_RE.sub("", text)
 
 
 def _compact(title: Any, url: Any, snippet: Any) -> dict[str, str]:
@@ -42,9 +58,9 @@ def _compact(title: Any, url: Any, snippet: Any) -> dict[str, str]:
     except Exception:  # noqa: BLE001
         domain = ""
     return {
-        "title": str(title or "").strip()[:120],
+        "title": _strip_markdown(str(title or "")).strip()[:120],
         "url": domain,
-        "snippet": re.sub(r"\s+", " ", str(snippet or "")).strip()[:180],
+        "snippet": re.sub(r"\s+", " ", _strip_markdown(str(snippet or ""))).strip()[:180],
         "source": domain,
     }
 
@@ -73,12 +89,133 @@ def _ok(name: str, speak: str, result: Any = None, status: str = "success") -> d
 def _normalize_query(query: str) -> str:
     q = (query or "").strip()
     q = re.sub(
-        r"(?i)\b(search( the web)?( for)?|look\s*up|google|research|dig\s+into|"
-        r"deep\s+dive|look\s+into|investigate)\b",
+        r"(?i)\b("
+        r"search(\s+the\s+web)?(\s+for)?|"
+        r"look\s*up|google|research|dig\s+into|deep\s+dive|look\s+into|investigate|"
+        r"(please\s+)?(can\s+you|could\s+you|nova)\s+(do|use|run)?\s*"
+        r"(the\s+)?(web\s+)?search(\s+tool)?(\s+to\s+find)?|"
+        r"use\s+the\s+(web\s+)?search(\s+tool)?(\s+to\s+find)?|"
+        r"find\s+(me\s+)?(the\s+)?"
+        r")\b",
         " ",
         q,
     )
     return re.sub(r"\s+", " ", q).strip() or (query or "").strip()
+
+
+# Map common spoken company/crypto names → search-friendly "NAME TICKER" labels.
+# Each entry: (match pattern, speak short label, search label).
+_STOCK_NAME_TICKER: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (re.compile(r"\bamazon\b|\bamzn\b", re.I), "Amazon", "Amazon AMZN"),
+    (re.compile(r"\balphabet\b|\bgoogle\b|\bgoogl\b", re.I), "Alphabet", "Alphabet GOOGL"),
+    (re.compile(r"\bmicrosoft\b|\bmsft\b", re.I), "Microsoft", "Microsoft MSFT"),
+    (re.compile(r"\bapple\b|\baapl\b", re.I), "Apple", "Apple AAPL"),
+    (re.compile(r"\bmeta\b|\bfacebook\b", re.I), "Meta", "Meta META"),
+    (re.compile(r"\btesla\b|\btsla\b", re.I), "Tesla", "Tesla TSLA"),
+    (re.compile(r"\bnvidia\b|\bnvda\b", re.I), "NVIDIA", "NVIDIA NVDA"),
+    (re.compile(r"\bpalantir\b|\bpltr\b", re.I), "Palantir", "Palantir PLTR"),
+    (re.compile(r"\bbitcoin\b|\bbtc\b", re.I), "Bitcoin", "Bitcoin BTC-USD"),
+    (re.compile(r"\bamd\b", re.I), "AMD", "AMD"),
+    (re.compile(r"\bintel\b|\bintc\b", re.I), "Intel", "Intel INTC"),
+)
+
+_STOCK_KEYWORD_RE = re.compile(
+    r"\b(stock|share\s+price|ticker|nasdaq|nyse)\b",
+    re.I,
+)
+_CRYPTO_PRICE_RE = re.compile(
+    r"\b(bitcoin|btc|crypto)\b.*\b(price|worth|cost|how\s+much)\b|"
+    r"\b(price|worth|cost|how\s+much)\b.*\b(bitcoin|btc|crypto)\b",
+    re.I,
+)
+_PRICE_OF_RE = re.compile(r"\bprice\s+of\b|\bhow\s+much\s+is\b|\bquote\s+for\b", re.I)
+_PRICE_WORD_RE = re.compile(r"\b(price|quote|worth|cost)\b", re.I)
+
+
+def _stock_entities_in_query(query: str) -> list[tuple[str, str, list[str]]]:
+    """Entities mentioned in query, left-to-right.
+
+    Returns list of (speak_label, search_label, near_keywords).
+    """
+    q = query or ""
+    found: list[tuple[int, str, str, list[str]]] = []
+    for pat, speak, search in _STOCK_NAME_TICKER:
+        m = pat.search(q)
+        if not m:
+            continue
+        # Keywords for proximity scoring in evidence (name + ticker tokens).
+        kws = [speak] + [t for t in search.split() if t.upper() != speak.upper()]
+        found.append((m.start(), speak, search, kws))
+    found.sort(key=lambda t: t[0])
+    # Dedupe by speak label (first occurrence wins).
+    out: list[tuple[str, str, list[str]]] = []
+    seen: set[str] = set()
+    for _pos, speak, search, kws in found:
+        key = speak.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((speak, search, kws))
+    return out
+
+
+def _is_stock_query(query: str) -> bool:
+    """True for stock/crypto price asks that should use quote rewrite + pick."""
+    q = query or ""
+    if not q.strip():
+        return False
+    if _STOCK_KEYWORD_RE.search(q):
+        return True
+    if _CRYPTO_PRICE_RE.search(q):
+        return True
+    entities = _stock_entities_in_query(q)
+    if not entities:
+        return False
+    if _PRICE_OF_RE.search(q) or _PRICE_WORD_RE.search(q):
+        return True
+    return False
+
+
+def _is_multi_stock_query(query: str) -> bool:
+    return len(_stock_entities_in_query(query)) >= 2
+
+
+def _stock_search_query(query: str) -> str | None:
+    """Rewrite stock/crypto asks so Exa/Brave rank quote pages over random $ deltas."""
+    q = query or ""
+    if not _is_stock_query(q):
+        return None
+    entities = _stock_entities_in_query(q)
+    if len(entities) >= 2:
+        a, b = entities[0], entities[1]
+        return f"{a[1]} and {b[1]} stock price USD"
+    if len(entities) == 1:
+        speak, search, _kws = entities[0]
+        # Crypto: "Bitcoin BTC-USD price USD" ranks better than "... stock price".
+        if re.search(r"bitcoin|btc", search, re.I):
+            return f"{search} price USD"
+        return f"{search} stock price USD"
+    return f"{q} stock price USD"
+
+
+def _multi_stock_speak(query: str, evidence: str) -> str | None:
+    """Build dual-price speak for multi-entity stock queries, or None if not multi."""
+    entities = _stock_entities_in_query(query)
+    if len(entities) < 2:
+        return None
+    (s1, _search1, k1), (s2, _search2, k2) = entities[0], entities[1]
+    p1 = pick_stock_price(evidence, near=k1)
+    p2 = pick_stock_price(evidence, near=k2, exclude=[p1] if p1 else None)
+    # Do not global-fallback without near=: an unrelated $ amount would be
+    # invented as the second quote (measured: oil $72.10 as "Tesla").
+    # Proximity miss → honest partial for the entity we did find.
+    if p1 and p2:
+        return f"Search results say {s1} {p1} and {s2} {p2}."
+    if p1:
+        return f"Search results say {s1} {p1}. I couldn't find a reliable second price."
+    if p2:
+        return f"Search results say {s2} {p2}. I couldn't find a reliable second price."
+    return "I couldn't find a reliable number for that."
 
 
 def brave_search(
@@ -109,23 +246,69 @@ def serper_search(
     return [_compact(r.get("title"), r.get("link"), r.get("snippet")) for r in organic[:5]]
 
 
+def exa_search(
+    query: str, api_key: str, timeout_sec: float = DEFAULT_SEARCH_TIMEOUT, type_: str = "fast"
+) -> list[dict[str, str]]:
+    """Raw REST call (api.exa.ai), matching brave_search/serper_search's
+    style — REST only (httpx); no exa-py SDK. type="fast"
+    is the fastest reliable option of the real-time search types, with
+    richer per-result text than Brave/Serper (see CHANGELOG.md)."""
+    # Longer excerpts for quotes/news so the top line isn't just a headline.
+    max_chars = 900 if _is_stock_query(query) else 700
+    resp = httpx.post(
+        "https://api.exa.ai/search",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        json={
+            "query": query,
+            "type": type_,
+            "numResults": 5,
+            "contents": {"text": {"maxCharacters": max_chars}},
+        },
+        timeout=timeout_sec,
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results") or []
+    # Stock snippets often need more than 180 chars to include the actual quote.
+    out: list[dict[str, str]] = []
+    for r in results[:5]:
+        c = _compact(r.get("title"), r.get("url"), r.get("text"))
+        if _is_stock_query(query):
+            full = re.sub(r"\s+", " ", _strip_markdown(str(r.get("text") or ""))).strip()
+            if full:
+                c["snippet"] = full[:480]
+        out.append(c)
+    return out
+
+
 def answer_from_hits(query: str, hits: list, *, tool_name: str = "web_search") -> dict[str, Any]:
     cleaner = SearchResultCleaner()
     evidence = cleaner.evidence_block(hits)
     if not evidence:
         return _unavailable(tool_name, "no_usable_snippets")
-    if is_numeric_fact_query(query):
-        num = literal_number(evidence)
-        speak = (
-            f"Search results say {num}."
-            if num
-            else "I couldn't find a reliable number for that."
-        )
+    stockish = _is_stock_query(query)
+    if is_numeric_fact_query(query) or stockish:
+        if _is_multi_stock_query(query):
+            speak = _multi_stock_speak(query, evidence)
+            return _ok(
+                tool_name,
+                speak or "I couldn't find a reliable number for that.",
+                {"evidence": evidence, "numeric": True, "needs_summary": False},
+            )
+        if stockish:
+            num = pick_stock_price(evidence)
+        else:
+            num = literal_number(evidence, query=query)
+        if num:
+            speak = f"Search results say {num}."
+        else:
+            speak = "I couldn't find a reliable number for that."
         return _ok(
             tool_name,
             speak,
             {"evidence": evidence, "numeric": True, "needs_summary": False},
         )
+    # News / general: let the grounded summarizer phrase from evidence (not raw
+    # first-snippet dump, which produces "At least eight." mid-list junk).
     return _ok(
         tool_name,
         cleaner.speak_fallback(hits),
@@ -139,15 +322,38 @@ def web_search(
     timeout_sec: float = DEFAULT_SEARCH_TIMEOUT,
     serper_fallback: bool = True,
 ) -> dict[str, Any]:
-    """Sync Brave → Serper lookup; fail-closed without keys."""
+    """Exa (fast) → Brave → Serper; fail-closed without keys.
+
+    Ordering reflects measured reliability, not just speed: Serper is
+    demoted to last-resort (not removed) because it's measurably less
+    reliable against our timeout than Brave or Exa. See CHANGELOG.md for
+    the comparison data."""
     q = _normalize_query(query)
     if not q:
         return _unavailable("web_search", "empty_query")
+    # Keep the user-facing query for answer phrasing; search may be rewritten.
+    search_q = _stock_search_query(q) or q
+    exa = (os.environ.get("EXA_API_KEY") or "").strip()
     brave = (os.environ.get("BRAVE_API_KEY") or "").strip()
     serper = (os.environ.get("SERPER_API_KEY") or "").strip()
+    have_fallback = bool(brave or (serper_fallback and serper))
+    if exa:
+        try:
+            # Stock quotes need a bit more text so the price isn't only a $delta.
+            hits = exa_search(
+                search_q,
+                exa,
+                timeout_sec=timeout_sec,
+                type_="fast",
+            )
+            if hits:
+                return answer_from_hits(q, hits)
+        except Exception as exc:  # noqa: BLE001
+            if not have_fallback:
+                return _unavailable("web_search", f"exa_failed:{exc}")
     if brave:
         try:
-            hits = brave_search(q, brave, timeout_sec=timeout_sec)
+            hits = brave_search(search_q, brave, timeout_sec=timeout_sec)
             if hits:
                 return answer_from_hits(q, hits)
         except Exception as exc:  # noqa: BLE001
@@ -155,7 +361,7 @@ def web_search(
                 return _unavailable("web_search", f"brave_failed:{exc}")
     if serper_fallback and serper:
         try:
-            hits = serper_search(q, serper, timeout_sec=timeout_sec)
+            hits = serper_search(search_q, serper, timeout_sec=timeout_sec)
             if hits:
                 return answer_from_hits(q, hits)
         except Exception as exc:  # noqa: BLE001
@@ -366,4 +572,8 @@ __all__ = [
     "research_status",
     "build_fastmcp_app",
     "answer_from_hits",
+    "_stock_search_query",
+    "_is_stock_query",
+    "_stock_entities_in_query",
+    "_multi_stock_speak",
 ]

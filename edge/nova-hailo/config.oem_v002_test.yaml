@@ -1,0 +1,105 @@
+# Nova-Hailo primary demo profile (tools + search + Workspace read-only).
+# Default for: ./scripts/run_demo_oem.sh  (NOVA_HAILO_PROFILE=oem)
+#
+# Search: Exa (primary, HTTP) → Brave → Serper. Deep research: Tavily.
+# Workspace tools need Google OAuth tokens under runtime/google_oauth/.
+# STT: EN Nemo streaming GGUF (CPU). LLM: Hailo HEF. TTS: Inflect ONNX.
+
+model:
+  llm_hef: qwen2
+  llm_backend: cpp
+  stt_engine: nemo_speech
+  nemo_speech_model: models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf
+  nemo_rnnt_right_context: 1
+  # STT rollback: stt_engine: parakeet
+  # stt_engine: parakeet
+  parakeet_decoder: tdt
+  parakeet_model: models/parakeet/tdt_ctc-110m-f16.gguf
+  whisper_hef: base
+  tts_engine: inflect
+  inflect_speed: 1.0
+  inflect_variation: 0.667
+  inflect_seed: 7
+  kokoro_voice: af_sarah
+  piper_onnx: models/piper/en_US-amy-low.onnx
+  max_tokens: 256
+  temperature: 0.5
+  seed: 42
+  no_think: true
+
+llm:
+  no_think: true
+
+pipeline:
+  tool_route_mode: allowlist
+  multi_tool_rounds: 1
+  clear_context_each_turn: false
+  native_context: true
+  ctx_compact_ratio: 0.7
+  sequential_stt: false
+  stream_tts: true
+  voice_one_sentence: true
+  first_chunk_min_chars: 24
+  max_history_turns: 2
+  session_idle_sec: 45
+  validate_before_speak: true
+  genai_serial: true
+
+auth:
+  enabled: false
+  payment_keywords: []
+  confirm_keywords: []
+  deny_keywords: []
+
+voice:
+  vad: true
+  vad_aggressiveness: 1
+  vad_energy_threshold: 0.2
+  no_tts: false
+  wait_tts: false
+  wait_tts_drain: true
+  barge_in_while_speaking: false
+  echo_tail_ms: 400
+  # Utterance energy gate (nova_hailo.audio_gate.accept_utterance)
+  gate_min_rms: 0.016
+  gate_min_peak: 0.045
+  gate_min_sec: 0.40
+  gate_min_speech_frac: 0.15
+  # Nemo sidecar post-commit wait (nova_hailo.web.nemo_wait_budget)
+  nemo_wait_floor_s: 0.35
+  nemo_wait_cap_s: 1.8
+  nemo_wait_base_s: 0.25
+  nemo_wait_scale: 0.40
+  input_device: wm8960
+  output_device: wm8960
+  playback: browser
+
+web:
+  host: 0.0.0.0
+  port: 8766
+
+wake:
+  mode: ptt
+  kws_enabled: false
+  kws_threshold: 0.65
+
+pvad:
+  enabled: false
+  model_dir: models/FireRedChat-pvad
+  barge_in_threshold: 0.55
+  barge_in_frames: 2
+
+tools:
+  # Read-only tools ON for primary demo (router → broker → fail-closed).
+  enable_in_prompt: false
+  profile: oem_readonly
+  enabled: [web_search, deep_research, check_calendar, check_email, list_drive_files]
+  write_enabled: false
+  timeout_sec: 1.5
+  research_poll_timeout_sec: 45
+  summarize_search: true
+  summarizer_max_tokens: 512
+  max_speak_chars: 700
+  summarizer_hef: qwen2
+  brave_primary: true
+  serper_fallback: true

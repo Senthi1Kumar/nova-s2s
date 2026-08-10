@@ -22,6 +22,7 @@ from nova_hailo.google_oauth import (
 )
 from nova_hailo.pipeline import NovaPipeline
 from nova_hailo.web.realtime_session import RealtimeSession
+from nova_hailo.backends.nemo_speech_sidecar import ensure_sidecar, shutdown_sidecar
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -49,6 +50,8 @@ def _build_pipeline() -> NovaPipeline:
         cfg.raw.setdefault("model", {})["llm_hef"] = os.environ["NOVA_HAILO_LLM"]
     if os.environ.get("NOVA_HAILO_TTS"):
         cfg.raw.setdefault("model", {})["tts_engine"] = os.environ["NOVA_HAILO_TTS"]
+    if os.environ.get("NOVA_HAILO_STT"):
+        cfg.raw.setdefault("model", {})["stt_engine"] = os.environ["NOVA_HAILO_STT"]
     one = os.environ.get("NOVA_HAILO_ONE_SENTENCE", "").lower()
     if one in {"1", "true", "yes"}:
         cfg.raw.setdefault("pipeline", {})["voice_one_sentence"] = True
@@ -95,11 +98,32 @@ async def lifespan(app: FastAPI):
     else:
         print("STT: on-demand (sequential_stt)")
     print(f"TTS local_play={_pipeline.tts.local_play} stream_tts={_pipeline.stream_tts}")
+    if _pipeline.stt_engine == "nemo_speech":
+        from nova_hailo.backends.nemo_speech_stt import (
+            resolve_nemo_speech_paths,
+            resolve_nemo_speech_vad_path,
+        )
+
+        model, _lib = resolve_nemo_speech_paths(
+            _pipeline.cfg.get("model", "nemo_speech_model")
+        )
+        vad = resolve_nemo_speech_vad_path(_pipeline.cfg.get("model", "nemo_speech_vad_model"))
+        if model:
+            rnnt_rc = int(
+                _pipeline.cfg.get("model", "nemo_rnnt_right_context", default=1) or 1
+            )
+            url = ensure_sidecar(
+                str(model),
+                str(vad) if vad else None,
+                rnnt_right_context=rnnt_rc,
+            )
+            print(f"nemo_speech sidecar: {url or 'unavailable, live turns fall back to offline ctypes'}")
     _power.start()
     try:
         yield
     finally:
         _power.stop()
+        shutdown_sidecar()
         if _pipeline:
             _pipeline.close()
             _pipeline = None
@@ -117,6 +141,15 @@ async def index():
     if not index_path.exists():
         return {"error": "UI missing", "path": str(index_path)}
     return FileResponse(index_path)
+
+
+@app.get("/dashboard")
+async def dashboard():
+    """Glass-cockpit ops view: FSM, STT path, latency — not the driver face."""
+    path = STATIC_DIR / "dashboard.html"
+    if not path.exists():
+        return {"error": "dashboard missing", "path": str(path)}
+    return FileResponse(path)
 
 
 @app.get("/config")

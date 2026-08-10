@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nova · Ops</title>
+<style>
+  :root {
+    --bg: #080a0f;
+    --panel: #11151d;
+    --border: #232a36;
+    --text: #e8ecf3;
+    --muted: #8b94a7;
+    --teal: #2dd4bf;
+    --amber: #e4b45a;
+    --violet: #8b7cf6;
+    --rose: #f07178;
+    --green: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 22px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: rgba(8,10,15,0.92); backdrop-filter: blur(10px); z-index: 5;
+  }
+  header h1 { margin: 0; font-size: 1rem; letter-spacing: 0.2em; font-weight: 650; }
+  header a { color: var(--muted); text-decoration: none; font-size: 0.85rem; }
+  header a:hover { color: var(--text); }
+  main { padding: 20px; max-width: 1200px; margin: 0 auto; display: grid; gap: 16px; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px;
+  }
+  .card .lbl { font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+  .card .val { font-size: 1.35rem; font-weight: 650; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .card .sub { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
+  .fsm {
+    font-family: ui-monospace, monospace; font-size: 1.1rem; letter-spacing: 0.08em;
+  }
+  .fsm.LISTENING { color: var(--teal); }
+  .fsm.THINKING, .fsm.TRANSCRIBING { color: var(--amber); }
+  .fsm.SPEAKING { color: var(--violet); }
+  .fsm.INTERRUPTING { color: var(--rose); }
+  .fsm.IDLE, .fsm.ARMED { color: var(--muted); }
+  h2 { margin: 8px 0 0; font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 500; font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  #log {
+    font-family: ui-monospace, monospace; font-size: 0.75rem; color: var(--muted);
+    max-height: 220px; overflow-y: auto; white-space: pre-wrap; line-height: 1.45;
+  }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border);
+    font-size: 0.72rem; color: var(--muted);
+  }
+  .pill.ok { color: var(--green); border-color: #1a4a2e; }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px;
+    background: var(--muted);
+  }
+  .status-dot.live { background: var(--green); box-shadow: 0 0 10px #4ade8088; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="status-dot" id="ws-dot"></span>NOVA · OPS</h1>
+  <div style="display:flex;gap:16px;align-items:center">
+    <span class="pill" id="conn-pill">ws offline</span>
+    <a href="/">← Driver UI</a>
+  </div>
+</header>
+<main>
+  <section class="row">
+    <div class="card"><div class="lbl">FSM</div><div class="val fsm" id="fsm">—</div><div class="sub" id="gen">gen —</div></div>
+    <div class="card"><div class="lbl">STT path</div><div class="val" id="stt-path">—</div><div class="sub" id="stt-ms">—</div></div>
+    <div class="card"><div class="lbl">Last TTFA</div><div class="val" id="ttfa">—</div><div class="sub" id="ttfa-src">audible</div></div>
+    <div class="card"><div class="lbl">Last STT</div><div class="val" id="stt">—</div><div class="sub">speech → text</div></div>
+    <div class="card"><div class="lbl">CPU</div><div class="val" id="cpu">—</div><div class="sub">host</div></div>
+    <div class="card"><div class="lbl">RAM</div><div class="val" id="ram">—</div><div class="sub">host</div></div>
+    <div class="card"><div class="lbl">Power</div><div class="val" id="power">—</div><div class="sub">Hailo / board</div></div>
+  </section>
+
+  <h2>Session bench</h2>
+  <section class="row">
+    <div class="card"><div class="lbl">Avg TTFT</div><div class="val" id="b-ttft">—</div></div>
+    <div class="card"><div class="lbl">Avg decode</div><div class="val" id="b-decode">—</div></div>
+    <div class="card"><div class="lbl">Turns</div><div class="val" id="b-turns">—</div></div>
+    <div class="card"><div class="lbl">Avg power</div><div class="val" id="b-power">—</div></div>
+  </section>
+
+  <h2>Turn log</h2>
+  <div class="card" style="padding:0;overflow:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>STT ms</th><th>path</th><th>TTFA ms</th><th>overlap</th><th>notes</th>
+        </tr>
+      </thead>
+      <tbody id="turns"></tbody>
+    </table>
+  </div>
+
+  <h2>Event stream</h2>
+  <div class="card"><div id="log"></div></div>
+</main>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const logEl = $('log');
+  const turnsEl = $('turns');
+  let turnN = 0;
+  let ws = null;
+
+  function log(line) {
+    const t = new Date().toLocaleTimeString();
+    logEl.textContent = `[${t}] ${line}\n` + logEl.textContent;
+  }
+
+  function fmt(v, unit) {
+    if (v == null || Number.isNaN(v)) return '—';
+    return (typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(0)) : v) + (unit || '');
+  }
+
+  function pollSystem() {
+    fetch('/metrics/system').then(r => r.json()).then(m => {
+      $('cpu').textContent = m.cpu_pct != null ? m.cpu_pct + '%' : '—';
+      $('ram').textContent = m.ram_pct != null ? m.ram_pct + '%' : '—';
+      $('power').textContent = m.power_w != null ? m.power_w.toFixed(1) + ' W' : '—';
+    }).catch(() => {});
+  }
+  function pollBench() {
+    fetch('/metrics/bench').then(r => r.json()).then(b => {
+      const ttft = b.ttft_ms || b.avg_ttft_ms || b.llm_ttft_ms;
+      $('b-ttft').textContent = fmt(ttft, ' ms');
+      $('b-decode').textContent = b.decode_tok_s != null ? Number(b.decode_tok_s).toFixed(1) + ' t/s'
+        : (b.avg_decode_tok_s != null ? Number(b.avg_decode_tok_s).toFixed(1) + ' t/s' : '—');
+      $('b-turns').textContent = b.turns != null ? b.turns : (b.n_turns != null ? b.n_turns : '—');
+      $('b-power').textContent = b.avg_power_w != null ? Number(b.avg_power_w).toFixed(1) + ' W' : '—';
+      if (b.ttfa && b.ttfa.p50 != null) {
+        /* keep last-turn card as live WS; bench p50 is secondary */
+      }
+    }).catch(() => {});
+  }
+  pollSystem(); pollBench();
+  setInterval(pollSystem, 2000);
+  setInterval(pollBench, 3000);
+
+  function applyFsm(fsm) {
+    if (!fsm) return;
+    const el = $('fsm');
+    el.textContent = fsm.state || '—';
+    el.className = 'val fsm ' + (fsm.state || '');
+    $('gen').textContent = 'gen ' + (fsm.generation_id != null ? fsm.generation_id : '—')
+      + (fsm.turn_id ? ' · ' + fsm.turn_id : '');
+  }
+
+  function applyTurn(m) {
+    turnN += 1;
+    const stt = m.stt_ms != null ? m.stt_ms : m.stt_infer_ms;
+    const path = m.stt_path || '—';
+    const ttfa = m.speech_end_to_audible_ms != null ? m.speech_end_to_audible_ms
+      : (m.ttfa_ms != null ? m.ttfa_ms : m.speech_end_to_first_pcm_ms);
+    const overlap = m.overlap_ms != null ? m.overlap_ms : '—';
+    const notes = Array.isArray(m.notes) ? m.notes.join(', ') : (m.notes || '');
+    $('stt-path').textContent = path;
+    $('stt-ms').textContent = stt != null ? stt + ' ms' : '—';
+    $('stt').textContent = stt != null ? Math.round(stt) + ' ms' : '—';
+    $('ttfa').textContent = ttfa != null ? Math.round(ttfa) + ' ms' : '—';
+    $('ttfa-src').textContent = m.audible_source || '—';
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${turnN}</td><td>${stt != null ? Math.round(stt) : '—'}</td>`
+      + `<td>${path}</td><td>${ttfa != null ? Math.round(ttfa) : '—'}</td>`
+      + `<td>${overlap !== '—' && overlap != null ? Math.round(overlap) : '—'}</td>`
+      + `<td>${notes}</td>`;
+    turnsEl.insertBefore(tr, turnsEl.firstChild);
+    log(`turn#${turnN} stt=${stt} path=${path} ttfa=${ttfa}`);
+  }
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    // Dashboard is observe-only: it does not capture mic. It still joins the
+    // single-session lock — so only open when driver UI is idle, OR we use
+    // metrics polling only. Prefer metrics + optional listen when free.
+    // For OEM room: poll metrics always; FSM stream needs driver session.
+    // We mirror last nova.fsm via a light EventSource-less approach: the
+    // driver UI posts nothing, so we poll /metrics and show "attach to live
+    // session by opening driver UI". For live FSM we open a secondary note.
+    $('conn-pill').textContent = 'metrics live';
+    $('ws-dot').classList.add('live');
+    log('ops dashboard: system/bench polling active');
+    log('open Driver UI for live FSM + turn stream (single session)');
+  }
+  connect();
+
+  // Live FSM when a session is active: try WS; if rejected (session busy), stay on polls.
+  function tryWs() {
+    fetch('/config').then(r => r.json()).then(cfg => {
+      const url = cfg.ws_url || ((location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/v1/realtime');
+      // Do not steal the single session from the driver UI.
+      // Instead expose a BroadcastChannel so driver can fan-out if same browser.
+    }).catch(() => {});
+  }
+  tryWs();
+
+  // Same-origin BroadcastChannel bridge: driver UI can post events here.
+  try {
+    const bc = new BroadcastChannel('nova_ops');
+    bc.onmessage = (ev) => {
+      const data = ev.data || {};
+      if (data.type === 'nova.fsm') {
+        applyFsm(data.fsm);
+        $('conn-pill').textContent = 'live bridge';
+        $('ws-dot').classList.add('live');
+      }
+      if (data.type === 'nova.turn_metrics') applyTurn(data.metrics || data);
+      if (data.type === 'log') log(data.line || '');
+    };
+    log('BroadcastChannel nova_ops ready (same browser as driver UI)');
+  } catch (e) {
+    log('BroadcastChannel unavailable');
+  }
+})();
+</script>
+</body>
+</html>

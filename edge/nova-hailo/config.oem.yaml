@@ -1,19 +1,19 @@
-# Nova-Hailo OEM profile
-# Callers: AppConfig.load when NOVA_HAILO_CONFIG / NOVA_HAILO_PROFILE=oem
-# Stable measured: Whisper-Base × Qwen2-1.5B × Silero × Piper; HailoRT 5.1.1
-
+# Nova-Hailo conversation profile (tools gated off; parakeet STT).
+# Use: NOVA_HAILO_PROFILE=conversation ./scripts/run_demo_oem.sh
+#
+# Primary tools demo: config.oem_v002_test.yaml (default ./scripts/run_demo_oem.sh).
+# Panic rollback: config.oem_rollback.yaml (NOVA_HAILO_PROFILE=oem_rollback).
+# HailoRT 5.1.1 on target device.
+#
 model:
   llm_hef: qwen2
-  # CPU STT via parakeet.cpp C API. Measured on a recorded real-mic corpus:
-  # WER 0.167 near / 0.20 far vs Whisper-Base 0.333 / 0.60, 292ms vs 344ms, and
-  # the only engine that transcribes "Nova". Set whisper_hef to roll back.
+  # Conversation profile STT: parakeet. Tools demo uses Nemo (config.oem_v002_test.yaml).
   stt_engine: parakeet
   parakeet_decoder: tdt
-  # ASR A/B: point at any parakeet.cpp gguf. f16 is upstream-recommended and
-  # measured ~14% faster than q8_0 with identical near-field transcripts.
   parakeet_model: models/parakeet/tdt_ctc-110m-f16.gguf
-  # parakeet_model: models/parakeet/tdt-0.6b-v2-f16.gguf           # best far-field WER 0.154, ~6.9s/utt
-  # parakeet_model: models/parakeet/realtime_eou_120m-v1-f16.gguf  # streaming + end-of-utterance
+  # Optional:
+  # stt_engine: nemo_speech
+  # nemo_speech_model: models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf
   whisper_hef: base
   # Inflect-Nano-v2 ONNX, 24 kHz mono, torch-free. Measured on the Pi: RTF ~0.18
   # (351 ms for 1.95 s audio), init 0.72 s. Piper stays the one-line rollback.
@@ -93,11 +93,8 @@ pvad:
   barge_in_frames: 2
 
 tools:
-  # v0.0.1 is conversation-only. web_search/deep_research/summarizer are built
-  # and tested (see nova_hailo/tools/search_mcp.py, research_jobs.py,
-  # search_summarizer.py) but gated off here until v0.0.2 -- profile:
+  # web_search/deep_research/summarizer are built
   # conversation keeps the deterministic identity/capability/smalltalk router
-  # (do not set profile: off) while enabled: [] disables the tools themselves.
   enable_in_prompt: false
   profile: conversation
   enabled: []

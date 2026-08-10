@@ -31,10 +31,65 @@ def test_response_contract_accepts_short_speak():
     assert ok["speak"].startswith("You have")
 
 
+def test_response_contract_trims_numbered_list_cut_off_at_marker():
+    """A numbered list cut off right after its marker ("... 2.") ends in
+    "." but isn't a complete sentence -- must trim back to the real
+    sentence end, not stop at the list-marker period."""
+    out = validate_spoken_unit(
+        "The ongoing news of the Iran War is as follows: 1. Iran continues "
+        "Hormuz talks with Oman and US signals optimism on a deal. 2."
+    )
+    assert out["ok"] is True
+    assert out["speak"].endswith("on a deal.")
+    assert "trimmed_incomplete_sentence" in out["failures"]
+
+
+def test_response_contract_trims_decimal_cut_off_mid_number():
+    """Same bug, decimal variant: "...54°F (12." must not be spoken as-is,
+    and the fallback period must not double up into "12..""."""
+    out = validate_spoken_unit(
+        "The weather in Delhi is cloudy with a low temperature of 54°F (12."
+    )
+    assert out["ok"] is True
+    assert ".." not in out["speak"]
+    assert out["speak"].endswith(".")
+
+
+def test_response_contract_does_not_over_trim_a_genuinely_complete_list():
+    ok = validate_spoken_unit("1. First item is here. 2. Second item is also here.")
+    assert ok["ok"] is True
+    assert ok["speak"] == "1. First item is here. 2. Second item is also here."
+    assert "trimmed_incomplete_sentence" not in ok["failures"]
+
+
 def test_first_complete_clause():
     clause, rest = first_complete_clause("Hello there. More words", min_chars=5)
     assert clause == "Hello there."
     assert rest.strip().startswith("More")
+
+
+def test_first_complete_clause_ignores_decimal_period():
+    clause, rest = first_complete_clause(
+        "The value is 3.14 meters long.", min_chars=5
+    )
+    assert clause == "The value is 3.14 meters long."
+    assert rest == ""
+
+
+def test_first_complete_clause_ignores_abbreviation_period():
+    clause, rest = first_complete_clause(
+        "Please ask Dr. Smith about it.", min_chars=5
+    )
+    assert clause == "Please ask Dr. Smith about it."
+    assert rest == ""
+
+
+def test_first_complete_clause_decimal_not_yet_fully_streamed():
+    # Buffer ends right at the decimal point; more digits haven't arrived
+    # yet. Must not split here -- correct behavior is to wait for more input.
+    clause, rest = first_complete_clause("The value is 3.", min_chars=5)
+    assert clause is None
+    assert rest == "The value is 3."
 
 
 def test_history_bounded_to_two_turns():
@@ -48,6 +103,31 @@ def test_history_bounded_to_two_turns():
     users = [m["content"] for m in msgs if m["role"] == "user"]
     assert "b" in users[0]
     assert users[-1].startswith("now")
+
+
+def test_history_rejects_entity_bleed_from_previous_reply():
+    """Measured live: a wrong 'NVIDIA's stock price...' answer mutated into
+    'NVIDIA's vehicle status...', '...windows...', '...lights...' across four
+    unrelated turns once it entered history. None of those are refusals, so
+    the refusal filter never caught them -- must reject storing a reply that
+    reuses an entity from the prior reply the current question never asked
+    about."""
+    h = ConversationHistory(max_turns=3)
+    h.add(
+        "Could you check again for the NVIDIA stock price?",
+        "NVIDIA's stock price as of today is $36 per share.",
+    )
+    assert len(h) == 1
+    h.add(
+        "Hey check to check my vehicle status.",
+        "NVIDIA's vehicle status is currently fine.",
+    )
+    assert len(h) == 1  # bled reply rejected, not stored
+    h.add(
+        "What is the weather in Bangalore?",
+        "It's partly cloudy in Bangalore, around 28 degrees.",
+    )
+    assert len(h) == 2  # unrelated, legitimate reply still stores normally
 
 
 def test_fsm_generation_invalidates_on_interrupt():
@@ -139,6 +219,20 @@ def test_search_cleaner_caps_evidence():
     assert block.count("\n") <= 2
 
 
+def test_literal_number_ignores_later_results():
+    """Measured live: the same stock query returned $369, then $218.99, then
+    $36 across a few turns -- literal_number() was grabbing whichever number
+    appeared first in the *whole* multi-result block, not necessarily from
+    the top-ranked result. Must only look at the first result line."""
+    from nova_hailo.tools.search_clean import literal_number
+
+    evidence = (
+        "1. AMZN: Amazon shares traded near $185.40 in late trading.\n"
+        "2. Unrelated: some other page mentions $999.99 in a different context."
+    )
+    assert literal_number(evidence) == "$185.40"
+
+
 def test_answer_from_hits_tags_needs_summary():
     from nova_hailo.tools.search_mcp import answer_from_hits
 
@@ -171,6 +265,118 @@ def test_answer_from_hits_numeric_bypass_no_summary():
     assert out["result"]["numeric"] is True
     assert out["result"]["needs_summary"] is False
     assert "185.40" in out["speak"] or "couldn't find" in out["speak"].lower()
+
+
+def test_stock_search_query_rewrite_single_and_extended_tickers():
+    """ticker map + stock-like rewrite (pure, no network)."""
+    from nova_hailo.tools.search_mcp import _is_stock_query, _stock_search_query
+
+    # Classic stock keyword path
+    assert _is_stock_query("stock price of Amazon today")
+    assert _stock_search_query("stock price of Amazon today") == "Amazon AMZN stock price USD"
+
+    # Extended entities
+    assert _stock_search_query("stock price of Palantir") == "Palantir PLTR stock price USD"
+    assert _stock_search_query("what is the PLTR stock price") == "Palantir PLTR stock price USD"
+    assert _stock_search_query("AMD stock price") == "AMD stock price USD"
+    assert _stock_search_query("Intel share price") == "Intel INTC stock price USD"
+
+    # Bitcoin / crypto: price ask without the word "stock"
+    assert _is_stock_query("Bitcoin price")
+    assert _is_stock_query("what is the price of bitcoin")
+    btc_q = _stock_search_query("Bitcoin price")
+    assert btc_q is not None
+    assert "Bitcoin" in btc_q and "BTC" in btc_q and "price" in btc_q.lower()
+    assert "stock" not in btc_q.lower()  # crypto rewrite prefers non-stock phrasing
+
+    # price of <entity> without stock keyword
+    assert _is_stock_query("price of NVIDIA")
+    assert _stock_search_query("price of NVIDIA") == "NVIDIA NVDA stock price USD"
+
+    # Non-stock stays None
+    assert _stock_search_query("weather in Bangalore") is None
+    assert not _is_stock_query("who is the current Prime Minister of the UK")
+
+
+def test_stock_search_query_multi_ticker_rewrite():
+    """Multi-entity queries must mention both tickers in the provider query."""
+    from nova_hailo.tools.search_mcp import _stock_search_query
+
+    q = _stock_search_query("stock price of NVIDIA and Tesla")
+    assert q is not None
+    assert "NVIDIA NVDA" in q
+    assert "Tesla TSLA" in q
+    assert "and" in q
+    assert "stock price USD" in q
+
+    q2 = _stock_search_query("stock price of palantir and bitcoin")
+    assert q2 is not None
+    assert "Palantir PLTR" in q2
+    assert "Bitcoin BTC-USD" in q2
+
+
+def test_multi_stock_speak_two_prices_and_partial():
+    """dual-price speak string construction (pure)."""
+    from nova_hailo.tools.search_mcp import _multi_stock_speak, answer_from_hits
+
+    evidence_both = (
+        "1. NVIDIA NVDA: NVIDIA stock price $875.50 trading at session highs. "
+        "Tesla TSLA share price $248.30 after earnings."
+    )
+    speak = _multi_stock_speak("stock price of NVIDIA and Tesla", evidence_both)
+    assert speak is not None
+    assert speak.startswith("Search results say NVIDIA")
+    assert "Tesla" in speak
+    assert "$875.50" in speak
+    assert "$248.30" in speak
+    assert "and" in speak
+
+    # No Tesla token near any $ amount — oil $72 must not become the second quote.
+    evidence_one = (
+        "1. Markets: NVIDIA closed at $875.50 on heavy volume. "
+        "Oil futures settled at $72.10. Broader tech mixed; no auto quotes in this blurb."
+    )
+    speak_one = _multi_stock_speak("NVIDIA and Tesla stock", evidence_one)
+    assert speak_one is not None
+    assert "NVIDIA" in speak_one and "$875.50" in speak_one
+    assert "couldn't find a reliable second price" in speak_one.lower()
+    assert "$72.10" not in speak_one
+    assert " and Tesla " not in speak_one
+
+    # Via answer_from_hits end-to-end (still pure: synthetic hits, no HTTP)
+    hits = [
+        {
+            "title": "NVDA and TSLA",
+            "snippet": (
+                "NVIDIA NVDA last price $875.50. Tesla TSLA trading at $248.30 per share today."
+            ),
+            "source": "example.com",
+        }
+    ]
+    out = answer_from_hits("stock price of NVIDIA and Tesla", hits)
+    assert out["ok"] is True
+    assert out["result"]["numeric"] is True
+    assert "NVIDIA" in out["speak"] and "Tesla" in out["speak"]
+    assert "$875.50" in out["speak"] and "$248.30" in out["speak"]
+
+
+def test_pick_stock_price_near_and_bitcoin_range():
+    """Near-entity boost + crypto-sized quotes (pure)."""
+    from nova_hailo.tools.search_clean import pick_stock_price
+
+    body = (
+        "Tesla rose $4.20 on the day. Tesla last price $248.30. "
+        "NVIDIA trading at $875.50 after the split."
+    )
+    tesla = pick_stock_price(body, near=["Tesla", "TSLA"])
+    assert tesla == "$248.30"
+    nvidia = pick_stock_price(body, near=["NVIDIA", "NVDA"], exclude=[tesla])
+    assert nvidia == "$875.50"
+
+    btc_body = "Bitcoin BTC-USD price $95,432.10 in late trading, up $1,200 on the day."
+    btc = pick_stock_price(btc_body, near=["Bitcoin", "BTC", "BTC-USD"])
+    assert btc is not None
+    assert "95,432" in btc or "95432" in btc.replace(",", "")
 
 
 def test_summarize_evidence_mock_ok_and_fail():
@@ -266,6 +472,7 @@ def test_identity_is_deterministic_never_web_search():
 
 
 def test_oem_web_search_fail_closed_without_keys(monkeypatch):
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     monkeypatch.delenv("SERPER_API_KEY", raising=False)
     gw = OemToolGateway()
@@ -273,6 +480,8 @@ def test_oem_web_search_fail_closed_without_keys(monkeypatch):
     assert out["ok"] is False
     assert out["status"] == "unavailable"
     assert "can't reach" in out["speak"].lower()
+
+
 
 
 def test_oem_writes_disabled():

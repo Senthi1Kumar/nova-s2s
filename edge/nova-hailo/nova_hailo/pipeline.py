@@ -1,6 +1,7 @@
 """Cascaded Nova turn on Hailo-10H with streaming LLM→TTS overlap."""
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -22,7 +23,7 @@ except ImportError:
     streaming_utils = None
 
 from nova_hailo.auth import AuthDecision, DriveAuthPrecheck, looks_like_payment_tool
-from nova_hailo.backends.llm import HailoLLM
+from nova_hailo.backends.llm import HailoLLM, HailoLLMCpp
 from nova_hailo.backends.stt import WhisperSTT
 from nova_hailo.backends.tts import clean_text_for_tts, create_tts
 from nova_hailo.config import AppConfig, resolve_audio_device_ids, resolve_llm_hef
@@ -96,6 +97,8 @@ class NovaPipeline:
         self.on_audio_pcm: Callable[[np.ndarray, int], None] | None = None
         self.on_validated_clause: Callable[[str], None] | None = None
         self.on_research_status: Callable[[dict], None] | None = None
+        # Lightweight UI toast: {name, status, detail?} for tool/MCP calls.
+        self.on_tool_status: Callable[[dict], None] | None = None
         self._barge_in_flag = False
         self._genai_lock = threading.Lock()
         self.active_generation_id = 0
@@ -125,6 +128,12 @@ class NovaPipeline:
             cfg.get("tools", "summarizer_max_tokens", default=DEFAULT_SUMMARIZER_MAX_TOKENS)
             or DEFAULT_SUMMARIZER_MAX_TOKENS
         )
+        # validate_spoken_unit()'s own default (220 chars) is sized for casual
+        # chat's "one short spoken sentence" pacing. Tool/deep_research speak
+        # is a different context -- the user explicitly asked for depth, so it
+        # gets its own, larger budget instead of being silently cut back down
+        # after summarizer_max_tokens already let it generate longer.
+        self.tool_speak_max_chars = int(cfg.get("tools", "max_speak_chars", default=700) or 700)
         self.validate_before_speak = bool(
             cfg.get("pipeline", "validate_before_speak", default=True)
         )
@@ -146,7 +155,17 @@ class NovaPipeline:
             nt = cfg.get("model", "no_think")
             if nt is not None:
                 self.no_think = bool(nt)
-        self.llm = HailoLLM(
+        # Opt-in native LLM backend (ROADMAP.md #6d): explicit-GIL-
+        # release C++ wrapper around hailort::genai::LLM directly, fixing GIL
+        # contention that starved the TTS worker thread during decode. Not the
+        # default -- only via model.llm_backend: cpp or NOVA_HAILO_LLM_BACKEND.
+        llm_backend = (
+            os.environ.get("NOVA_HAILO_LLM_BACKEND")
+            or cfg.get("model", "llm_backend", default="python")
+            or "python"
+        ).strip().lower()
+        LLMCls = HailoLLMCpp if llm_backend == "cpp" else HailoLLM
+        self.llm = LLMCls(
             self.vdevice,
             llm_path,
             temperature=float(cfg.get("model", "temperature", default=0.15)),
@@ -287,6 +306,16 @@ class NovaPipeline:
             }
         return self.oem_gateway.poll_research(job_id)
 
+    def _emit_tool_status(self, name: str, status: str, *, detail: str = "") -> None:
+        """Notify UI of a tool/MCP call (best-effort; never raises into the turn)."""
+        cb = self.on_tool_status
+        if cb is None:
+            return
+        try:
+            cb({"name": name, "status": status, "detail": detail or None})
+        except Exception:
+            pass
+
     def _maybe_summarize_search(
         self,
         *,
@@ -388,7 +417,7 @@ class NovaPipeline:
         research_job_id: str | None = None,
         add_history: bool = True,
     ) -> TurnResult:
-        contract = validate_spoken_unit(speak)
+        contract = validate_spoken_unit(speak, max_chars=self.tool_speak_max_chars)
         speak = contract["speak"]
         if self.on_validated_clause is not None:
             try:
@@ -477,6 +506,32 @@ class NovaPipeline:
                     print(f"[stt] parakeet init failed ({exc}); falling back to Whisper HEF")
             else:
                 print(f"[stt] parakeet artifacts missing (model={model} lib={lib}); using Whisper HEF")
+            self.stt_engine = "whisper_hef"
+        elif self.stt_engine == "nemo_speech":
+            from nova_hailo.backends.nemo_speech_stt import (
+                NemoSpeechSTT,
+                resolve_nemo_speech_paths,
+                resolve_nemo_speech_vad_path,
+            )
+
+            model, lib = resolve_nemo_speech_paths(
+                self.cfg.get("model", "nemo_speech_model"),
+                self.cfg.get("model", "nemo_speech_lib"),
+            )
+            if model and lib:
+                try:
+                    return NemoSpeechSTT(
+                        model,
+                        lib,
+                        language=self.cfg.get("model", "nemo_speech_language"),
+                        vad_model=resolve_nemo_speech_vad_path(
+                            self.cfg.get("model", "nemo_speech_vad_model")
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[stt] nemo_speech init failed ({exc}); falling back to Whisper HEF")
+            else:
+                print(f"[stt] nemo_speech artifacts missing (model={model} lib={lib}); using Whisper HEF")
             self.stt_engine = "whisper_hef"
         return WhisperSTT(self.vdevice, hef_path=self._whisper_hef)
 
@@ -688,6 +743,11 @@ class NovaPipeline:
                 tool_speak = str(tool_out.get("speak") or "")
                 metrics.tool_name = tool_name
                 metrics.notes.append(f"oem_tool:{tool_name}:{tool_out.get('status')}")
+                self._emit_tool_status(
+                    str(tool_name or "tool"),
+                    "running",
+                    detail=str(tool_out.get("status") or ""),
+                )
                 # Fast path: tool speak (optional grounded summarizer) then TTS
                 if tool_out.get("ok") and tool_speak:
                     job_id = None
@@ -714,6 +774,7 @@ class NovaPipeline:
                         add_history=job_id is None,
                     )
                     if not job_id:
+                        self._emit_tool_status(str(tool_name or "tool"), "done")
                         if record_session:
                             self.session.add(metrics)
                         return result
@@ -738,6 +799,12 @@ class NovaPipeline:
                     metrics.notes.append(
                         f"research_job:{job_id}:{final.get('status')}"
                     )
+                    term = "done" if final.get("ok") else "failed"
+                    self._emit_tool_status(
+                        str(tool_name or "deep_research"),
+                        term,
+                        detail=str(final.get("status") or term),
+                    )
                     return self._speak_tool_line(
                         final_speak,
                         wall0=wall0,
@@ -751,6 +818,11 @@ class NovaPipeline:
                     )
                 # unavailable — still speak the honest unavailable line
                 if not tool_out.get("ok") and tool_speak:
+                    self._emit_tool_status(
+                        str(tool_name or "tool"),
+                        "failed",
+                        detail=str(tool_out.get("status") or "unavailable"),
+                    )
                     return self._speak_tool_line(
                         tool_speak,
                         wall0=wall0,
@@ -889,6 +961,7 @@ class NovaPipeline:
 
         try:
             raw, inf = self._with_genai(_gen)
+            decode_end = time.perf_counter()
         except Exception as exc:  # noqa: BLE001 -- HailoRT can raise several
             # exception types (HailoRTTimeout, HailoRTStatusException, ...);
             # any of them previously propagated all the way out of the

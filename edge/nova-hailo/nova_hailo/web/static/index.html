@@ -2,299 +2,380 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Nova-Hailo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Nova</title>
 <style>
-  * { box-sizing: border-box; }
   :root {
-    --bg: #0b0d12;
-    --panel: #12151c;
-    --panel-2: #171b24;
-    --border: #232833;
-    --text: #e7e9ee;
-    --muted: #8b93a2;
-    --idle: #6b7280;
-    --connecting: #d9a441;
-    --listening: #2dd4bf;
-    --speaking: #8b7cf6;
+    --bg0: #07090d;
+    --bg1: #0c1018;
+    --panel: rgba(16, 20, 28, 0.82);
+    --panel-solid: #12161f;
+    --border: rgba(255,255,255,0.08);
+    --text: #eef1f6;
+    --muted: #8b94a7;
+    --teal: #2dd4bf;
+    --amber: #e4b45a;
+    --violet: #8b7cf6;
+    --rose: #f07178;
+    --idle: #5c6578;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bot: env(safe-area-inset-bottom, 0px);
   }
+  * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
     margin: 0;
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    background: radial-gradient(1200px 800px at 50% 40%, #12151d 0%, var(--bg) 70%);
+    font-family: "SF Pro Display", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     color: var(--text);
+    background:
+      radial-gradient(900px 520px at 50% 38%, #141b28 0%, transparent 62%),
+      radial-gradient(700px 400px at 50% 100%, #0a2a26 0%, transparent 55%),
+      linear-gradient(180deg, var(--bg1), var(--bg0));
     overflow: hidden;
+    -webkit-font-smoothing: antialiased;
   }
 
+  /* —— chrome —— */
   #topbar {
     position: fixed; top: 0; left: 0; right: 0; z-index: 30;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 16px 20px; pointer-events: none;
+    padding: calc(14px + var(--safe-top)) 20px 12px;
+    pointer-events: none;
   }
   #brand {
     display: flex; align-items: center; gap: 10px;
-    font-size: 0.95em; font-weight: 700; letter-spacing: 0.22em; color: var(--text);
+    font-size: 0.92rem; font-weight: 650; letter-spacing: 0.28em;
   }
   #brand-mark {
-    width: 28px; height: 28px; flex-shrink: 0; border-radius: 50%;
-    background: radial-gradient(circle at 35% 35%, #2dd4bf 0%, #1c4a44 55%, #0b0d12 100%);
-    box-shadow: 0 0 18px #2dd4bf44;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--teal);
+    box-shadow: 0 0 0 0 rgba(45,212,191,0.45);
+    animation: pulse-dot 2.4s ease-in-out infinite;
   }
-  .brand-sub {
-    font-weight: 500; letter-spacing: 0.14em; color: var(--muted); font-size: 0.72em;
-    margin-left: 0.35em;
+  body[data-ui="SPEAKING"] #brand-mark { background: var(--violet); box-shadow: 0 0 16px #8b7cf666; }
+  body[data-ui="THINKING"] #brand-mark,
+  body[data-ui="TRANSCRIBING"] #brand-mark,
+  body[data-ui="DIDNT_CATCH"] #brand-mark { background: var(--amber); }
+  body[data-ui="LISTENING"] #brand-mark { background: var(--teal); }
+  body[data-ui="IDLE"] #brand-mark { background: var(--idle); animation: none; }
+  @keyframes pulse-dot {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(45,212,191,0.35); }
+    50% { box-shadow: 0 0 0 8px rgba(45,212,191,0); }
   }
-  #tools { display: flex; align-items: center; gap: 10px; pointer-events: auto; }
-  #metrics { display: flex; gap: 6px; margin-right: 4px; }
-  .metric {
-    display: flex; align-items: center; gap: 5px; padding: 6px 9px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--panel); font-size: 0.7em;
-    font-family: ui-monospace, monospace; color: var(--muted); white-space: nowrap;
+  .brand-sub { color: var(--muted); font-weight: 500; letter-spacing: 0.16em; font-size: 0.72em; margin-left: 2px; }
+  /* Product credit — guest-facing, not ops */
+  #powered-by {
+    position: fixed;
+    left: 20px;
+    bottom: calc(14px + var(--safe-bot));
+    z-index: 25;
+    font-size: 0.68rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    opacity: 0.72;
+    pointer-events: none;
+    user-select: none;
   }
-  .metric b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
-  .metric.warn b { color: #f0b344; }
-  .metric.hot b { color: #f47171; }
-  @media (max-width: 720px) { #metrics { display: none; } }
-
-  #latency {
-    position: fixed; left: 20px; bottom: 20px; z-index: 25; padding: 11px 13px;
-    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-    font-size: 0.78em; min-width: 188px;
+  #powered-by strong {
+    font-weight: 600;
+    color: #a8b0bf;
   }
-  #latency .lat-title { font-size: 0.72em; letter-spacing: .12em; text-transform: uppercase;
-                        color: var(--muted); margin-bottom: 7px; }
-  #latency .lat-row { display: flex; justify-content: space-between; gap: 18px; padding: 2px 0; }
-  #latency .lat-row span:first-child { color: var(--muted); }
-  #latency .lat-row b { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
-
+  #tools { display: flex; gap: 8px; pointer-events: auto; align-items: center; }
   .icon-btn {
-    width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--border);
-    background: var(--panel); color: var(--muted); cursor: pointer;
-    display: grid; place-items: center; transition: .15s; position: relative;
+    width: 40px; height: 40px; border-radius: 12px;
+    border: 1px solid var(--border); background: var(--panel);
+    color: var(--muted); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    line-height: 1; padding: 0;
+    backdrop-filter: blur(12px); transition: color .15s, border-color .15s, background .15s;
   }
-  .icon-btn:hover { color: var(--text); border-color: #333b49; background: var(--panel-2); }
-  .icon-btn svg { width: 18px; height: 18px; }
+  .icon-btn:hover { color: var(--text); border-color: rgba(255,255,255,0.16); }
+  .icon-btn svg { width: 18px; height: 18px; display: block; flex-shrink: 0; }
+  a.icon-btn {
+    font-size: 0.62rem; font-weight: 650; letter-spacing: 0.1em;
+    text-decoration: none; text-transform: uppercase;
+  }
   .icon-btn .dot {
-    position: absolute; top: 7px; right: 7px; width: 7px; height: 7px; border-radius: 50%;
-    background: var(--listening); display: none;
+    position: absolute; top: 8px; right: 8px; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--teal); display: none;
   }
+  #convo-btn { position: relative; }
 
+  /* —— stage / orb —— */
   #stage {
-    position: fixed; inset: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 26px;
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 22px; padding-bottom: 8vh;
   }
-  #orb-row { display: flex; align-items: center; gap: 40px; }
-  #orb-wrap { position: relative; width: 340px; height: 340px; cursor: pointer; }
+  #orb-row { display: flex; align-items: center; gap: clamp(24px, 6vw, 48px); }
+  #orb-wrap {
+    position: relative; width: min(340px, 72vw); height: min(340px, 72vw);
+    cursor: pointer; border-radius: 50%;
+  }
   #orb-canvas { width: 100%; height: 100%; display: block; }
-  #orb-wrap.disabled { cursor: default; }
+  #orb-halo {
+    position: absolute; inset: -18%; border-radius: 50%; pointer-events: none;
+    background: radial-gradient(circle, var(--halo, rgba(45,212,191,0.14)) 0%, transparent 68%);
+    transition: background .35s ease;
+  }
+  body[data-ui="SPEAKING"] { --halo: rgba(139,124,246,0.18); }
+  body[data-ui="THINKING"],
+  body[data-ui="DIDNT_CATCH"] { --halo: rgba(228,180,90,0.16); }
+  body[data-ui="LISTENING"] { --halo: rgba(45,212,191,0.16); }
 
   .orb-side-btn {
-    width: 56px; height: 56px; border-radius: 50%; border: 1px solid var(--border);
-    background: var(--panel); color: var(--text); cursor: pointer;
-    display: grid; place-items: center; transition: .15s; opacity: 0;
-    transform: scale(0.8); pointer-events: none;
+    width: 56px; height: 56px; border-radius: 50%;
+    border: 1px solid var(--border); background: var(--panel);
+    color: var(--text); cursor: pointer; display: grid; place-items: center;
+    backdrop-filter: blur(12px);
+    opacity: 0; transform: scale(0.85); pointer-events: none;
+    transition: opacity .2s, transform .2s, background .15s, border-color .15s, color .15s;
   }
   .orb-side-btn svg { width: 22px; height: 22px; }
   #stage.in-call .orb-side-btn { opacity: 1; transform: scale(1); pointer-events: auto; }
-  .orb-side-btn:hover { background: var(--panel-2); border-color: #333b49; }
+  .orb-side-btn:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.18); }
   #mic-btn.muted { background: #3a1c22; border-color: #7f1d1d; color: #fca5a5; }
   #stop-btn:hover { background: #3a1c22; border-color: #7f1d1d; color: #fca5a5; }
   #mic-ring {
-    position: absolute; left: 50%; bottom: -3px; transform: translateX(-50%);
-    width: 40px; height: 3px; border-radius: 3px; background: #2a3340; overflow: hidden;
+    position: absolute; left: 50%; bottom: -2px; transform: translateX(-50%);
+    width: 36px; height: 3px; border-radius: 3px; background: #1c2430; overflow: hidden;
   }
-  #mic-ring > i { display: block; height: 100%; width: 0%; background: var(--listening); }
+  #mic-ring > i { display: block; height: 100%; width: 0%; background: var(--teal); transition: width .05s linear; }
 
   #status-label {
-    font-size: 0.8em; letter-spacing: 0.28em; text-transform: uppercase; color: var(--muted);
-    min-height: 1em;
+    font-size: 0.78rem; letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--muted); min-height: 1.2em; font-weight: 500;
+    transition: color .25s;
+  }
+  body[data-ui="SPEAKING"] #status-label { color: var(--violet); }
+  body[data-ui="THINKING"] #status-label,
+  body[data-ui="TRANSCRIBING"] #status-label,
+  body[data-ui="DIDNT_CATCH"] #status-label { color: var(--amber); }
+  body[data-ui="LISTENING"] #status-label { color: var(--teal); }
+  body[data-ui="INTERRUPTING"] #status-label { color: var(--rose); }
+
+  /* Secondary status line under the FSM label (session hints only). */
+  #hint {
+    font-size: 0.78rem; color: var(--muted); opacity: 0.8;
+    max-width: 28rem; text-align: center; line-height: 1.4;
+    min-height: 1.2em; padding: 0 20px;
   }
 
-  #live { position: fixed; top: 74px; right: 20px; z-index: 25; width: 300px;
-          display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+  /* Floating tool/MCP status capsules — fade away; never sticky. */
+  #tool-capsules {
+    position: fixed;
+    left: 50%;
+    top: calc(72px + var(--safe-top));
+    transform: translateX(-50%);
+    z-index: 25;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    pointer-events: none;
+    max-width: min(360px, calc(100vw - 32px));
+  }
+  .tool-capsule {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 550;
+    letter-spacing: 0.04em;
+    color: #c8d0dc;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+    animation: capsule-in 0.22s ease;
+    transition: opacity 0.45s ease, transform 0.45s ease;
+    white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tool-capsule .dot {
+    width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+    background: var(--amber);
+    box-shadow: 0 0 8px rgba(228, 180, 90, 0.55);
+  }
+  .tool-capsule.running .dot { animation: capsule-pulse 1.1s ease infinite; }
+  .tool-capsule.done .dot { background: var(--teal); box-shadow: 0 0 8px rgba(45, 212, 191, 0.45); animation: none; }
+  .tool-capsule.failed .dot { background: var(--rose); box-shadow: 0 0 8px rgba(240, 113, 120, 0.45); animation: none; }
+  .tool-capsule.fade {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  @keyframes capsule-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes capsule-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+
+  /* —— live transcript strip —— */
+  #live {
+    position: fixed; left: 50%; bottom: calc(28px + var(--safe-bot));
+    transform: translateX(-50%);
+    width: min(520px, calc(100vw - 32px)); z-index: 20;
+    display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+  }
   .live-card {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-    padding: 10px 13px; animation: fadein .2s ease; transition: opacity .5s;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 11px 14px; backdrop-filter: blur(16px);
+    animation: rise .22s ease; transition: opacity .5s;
   }
-  .live-card.you { border-left: 3px solid var(--listening); }
-  .live-card.assistant { border-left: 3px solid var(--speaking); }
-  .live-card .who { font-size: 0.66em; letter-spacing: 0.12em; text-transform: uppercase;
-                    color: var(--muted); margin-bottom: 4px; }
-  .live-card .txt { font-size: 0.92em; line-height: 1.4; }
-  @keyframes fadein { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; } }
+  .live-card.you { border-left: 3px solid var(--teal); }
+  .live-card.assistant { border-left: 3px solid var(--violet); }
+  .live-card .who {
+    font-size: 0.62rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 4px;
+  }
+  .live-card .txt { font-size: 0.95rem; line-height: 1.4; }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
+  /* —— drawers —— */
   .side-drawer {
-    position: fixed; top: 0; right: 0; height: 100%; width: 380px; max-width: 90vw; z-index: 40;
-    background: #0e1117; border-left: 1px solid var(--border); transform: translateX(100%);
-    transition: transform .22s ease; display: flex; flex-direction: column;
+    position: fixed; top: 0; right: 0; height: 100%; width: min(380px, 92vw);
+    z-index: 40; background: #0b0e14; border-left: 1px solid var(--border);
+    transform: translateX(100%); transition: transform .22s ease;
+    display: flex; flex-direction: column;
   }
   .side-drawer.open { transform: translateX(0); }
-  #bench { z-index: 41; }
-  #drawer.open ~ #bench.open { transform: translateX(calc(-380px)); }
-  @media (max-width: 720px) {
-    #drawer.open ~ #bench.open { transform: translateX(-90vw); }
+  .drawer-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: calc(16px + var(--safe-top)) 18px 16px; border-bottom: 1px solid var(--border);
   }
-  .drawer-head { display: flex; align-items: center; justify-content: space-between;
-                 padding: 16px 18px; border-bottom: 1px solid var(--border); }
-  .drawer-head h2 { margin: 0; font-size: 1.05em; }
+  .drawer-head h2 { margin: 0; font-size: 1.05rem; font-weight: 600; }
   .drawer-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
   #convo { display: flex; flex-direction: column; gap: 12px; }
   #convo:empty::before { content: "No conversation yet."; color: #55606f; font-size: .9em; }
-  .bubble { max-width: 82%; padding: 9px 13px; border-radius: 14px; font-size: 0.92em; line-height: 1.45; }
-  .bubble .who { font-size: 0.64em; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
-  .bubble.you { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
-  .bubble.assistant { align-self: flex-end; background: #1c2030; }
-
-  .bench-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .bench-card {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 10px 12px;
+  .bubble {
+    max-width: 86%; padding: 10px 13px; border-radius: 14px;
+    font-size: 0.92rem; line-height: 1.45;
   }
-  .bench-card.wide { grid-column: 1 / -1; }
-  .bench-card .lbl { font-size: 0.66em; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
-  .bench-card .val { font-size: 1.05em; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
-  .bench-section { margin-top: 18px; }
-  .bench-section h3 { margin: 0 0 10px; font-size: 0.78em; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .bubble .who {
+    font-size: 0.62rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 3px;
+  }
+  .bubble.you { align-self: flex-start; background: var(--panel-solid); border: 1px solid var(--border); }
+  .bubble.assistant { align-self: flex-end; background: #181d2a; border: 1px solid rgba(139,124,246,0.18); }
 
-  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 50; display: none;
-             align-items: center; justify-content: center; }
+  /* —— settings —— */
+  #overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 50;
+    display: none; align-items: center; justify-content: center; padding: 16px;
+  }
   #overlay.open { display: flex; }
   #settings {
-    width: 420px; max-width: 92vw; max-height: 88vh; overflow-y: auto; background: var(--panel);
-    border: 1px solid var(--border); border-radius: 16px; padding: 20px;
+    width: 420px; max-width: 100%; max-height: 88vh; overflow-y: auto;
+    background: var(--panel-solid); border: 1px solid var(--border);
+    border-radius: 18px; padding: 22px;
   }
-  #settings h2 { margin: 0 0 16px; font-size: 1.15em; }
+  #settings h2 { margin: 0 0 16px; font-size: 1.15rem; }
   .field { margin-bottom: 16px; }
-  .field > label { display: block; font-size: 0.72em; letter-spacing: .1em; text-transform: uppercase;
-                   color: var(--muted); margin-bottom: 7px; }
+  .field > label {
+    display: block; font-size: 0.7rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 7px;
+  }
   .field textarea {
-    width: 100%; background: #0c0f15; color: var(--text); border: 1px solid var(--border);
-    border-radius: 9px; padding: 9px 10px; font-size: 0.9em; font-family: inherit; min-height: 120px; resize: vertical;
+    width: 100%; background: #0a0d13; color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px; font-size: 0.9rem; font-family: inherit;
+    min-height: 110px; resize: vertical;
   }
   .gate-top { display: flex; justify-content: space-between; align-items: baseline; }
   .gate-top .val { font-size: .82em; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .field input[type=range] { width: 100%; margin: 8px 0 4px; accent-color: var(--listening); }
+  .field input[type=range] { width: 100%; margin: 8px 0 4px; accent-color: var(--teal); }
   .gate-ends { display: flex; justify-content: space-between; font-size: .7em; color: #55606f; }
   .level-bar { height: 6px; background: #1c2129; border-radius: 3px; margin-top: 8px; overflow: hidden; }
-  .level-bar > i { display: block; height: 100%; width: 0%; background: var(--listening); transition: width .05s linear; }
-  .hint { font-size: .78em; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+  .level-bar > i { display: block; height: 100%; width: 0%; background: var(--teal); transition: width .05s linear; }
+  .hint { font-size: .78rem; color: var(--muted); margin-top: 6px; line-height: 1.45; }
   .btn-primary {
-    width: 100%; padding: 11px; border: none; border-radius: 9px; cursor: pointer;
-    background: #eceef2; color: #10131a; font-weight: 600; font-size: .92em; margin-top: 4px;
+    width: 100%; padding: 12px; border: none; border-radius: 10px; cursor: pointer;
+    background: #eceef2; color: #10131a; font-weight: 600; font-size: .92rem; margin-top: 4px;
   }
   .btn-primary:hover { background: #fff; }
-
+  .btn-primary:disabled { opacity: .55; cursor: not-allowed; }
+  .btn-secondary {
+    width: 100%; padding: 10px; border-radius: 10px; cursor: pointer; margin-top: 6px;
+    background: transparent; color: var(--text); border: 1px solid var(--border); font-size: .9rem;
+  }
   #gcal-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; }
   #gcal-pill {
-    font-size: .72em; letter-spacing: .06em; text-transform: uppercase;
+    font-size: .7rem; letter-spacing: .06em; text-transform: uppercase;
     padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border);
   }
-  #gcal-pill.ok { color: var(--listening); border-color: #1a4a44; background: #0f2a27; }
-  #gcal-pill.bad { color: #f0b344; border-color: #4a3a1a; background: #2a2210; }
-  .btn-secondary {
-    width: 100%; padding: 10px; border-radius: 9px; cursor: pointer; margin-top: 6px;
-    background: transparent; color: var(--text); border: 1px solid var(--border); font-size: .9em;
-  }
-  .btn-secondary:hover { border-color: #55606f; }
-  .btn-primary:disabled { opacity: .55; cursor: not-allowed; }
-
+  #gcal-pill.ok { color: var(--teal); border-color: #1a4a44; background: #0f2a27; }
+  #gcal-pill.bad { color: var(--amber); border-color: #4a3a1a; background: #2a2210; }
   #log { font-size: 0.72em; color: #55606f; margin-top: 12px; white-space: pre-wrap;
          word-break: break-word; max-height: 80px; overflow-y: auto; }
+  a.dash-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--muted); text-decoration: none; font-size: 0.78rem; letter-spacing: 0.06em;
+  }
+  a.dash-link:hover { color: var(--text); }
 </style>
 </head>
-<body>
+<body data-ui="IDLE">
 
 <div id="topbar">
   <div id="brand">
     <span id="brand-mark" aria-hidden="true"></span>
-    NOVA<span class="brand-sub">hailo</span>
+    NOVA<span class="brand-sub">edge</span>
   </div>
   <div id="tools">
-    <div id="metrics">
-      <span class="metric" id="m-cpu">CPU <b>—</b></span>
-      <span class="metric" id="m-ram">RAM <b>—</b></span>
-      <span class="metric" id="m-power">POWER <b>—</b></span>
-    </div>
-    <button class="icon-btn" id="bench-btn" title="Session bench">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 5 5-9"/></svg>
-    </button>
-    <button class="icon-btn" id="convo-btn" title="Conversation">
+    <a class="icon-btn" href="/dashboard" title="Ops dashboard" target="_blank" rel="noopener">OPS</a>
+    <button class="icon-btn" id="convo-btn" title="Conversation" type="button">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       <span class="dot" id="convo-dot"></span>
     </button>
-    <button class="icon-btn" id="settings-btn" title="Settings">
+    <button class="icon-btn" id="settings-btn" title="Settings" type="button">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     </button>
   </div>
 </div>
 
+<div id="powered-by">Powered by <strong>Elevatics AI</strong></div>
+
 <div id="stage">
   <div id="orb-row">
-    <button class="orb-side-btn" id="mic-btn" title="Mute microphone">
+    <button class="orb-side-btn" id="mic-btn" title="Mute microphone" type="button">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
       <div id="mic-ring"><i></i></div>
     </button>
-    <div id="orb-wrap">
+    <div id="orb-wrap" title="Tap to start">
+      <div id="orb-halo" aria-hidden="true"></div>
       <canvas id="orb-canvas" width="340" height="340"></canvas>
     </div>
-    <button class="orb-side-btn" id="stop-btn" title="End call">
+    <button class="orb-side-btn" id="stop-btn" title="End session" type="button">
       <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
     </button>
   </div>
   <div id="status-label">Tap to start</div>
+  <div id="hint"></div>
 </div>
 
-<div id="live"></div>
+<div id="tool-capsules" aria-live="polite"></div>
 
-<div id="latency">
-  <div class="lat-title">Last turn latency</div>
-  <div class="lat-row"><span>STT</span><b id="lat-stt">—</b></div>
-  <div class="lat-row"><span>TTFB</span><b id="lat-ttfb">—</b></div>
-  <div class="lat-row"><span>TTFA</span><b id="lat-ttfa">—</b></div>
-  <div class="lat-row"><span>Overlap</span><b id="lat-overlap">—</b></div>
-  <div class="lat-row"><span>Decode</span><b id="lat-decode">—</b></div>
-  <div class="lat-row"><span>Turn</span><b id="lat-turn">—</b></div>
-</div>
+<div id="live" aria-live="polite"></div>
 
-<div id="drawer" class="side-drawer">
+<div id="drawer" class="side-drawer" aria-hidden="true">
   <div class="drawer-head">
     <h2>Conversation</h2>
-    <button class="icon-btn" id="drawer-close" title="Close">
+    <button class="icon-btn" id="drawer-close" title="Close" type="button">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
   </div>
   <div class="drawer-body" id="convo"></div>
-</div>
-
-<div id="bench" class="side-drawer">
-  <div class="drawer-head">
-    <h2>Session bench</h2>
-    <button class="icon-btn" id="bench-close" title="Close">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-    </button>
-  </div>
-  <div class="drawer-body">
-    <div class="bench-grid">
-      <div class="bench-card"><div class="lbl">Avg TTFT</div><div class="val" id="b-ttft">—</div></div>
-      <div class="bench-card"><div class="lbl">Avg decode</div><div class="val" id="b-decode">—</div></div>
-      <div class="bench-card"><div class="lbl">Avg power</div><div class="val" id="b-avg-power">—</div></div>
-      <div class="bench-card"><div class="lbl">Peak power</div><div class="val" id="b-peak-power">—</div></div>
-      <div class="bench-card"><div class="lbl">Tokens / J</div><div class="val" id="b-tpj">—</div></div>
-      <div class="bench-card"><div class="lbl">Est. TOPS</div><div class="val" id="b-tops">—</div></div>
-    </div>
-    <div class="bench-section">
-      <h3>Last turn token latency</h3>
-      <div class="bench-grid">
-        <div class="bench-card"><div class="lbl">P50</div><div class="val" id="b-p50">—</div></div>
-        <div class="bench-card"><div class="lbl">P95</div><div class="val" id="b-p95">—</div></div>
-      </div>
-    </div>
-    <div class="bench-section">
-      <h3>Turns</h3>
-      <div class="bench-card wide"><div class="val" id="b-turns">—</div></div>
-    </div>
-  </div>
 </div>
 
 <div id="overlay">
@@ -305,28 +386,24 @@
       <input type="range" id="gate-slider" min="-60" max="0" step="1" value="-35">
       <div class="gate-ends"><span>Off</span><span>-3 dB</span></div>
       <div class="level-bar"><i id="mic-level-fill"></i></div>
-      <div class="hint">Mutes the mic below the handle so room noise isn't sent. Slide fully left to turn it off; the bar shows your live input while in a call.</div>
+      <div class="hint">Mutes the mic below the handle so cabin noise is not sent.</div>
     </div>
     <div class="field">
       <label>Google Workspace</label>
       <div id="gcal-row">
-        <span style="font-size:.9em;color:var(--text)">Calendar · Gmail · Drive (read-only)</span>
+        <span style="font-size:.9em">Calendar · Gmail · Drive</span>
         <span id="gcal-pill" class="bad">Disconnected</span>
       </div>
       <button class="btn-primary" id="gcal-connect" type="button">Connect with Google</button>
       <button class="btn-secondary" id="gcal-disconnect" type="button" style="display:none">Disconnect</button>
-      <div class="hint" id="gcal-hint">
-        One-time authorize in <em>this</em> Chrome (work profile). Tokens stay on this Pi under
-        <code>runtime/google_oauth/</code>. OAuth callback listens on <code>127.0.0.1:8765</code>
-        (separate from the voice UI on 8766).
-      </div>
+      <div class="hint" id="gcal-hint">Tokens stay on this device under <code>runtime/google_oauth/</code>.</div>
     </div>
     <div class="field">
       <label>Instructions</label>
-      <textarea id="instructions" placeholder="Loading persona from /config..."></textarea>
+      <textarea id="instructions" placeholder="Loading persona…"></textarea>
     </div>
-    <button class="btn-primary" id="restart-btn">Restart conversation with these settings</button>
-    <div class="hint">Noise gate and instructions apply live while you're in a call. Restart clears chat history and reconnects.</div>
+    <button class="btn-primary" id="restart-btn" type="button">Restart conversation</button>
+    <div class="hint"><a class="dash-link" href="/dashboard" target="_blank" rel="noopener">Open ops dashboard →</a> latency, FSM, STT path (not on the driver face).</div>
     <div id="log"></div>
   </div>
 </div>
@@ -340,160 +417,240 @@
   const orbWrap = document.getElementById('orb-wrap');
   const stage = document.getElementById('stage');
   const statusLabel = document.getElementById('status-label');
+  const hintEl = document.getElementById('hint');
+  const toolCapsulesEl = document.getElementById('tool-capsules');
   const micBtn = document.getElementById('mic-btn');
   const stopBtn = document.getElementById('stop-btn');
   const micRingFill = document.querySelector('#mic-ring > i');
   const convoBtn = document.getElementById('convo-btn');
   const convoDot = document.getElementById('convo-dot');
-  const benchBtn = document.getElementById('bench-btn');
   const settingsBtn = document.getElementById('settings-btn');
-  const overlay = document.getElementById('overlay');
   const drawer = document.getElementById('drawer');
-  const benchDrawer = document.getElementById('bench');
   const drawerClose = document.getElementById('drawer-close');
-  const benchClose = document.getElementById('bench-close');
   const convoEl = document.getElementById('convo');
   const liveEl = document.getElementById('live');
+  const overlay = document.getElementById('overlay');
+  const instructionsEl = document.getElementById('instructions');
   const gateSlider = document.getElementById('gate-slider');
   const gateValueEl = document.getElementById('gate-value');
   const micLevelFill = document.getElementById('mic-level-fill');
-  const instructionsEl = document.getElementById('instructions');
   const restartBtn = document.getElementById('restart-btn');
   const logEl = document.getElementById('log');
+  const gcalPill = document.getElementById('gcal-pill');
+  const gcalConnect = document.getElementById('gcal-connect');
+  const gcalDisconnect = document.getElementById('gcal-disconnect');
 
-  let ws = null, wsOpen = false, audioCtx = null, micStream = null;
-  let micAnalyser = null, captureProcessor = null, silentSink = null;
-  let playGain = null, playAnalyser = null, playQueue = [], nextStartTime = 0;
-  let status = 'idle';
+  const DEFAULT_PLAYBACK_RATE = 24000;
+  const STATUS_TEXT = {
+    IDLE: 'Tap to start',
+    ARMED: 'Ready',
+    LISTENING: 'Listening',
+    TRANSCRIBING: 'Transcribing',
+    THINKING: 'Thinking',
+    DIDNT_CATCH: "Didn't catch that",
+    SPEAKING: 'Speaking',
+    INTERRUPTING: 'Interrupted',
+    connecting: 'Connecting',
+  };
+
+  let ws = null, wsOpen = false, wsUrl = null;
+  let audioCtx = null, micStream = null, micNode = null, micAnalyser = null, playAnalyser = null, playGain = null;
+  let playQueue = [];
+  let nextStartTime = 0;
   let micMuted = false;
-  let wsUrl = null;
-  let intentionalClose = false;
-  let reconnecting = false;
-  let gateUpdateTimer = null;
-  let liveCards = { you: null, assistant: null };
+  let status = 'IDLE';           // UI status (server FSM or local)
+  let serverFsm = 'IDLE';
+  let responseDonePending = false; // wait for playback drain before leaving SPEAKING
   let asstPartial = '';
-
-  const DEFAULT_PLAYBACK_RATE = 22050;
+  let liveCards = { you: null, assistant: null };
+  let gateUpdateTimer = null;
+  let turnT0 = null;
+  let gotFirstAudio = false;
 
   function log(msg) {
-    const ts = new Date().toISOString().slice(11, 19);
-    logEl.textContent += '[' + ts + '] ' + msg + '\n';
+    if (!logEl) return;
+    logEl.textContent = (logEl.textContent ? logEl.textContent + '\n' : '') + msg;
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  let turnT0 = 0;
-  let lat = { stt: null, ttfb: null, ttfa: null, overlap: null, decode: null, turn: null };
-  window.__novaGenId = null;
-  let gotFirstAudio = false;
+  // Tool / MCP status capsules (fade away — never sticky like old Research · done)
+  const TOOL_LABELS = {
+    web_search: 'Search',
+    deep_research: 'Research',
+    research_status: 'Research',
+    check_email: 'Email',
+    check_calendar: 'Calendar',
+    list_drive_files: 'Drive',
+    stock_quote: 'Stock',
+    pick_stock_price: 'Stock',
+  };
+  const capsuleTimers = new Map(); // key -> timeout id
 
-  const fmtMs = (ms) => ms == null ? '—' : (ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : Math.round(ms) + ' ms');
-  const fmtTokS = (n) => n == null || !isFinite(n) ? '—' : (Math.round(n) + ' tok/s');
-  const fmtW = (w) => w == null || !isFinite(w) ? '—' : (Math.round(w * 10) / 10) + ' W';
-  const fmtNum = (n, suffix) => n == null || !isFinite(n) ? '—' : (Math.round(n * 100) / 100) + (suffix || '');
-
-  function resetTurnTimers() {
-    turnT0 = performance.now();
-    lat = { stt: null, ttfb: null, ttfa: null, overlap: null, decode: null, turn: null };
-    gotFirstAudio = false;
-    renderLatency();
+  function toolLabel(name) {
+    const key = String(name || 'tool').toLowerCase();
+    if (TOOL_LABELS[key]) return TOOL_LABELS[key];
+    return key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   }
 
-  function renderLatency() {
-    document.getElementById('lat-stt').textContent = fmtMs(lat.stt);
-    document.getElementById('lat-ttfb').textContent = fmtMs(lat.ttfb);
-    document.getElementById('lat-ttfa').textContent = fmtMs(lat.ttfa);
-    document.getElementById('lat-overlap').textContent = fmtMs(lat.overlap);
-    document.getElementById('lat-decode').textContent = fmtTokS(lat.decode);
-    document.getElementById('lat-turn').textContent = fmtMs(lat.turn);
+  function capsuleKey(name, jobId) {
+    if (jobId) return 'research:' + jobId;
+    return 'tool:' + String(name || 'tool').toLowerCase();
   }
 
-  function applyTurnMetrics(m) {
-    if (!m || typeof m !== 'object') return;
-    if (m.stt_ms != null) lat.stt = m.stt_ms;
-    if (m.ttfb_ms != null) lat.ttfb = m.ttfb_ms;
-    if (m.ttfa_ms != null) lat.ttfa = m.ttfa_ms;
-    if (m.overlap_ms != null) lat.overlap = m.overlap_ms;
-    const dec = m.decode_tok_s != null ? m.decode_tok_s : (m.llm && m.llm.decode_tok_s);
-    if (dec != null) lat.decode = parseFloat(dec);
-    if (m.total_latency_ms != null) lat.turn = m.total_latency_ms;
-    renderLatency();
-    if (m.token_latency_p50_ms != null) document.getElementById('b-p50').textContent = fmtMs(m.token_latency_p50_ms);
-    if (m.token_latency_p95_ms != null) document.getElementById('b-p95').textContent = fmtMs(m.token_latency_p95_ms);
-    if (m.llm && m.llm.token_latency_p50_ms != null) document.getElementById('b-p50').textContent = fmtMs(m.llm.token_latency_p50_ms);
-    if (m.llm && m.llm.token_latency_p95_ms != null) document.getElementById('b-p95').textContent = fmtMs(m.llm.token_latency_p95_ms);
-  }
+  function showToolCapsule(opts) {
+    if (!toolCapsulesEl) return;
+    const name = opts.name || 'tool';
+    const status = String(opts.status || 'running').toLowerCase();
+    const jobId = opts.job_id || null;
+    const key = capsuleKey(name, jobId);
+    const label = toolLabel(name === 'research_status' ? 'deep_research' : name);
+    const statusWord = status === 'searching' || status === 'generating' || status === 'running'
+      ? (status === 'running' ? '…' : status)
+      : status;
+    const text = label + (statusWord && statusWord !== '…' ? ' · ' + statusWord : (statusWord === '…' ? ' · …' : ''));
 
-  function renderBench(b) {
-    if (!b) return;
-    document.getElementById('b-ttft').textContent = fmtMs(b.avg_ttft_ms);
-    document.getElementById('b-decode').textContent = fmtTokS(b.avg_decode_tokens_per_second);
-    document.getElementById('b-avg-power').textContent = fmtW(b.avg_power_w);
-    document.getElementById('b-peak-power').textContent = fmtW(b.peak_power_w);
-    document.getElementById('b-tpj').textContent = fmtNum(b.tokens_per_joule, '');
-    document.getElementById('b-tops').textContent = fmtNum(b.estimated_tops, '');
-    document.getElementById('b-turns').textContent = b.turns != null ? String(b.turns) + ' turns' : '—';
-    if (b.last_turn) {
-      const lt = b.last_turn;
-      if (lt.token_latency_p50_ms != null) document.getElementById('b-p50').textContent = fmtMs(lt.token_latency_p50_ms);
-      if (lt.token_latency_p95_ms != null) document.getElementById('b-p95').textContent = fmtMs(lt.token_latency_p95_ms);
+    let el = null;
+    toolCapsulesEl.querySelectorAll('.tool-capsule').forEach(function (node) {
+      if (node.dataset.key === key) el = node;
+    });
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'tool-capsule';
+      el.dataset.key = key;
+      el.innerHTML = '<span class="dot" aria-hidden="true"></span><span class="cap-txt"></span>';
+      toolCapsulesEl.appendChild(el);
+    }
+    el.classList.remove('fade', 'running', 'done', 'failed');
+    const terminal = status === 'done' || status === 'failed' || status === 'complete' || status === 'completed';
+    el.classList.add(terminal ? (status === 'failed' ? 'failed' : 'done') : 'running');
+    const txt = el.querySelector('.cap-txt');
+    if (txt) txt.textContent = text;
+
+    if (capsuleTimers.has(key)) {
+      clearTimeout(capsuleTimers.get(key));
+      capsuleTimers.delete(key);
+    }
+    // Terminal states fade out; running stays until done/failed or response.done clear.
+    if (terminal) {
+      const t = setTimeout(function () {
+        el.classList.add('fade');
+        setTimeout(function () {
+          if (el.parentNode) el.parentNode.removeChild(el);
+          capsuleTimers.delete(key);
+        }, 480);
+      }, 1600);
+      capsuleTimers.set(key, t);
+    }
+    // Never leave sticky secondary hint from research path.
+    if (hintEl && /^Research/i.test(hintEl.textContent || '')) {
+      hintEl.textContent = '';
     }
   }
 
-  function pollSystemMetrics() {
-    fetch('/metrics/system').then(r => r.json()).then(m => {
-      setPctMetric('m-cpu', 'CPU', m.cpu_pct);
-      setPctMetric('m-ram', 'RAM', m.ram_pct);
-      const el = document.getElementById('m-power');
-      const pw = m.power_w;
-      el.innerHTML = 'POWER <b>' + (pw != null ? fmtW(pw).replace(' W', '') + ' W' : '—') + '</b>';
-      el.className = 'metric' + (pw >= 15 ? ' hot' : pw >= 10 ? ' warn' : '');
+  function clearToolCapsules() {
+    if (!toolCapsulesEl) return;
+    capsuleTimers.forEach(function (id) { clearTimeout(id); });
+    capsuleTimers.clear();
+    toolCapsulesEl.querySelectorAll('.tool-capsule').forEach(function (el) {
+      el.classList.add('fade');
+      setTimeout(function () {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      }, 400);
+    });
+  }
+
+  function setUiStatus(next, opts) {
+    const force = opts && opts.force;
+    // While audio is still leaving the speaker, never snap back to listening
+    // just because the server finished generating (the old HF-clone bug).
+    if (!force && status === 'SPEAKING' && playQueue.length > 0
+        && next !== 'SPEAKING' && next !== 'INTERRUPTING' && next !== 'IDLE') {
+      responseDonePending = true;
+      return;
+    }
+    status = next;
+    document.body.dataset.ui = next;
+    statusLabel.textContent = STATUS_TEXT[next] || next;
+    const inCall = next !== 'IDLE' && next !== 'connecting';
+    stage.classList.toggle('in-call', inCall || wsOpen);
+  }
+
+  function applyServerFsm(fsm) {
+    if (!fsm || !fsm.state) return;
+    serverFsm = fsm.state;
+    // Map server states onto the orb; SPEAKING is also set by first audio.delta.
+    if (fsm.state === 'SPEAKING') {
+      setUiStatus('SPEAKING');
+      return;
+    }
+    if (status === 'SPEAKING' && playQueue.length > 0
+        && (fsm.state === 'LISTENING' || fsm.state === 'IDLE' || fsm.state === 'THINKING')) {
+      // Server moved on; keep purple until browser drain.
+      responseDonePending = true;
+      return;
+    }
+    if (fsm.state === 'INTERRUPTING') {
+      setUiStatus('INTERRUPTING', { force: true });
+      return;
+    }
+    setUiStatus(fsm.state);
+  }
+
+  function maybeLeaveSpeaking() {
+    if (playQueue.length > 0) return;
+    if (responseDonePending || status === 'SPEAKING') {
+      responseDonePending = false;
+      const next = (serverFsm === 'LISTENING' || serverFsm === 'ARMED') ? serverFsm : 'LISTENING';
+      setUiStatus(next, { force: true });
+    }
+  }
+
+  // —— Google ——
+  function refreshGoogleStatus() {
+    fetch('/integrations/google').then(r => r.json()).then(s => {
+      const ok = !!(s.authenticated || s.connected);
+      gcalPill.textContent = ok ? 'Connected' : 'Disconnected';
+      gcalPill.className = ok ? 'ok' : 'bad';
+      gcalConnect.style.display = ok ? 'none' : 'block';
+      gcalDisconnect.style.display = ok ? 'block' : 'none';
     }).catch(() => {});
   }
+  refreshGoogleStatus();
+  gcalConnect.addEventListener('click', () => {
+    gcalConnect.disabled = true;
+    fetch('/integrations/google/auth/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: false }),
+    }).then(r => r.json()).then(d => {
+      if (d.auth_url) window.open(d.auth_url, '_blank', 'noopener');
+      else log('OAuth: ' + (d.error || JSON.stringify(d)));
+    }).catch(e => log('OAuth failed: ' + e.message))
+      .finally(() => { gcalConnect.disabled = false; setTimeout(refreshGoogleStatus, 2500); });
+  });
+  gcalDisconnect.addEventListener('click', () => {
+    fetch('/integrations/google/disconnect', { method: 'POST' })
+      .then(() => refreshGoogleStatus()).catch(() => {});
+  });
 
-  function setPctMetric(id, label, pct) {
-    const el = document.getElementById(id);
-    if (pct == null) { el.innerHTML = label + ' <b>n/a</b>'; el.className = 'metric'; return; }
-    el.innerHTML = label + ' <b>' + pct + '%</b>';
-    el.className = 'metric' + (pct >= 90 ? ' hot' : pct >= 70 ? ' warn' : '');
-  }
-
-  function pollBenchMetrics() {
-    fetch('/metrics/bench').then(r => r.json()).then(renderBench).catch(() => {});
-  }
-
-  pollSystemMetrics();
-  pollBenchMetrics();
-  setInterval(pollSystemMetrics, 2000);
-  setInterval(pollBenchMetrics, 2000);
-
-  const STATUS_TEXT = { idle: 'Tap to start', connecting: 'Connecting', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking' };
-  function setStatus(next) {
-    status = next;
-    statusLabel.textContent = STATUS_TEXT[next] || next;
-    stage.classList.toggle('in-call', next !== 'idle');
-  }
-
+  // —— config / gate ——
   function dbToThreshold(db) {
     const norm = (db + 60) / 60;
     return Math.min(0.95, Math.max(0.05, 0.05 + norm * 0.9));
   }
   function currentThreshold() { return dbToThreshold(parseFloat(gateSlider.value)); }
-
   gateSlider.addEventListener('input', () => {
     gateValueEl.textContent = gateSlider.value + ' dB';
     if (!wsOpen) return;
     clearTimeout(gateUpdateTimer);
     gateUpdateTimer = setTimeout(() => { if (wsOpen) sendSessionUpdate(); }, 200);
   });
-
   function sendSessionUpdate() {
+    if (!wsOpen) return;
     ws.send(JSON.stringify({
       type: 'session.update',
       session: {
         instructions: instructionsEl.value,
-        audio: {
-          input: { turn_detection: { type: 'server_vad', threshold: currentThreshold() } },
-        },
+        audio: { input: { turn_detection: { type: 'server_vad', threshold: currentThreshold() } } },
       },
     }));
   }
@@ -502,14 +659,15 @@
   const configReady = fetch('/config').then(r => r.json()).then(data => {
     if (data.instructions) instructionsEl.value = data.instructions;
     if (data.ws_url) wsUrl = data.ws_url;
-    log('config loaded (ws ' + (wsUrl || 'default') + ')');
-  }).catch(e => log('config fetch failed: ' + e.message));
+  }).catch(e => log('config: ' + e.message));
 
   function resolveWsUrl() {
     if (wsUrl) return wsUrl;
-    return 'ws://' + location.hostname + ':8766/v1/realtime';
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    return proto + '://' + location.host + '/v1/realtime';
   }
 
+  // —— audio helpers ——
   function downsampleTo16k(float32, inputRate) {
     if (inputRate === 16000) return float32;
     const ratio = inputRate / 16000;
@@ -525,7 +683,6 @@
     }
     return result;
   }
-
   function floatTo16BitPCM(float32) {
     const buf = new ArrayBuffer(float32.length * 2);
     const view = new DataView(buf);
@@ -535,14 +692,13 @@
     }
     return buf;
   }
-
   function bufferToBase64(buf) {
     let binary = '';
     const bytes = new Uint8Array(buf), chunkSize = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunkSize) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    for (let i = 0; i < bytes.length; i += chunkSize)
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
     return btoa(binary);
   }
-
   function base64ToInt16(b64) {
     const binary = atob(b64), bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -551,9 +707,7 @@
 
   function playChunk(b64, rate) {
     if (!audioCtx || !playGain) return;
-    if (audioCtx.state === 'suspended') {
-      try { audioCtx.resume(); } catch (e) {}
-    }
+    if (audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (e) {} }
     const sampleRate = rate || DEFAULT_PLAYBACK_RATE;
     const int16 = base64ToInt16(b64);
     if (!int16.length) return;
@@ -568,7 +722,10 @@
     src.start(startAt);
     nextStartTime = startAt + buffer.duration;
     playQueue.push(src);
-    src.onended = () => { playQueue = playQueue.filter(s => s !== src); };
+    src.onended = () => {
+      playQueue = playQueue.filter(s => s !== src);
+      maybeLeaveSpeaking();
+    };
   }
 
   function stopPlayback(reason) {
@@ -576,18 +733,15 @@
     for (const src of playQueue) { try { src.stop(); } catch (e) {} }
     playQueue = [];
     nextStartTime = audioCtx ? audioCtx.currentTime : 0;
+    responseDonePending = false;
     if (had && wsOpen) {
       try {
-        ws.send(JSON.stringify({
-          type: 'playback.interrupted',
-          reason: reason || 'stop',
-          t_ms: performance.now()
-        }));
+        ws.send(JSON.stringify({ type: 'playback.interrupted', reason: reason || 'stop', t_ms: performance.now() }));
       } catch (e) {}
     }
   }
 
-  function whoLabel(role) { return role === 'you' ? 'You' : 'Assistant'; }
+  function whoLabel(role) { return role === 'you' ? 'You' : 'Nova'; }
 
   function addTurn(role, text, opts) {
     if (!text) return;
@@ -612,34 +766,29 @@
       card.appendChild(cw); card.appendChild(ct);
       liveEl.appendChild(card);
       liveCards[role] = card;
-      setTimeout(() => { if (card.parentNode) card.style.opacity = '0'; }, 5000);
+      setTimeout(() => { if (card.parentNode) card.style.opacity = '0'; }, 5500);
       setTimeout(() => {
         if (card.parentNode) card.remove();
         if (liveCards[role] === card) liveCards[role] = null;
-      }, 5600);
+      }, 6100);
     }
+    card.style.opacity = '1';
     card.querySelector('.txt').textContent = text;
   }
 
   function handleAudioDelta(data) {
-    // Drop only STRICTLY older gens. After barge-in cancel, __novaGenId is the
-    // interrupt id; the next turn bumps again — equality/newer must play.
     if (data.generation_id != null && window.__novaGenId != null
         && data.generation_id < window.__novaGenId) {
-      return; // stale generation drop
+      return;
     }
-    if (data.generation_id != null) {
-      window.__novaGenId = data.generation_id;
-    }
-    setStatus('speaking');
+    if (data.generation_id != null) window.__novaGenId = data.generation_id;
+    setUiStatus('SPEAKING');
+    responseDonePending = false;
     const rate = data.sample_rate || data.sampleRate || DEFAULT_PLAYBACK_RATE;
     const chunk = data.delta || data.audio;
     if (!chunk) return;
     if (turnT0 && !gotFirstAudio) {
-      lat.ttfb = lat.ttfb == null ? performance.now() - turnT0 : lat.ttfb;
-      lat.ttfa = lat.ttfa == null ? performance.now() - turnT0 : lat.ttfa;
       gotFirstAudio = true;
-      renderLatency();
       if (wsOpen) {
         try {
           ws.send(JSON.stringify({
@@ -653,35 +802,56 @@
     playChunk(chunk, rate);
   }
 
+  // Fan-out to /dashboard in the same browser (ops glass cockpit).
+  let opsBc = null;
+  try { opsBc = new BroadcastChannel('nova_ops'); } catch (e) { opsBc = null; }
+  function bridgeOps(data) {
+    if (!opsBc) return;
+    try { opsBc.postMessage(data); } catch (e) {}
+  }
+
   function handleServerEvent(data) {
     switch (data.type) {
       case 'session.created':
+        if (data.session && data.session.fsm) applyServerFsm(data.session.fsm);
+        bridgeOps(data);
+        break;
+      case 'nova.fsm':
+        applyServerFsm(data.fsm || data);
+        bridgeOps(data);
         break;
       case 'playback.cancel':
         stopPlayback(data.reason || 'server_cancel');
         if (data.generation_id != null) window.__novaGenId = data.generation_id;
+        setUiStatus('INTERRUPTING', { force: true });
         break;
       case 'input_audio_buffer.speech_started':
-        // Only barge-in cancel while assistant audio is playing / queued.
         if (playQueue.length) {
           stopPlayback('vad_speech_started');
           if (wsOpen) {
             try { ws.send(JSON.stringify({ type: 'response.cancel' })); } catch (e) {}
           }
         }
-        setStatus('listening');
+        setUiStatus('LISTENING');
         asstPartial = '';
         break;
       case 'input_audio_buffer.speech_stopped':
-        setStatus('thinking');
-        resetTurnTimers();
-        window.__novaGenId = null; // allow next turn audio
+        setUiStatus('TRANSCRIBING');
+        turnT0 = performance.now();
+        gotFirstAudio = false;
+        window.__novaGenId = null;
         break;
-      case 'conversation.item.input_audio_transcription.completed':
-        if (turnT0 && lat.stt == null) lat.stt = performance.now() - turnT0;
-        addTurn('you', data.transcript);
-        renderLatency();
+      case 'conversation.item.input_audio_transcription.completed': {
+        const transcript = data.transcript == null ? '' : String(data.transcript);
+        if (!transcript.trim()) {
+          // Never-silent: empty STT — no empty "you" bubble; surface feedback immediately.
+          setUiStatus('DIDNT_CATCH');
+          break;
+        }
+        addTurn('you', transcript);
+        setUiStatus('THINKING');
         break;
+      }
       case 'response.audio_transcript.delta':
       case 'response.output_audio_transcript.delta':
         asstPartial += data.delta || '';
@@ -692,6 +862,8 @@
         if (data.transcript) {
           asstPartial = data.transcript;
           addTurn('assistant', asstPartial);
+        } else if (asstPartial) {
+          addTurn('assistant', asstPartial);
         }
         asstPartial = '';
         break;
@@ -699,19 +871,73 @@
       case 'response.output_audio.delta':
         handleAudioDelta(data);
         break;
-      case 'response.done':
-        if (turnT0 && lat.turn == null) lat.turn = performance.now() - turnT0;
+      case 'response.done': {
         const meta = (data.response && data.response.metadata) || {};
-        if (lat.decode == null && meta.decode_tok_s != null) lat.decode = parseFloat(meta.decode_tok_s);
-        renderLatency();
-        if (status !== 'idle') setStatus('listening');
+        const reason = meta.reason == null ? '' : String(meta.reason);
+        const isFailClosed = !!(meta.fail_closed || meta.skipped
+          || /empty|gate/i.test(reason));
+        // End-of-turn: fade leftover running tool capsules so nothing sticks.
+        if (toolCapsulesEl) {
+          toolCapsulesEl.querySelectorAll('.tool-capsule.running').forEach(function (el) {
+            el.classList.remove('running');
+            el.classList.add('done');
+            const key = el.dataset.key || '';
+            if (capsuleTimers.has(key)) clearTimeout(capsuleTimers.get(key));
+            const t = setTimeout(function () {
+              el.classList.add('fade');
+              setTimeout(function () {
+                if (el.parentNode) el.parentNode.removeChild(el);
+                capsuleTimers.delete(key);
+              }, 480);
+            }, 900);
+            capsuleTimers.set(key, t);
+          });
+        }
+        if (hintEl && /^Research/i.test(hintEl.textContent || '')) hintEl.textContent = '';
+        if (isFailClosed) {
+          if (meta.fail_closed || reason) log('fail-closed: ' + (reason || 'skipped'));
+          // Drain any "I didn't catch that" TTS, then always return to LISTENING.
+          if (playQueue.length > 0 || status === 'SPEAKING') {
+            responseDonePending = true;
+            maybeLeaveSpeaking();
+          } else {
+            responseDonePending = false;
+            setUiStatus('LISTENING', { force: true });
+          }
+          break;
+        }
+        // If we already got text via tool path without audio yet, keep thinking/speaking logic.
+        if (asstPartial) {
+          addTurn('assistant', asstPartial);
+          asstPartial = '';
+        }
+        if (playQueue.length > 0 || status === 'SPEAKING') {
+          responseDonePending = true;
+          maybeLeaveSpeaking();
+        } else {
+          setUiStatus(serverFsm === 'IDLE' ? 'LISTENING' : (serverFsm || 'LISTENING'));
+        }
+        break;
+      }
+      case 'nova.research_status':
+        setUiStatus('THINKING');
+        // Same capsule key as tool:deep_research (no job_id) so poll updates one pill.
+        showToolCapsule({
+          name: 'deep_research',
+          status: data.status || 'running',
+        });
+        if (hintEl) hintEl.textContent = '';
+        break;
+      case 'nova.tool_status':
+        showToolCapsule({
+          name: data.name || 'tool',
+          status: data.status || 'running',
+          job_id: data.job_id || null,
+        });
         break;
       case 'nova.turn_metrics':
-        applyTurnMetrics(data.metrics || data.turn || data);
-        break;
-      case 'nova.metrics':
-        if (data.bench) renderBench(data.bench);
-        if (data.turn) applyTurnMetrics(data.turn);
+        // Driver UI intentionally ignores metrics — ops dashboard owns them.
+        bridgeOps({ type: 'nova.turn_metrics', metrics: data.metrics || data.turn || data });
         break;
       case 'error':
         log('server error: ' + JSON.stringify(data));
@@ -721,12 +947,14 @@
     }
   }
 
+  // —— orb draw ——
   function orbColor() {
-    return status === 'speaking' ? '#8b7cf6'
-      : status === 'thinking' ? '#d9a441'
-      : status === 'listening' ? '#2dd4bf'
-      : status === 'connecting' ? '#d9a441'
-      : '#5b6470';
+    if (status === 'SPEAKING') return '#8b7cf6';
+    if (status === 'THINKING' || status === 'TRANSCRIBING' || status === 'DIDNT_CATCH') return '#e4b45a';
+    if (status === 'LISTENING' || status === 'ARMED') return '#2dd4bf';
+    if (status === 'INTERRUPTING') return '#f07178';
+    if (status === 'connecting') return '#e4b45a';
+    return '#5c6578';
   }
 
   function drawOrb() {
@@ -735,343 +963,228 @@
     orbCtx.clearRect(0, 0, w, h);
     const cx = w / 2, cy = h / 2;
     const color = orbColor();
-    const analyser = status === 'speaking' ? playAnalyser : micAnalyser;
+    const analyser = status === 'SPEAKING' ? playAnalyser : micAnalyser;
     let level = 0;
-    if (analyser && !(status !== 'speaking' && micMuted)) {
-      const d = new Uint8Array(analyser.frequencyBinCount);
-      analyser.getByteFrequencyData(d);
-      let sum = 0; for (let i = 0; i < d.length; i++) sum += d[i];
-      level = sum / d.length / 255;
+    if (analyser && !(status !== 'SPEAKING' && micMuted)) {
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i];
+      level = sum / (data.length * 255);
     }
-    const t = performance.now() / 1000;
-    const pulse = status === 'connecting' ? (0.5 + 0.5 * Math.sin(t * 4)) : level;
-    const baseR = Math.min(w, h) * 0.20;
-    const r = baseR + pulse * baseR * 1.1;
-    const halo = orbCtx.createRadialGradient(cx, cy, r * 0.2, cx, cy, r * 2.1);
-    halo.addColorStop(0, color + '55');
-    halo.addColorStop(1, 'rgba(0,0,0,0)');
+    const pulse = status === 'THINKING'
+      ? 0.08 + 0.04 * Math.sin(performance.now() / 280)
+      : level * 0.22;
+    const baseR = w * 0.22;
+    const r = baseR * (1 + pulse);
+
+    // Outer glow (soft, no inner “pearl” highlight)
+    const halo = orbCtx.createRadialGradient(cx, cy, r * 0.55, cx, cy, r * 2.15);
+    halo.addColorStop(0, color + '40');
+    halo.addColorStop(0.55, color + '18');
+    halo.addColorStop(1, color + '00');
     orbCtx.fillStyle = halo;
-    orbCtx.beginPath(); orbCtx.arc(cx, cy, r * 2.1, 0, Math.PI * 2); orbCtx.fill();
+    orbCtx.beginPath(); orbCtx.arc(cx, cy, r * 2.15, 0, Math.PI * 2); orbCtx.fill();
+
+    // Thin ring
     orbCtx.strokeStyle = color + 'aa'; orbCtx.lineWidth = 2;
-    orbCtx.beginPath(); orbCtx.arc(cx, cy, baseR * 1.5, 0, Math.PI * 2); orbCtx.stroke();
-    const core = orbCtx.createRadialGradient(cx, cy, 1, cx, cy, r);
+    orbCtx.beginPath(); orbCtx.arc(cx, cy, baseR * 1.55, 0, Math.PI * 2); orbCtx.stroke();
+
+    // Full-color solid core — no white hot-spot / grey center disc
+    const core = orbCtx.createRadialGradient(cx, cy, 0, cx, cy, r);
     core.addColorStop(0, color);
-    core.addColorStop(1, color + '22');
+    core.addColorStop(0.75, color);
+    core.addColorStop(1, color + 'dd');
     orbCtx.fillStyle = core;
     orbCtx.beginPath(); orbCtx.arc(cx, cy, r, 0, Math.PI * 2); orbCtx.fill();
-    if (status === 'listening' || status === 'thinking') {
-      orbCtx.fillStyle = '#0b0d12cc';
-      const bars = 5, bw = 5, gap = 7, totalW = bars * bw + (bars - 1) * gap;
+
+    // Activity bars: pure light bars on full color (no dark fill behind them)
+    if (status === 'LISTENING' || status === 'THINKING' || status === 'TRANSCRIBING'
+        || status === 'DIDNT_CATCH' || status === 'SPEAKING') {
+      const bars = 5;
+      const gap = 7;
+      const bw = 3.5;
+      const totalW = bars * bw + (bars - 1) * (gap - bw);
+      const x0 = cx - totalW / 2;
+      orbCtx.fillStyle = 'rgba(255,255,255,0.92)';
       for (let i = 0; i < bars; i++) {
-        const bh = 10 + (0.4 + 0.6 * Math.abs(Math.sin(t * 6 + i))) * (14 + level * 60);
-        const x = cx - totalW / 2 + i * (bw + gap);
-        orbCtx.fillRect(x, cy - bh / 2, bw, bh);
+        const t = (performance.now() / 160 + i * 0.55);
+        const live = status === 'SPEAKING' ? level : Math.max(level, 0.12);
+        const bh = 8 + Math.abs(Math.sin(t)) * (12 + live * 26);
+        const x = x0 + i * gap;
+        const y = cy - bh / 2;
+        orbCtx.beginPath();
+        if (orbCtx.roundRect) {
+          orbCtx.roundRect(x, y, bw, bh, bw / 2);
+        } else {
+          orbCtx.rect(x, y, bw, bh);
+        }
+        orbCtx.fill();
       }
     }
-    if (micAnalyser) {
-      const md = new Uint8Array(micAnalyser.frequencyBinCount);
-      micAnalyser.getByteFrequencyData(md);
-      let ms = 0; for (let i = 0; i < md.length; i++) ms += md[i];
-      const ml = micMuted ? 0 : ms / md.length / 255;
-      micRingFill.style.width = Math.min(100, ml * 160) + '%';
-      micLevelFill.style.width = Math.min(100, ml * 160) + '%';
+    if (micRingFill && micAnalyser && !micMuted) {
+      const data = new Uint8Array(micAnalyser.frequencyBinCount);
+      micAnalyser.getByteTimeDomainData(data);
+      let peak = 0;
+      for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i] - 128));
+      const pct = Math.min(100, (peak / 64) * 100);
+      micRingFill.style.width = pct + '%';
+      if (micLevelFill) micLevelFill.style.width = pct + '%';
     }
   }
   drawOrb();
 
-  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-  function openRealtimeSocket(url) {
-    return new Promise((resolve) => {
-      const sock = new WebSocket(url);
-      let settled = false;
-      const fail = (why) => {
-        if (settled) return;
-        settled = true;
-        try { sock.close(); } catch (e) {}
-        resolve({ ok: false, why: why || 'closed' });
-      };
-      const succeed = () => {
-        if (settled) return;
-        settled = true;
-        sock.onmessage = null; sock.onerror = null; sock.onclose = null;
-        resolve({ ok: true, sock: sock });
-      };
-      sock.onerror = () => fail('error');
-      sock.onclose = () => fail('closed');
-      sock.onmessage = (e) => {
-        let d; try { d = JSON.parse(e.data); } catch (err) { return; }
-        if (!d || !d.type) return;
-        if (d.type === 'session.created') { succeed(); return; }
-        if (d.type === 'error' && d.error && d.error.type === 'session_limit_reached') fail('session_limit_reached');
-      };
+  // —— session lifecycle ——
+  async function startMic() {
+    if (micStream) return;
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
     });
-  }
-
-  async function startCall() {
-    setStatus('connecting');
-    orbWrap.classList.add('disabled');
-    intentionalClose = false;
-    await Promise.allSettled([configReady]);
-    log('requesting microphone...');
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-      });
-    } catch (e) {
-      log('mic denied: ' + e.message);
-      endCall(); return;
-    }
-
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const micSource = audioCtx.createMediaStreamSource(micStream);
-    micAnalyser = audioCtx.createAnalyser(); micAnalyser.fftSize = 256;
-    micSource.connect(micAnalyser);
-
-    captureProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
-    micSource.connect(captureProcessor);
-    silentSink = audioCtx.createGain(); silentSink.gain.value = 0;
-    captureProcessor.connect(silentSink); silentSink.connect(audioCtx.destination);
-    captureProcessor.onaudioprocess = (e) => {
-      if (!wsOpen || micMuted) return;
-      const input = e.inputBuffer.getChannelData(0);
-      let down = downsampleTo16k(input, audioCtx.sampleRate);
-      // Client noise gate: don't feed hush/HVAC into server VAD
-      let sum = 0;
-      for (let i = 0; i < down.length; i++) sum += down[i] * down[i];
-      const rms = Math.sqrt(sum / Math.max(1, down.length));
-      const db = parseFloat(gateSlider.value);
-      // dB slider → linear floor; -35 dB ≈ 0.018, -47 ≈ 0.0045
-      const floor = (db <= -59.5) ? 0 : Math.pow(10, db / 20);
-      if (rms < floor) {
-        down = new Float32Array(down.length); // silence
-      }
-      ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: bufferToBase64(floatTo16BitPCM(down)) }));
-    };
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    const source = audioCtx.createMediaStreamSource(micStream);
+    micAnalyser = audioCtx.createAnalyser();
+    micAnalyser.fftSize = 256;
+    source.connect(micAnalyser);
 
     playGain = audioCtx.createGain();
-    playAnalyser = audioCtx.createAnalyser(); playAnalyser.fftSize = 256;
-    playGain.connect(playAnalyser); playAnalyser.connect(audioCtx.destination);
-    nextStartTime = 0;
+    playAnalyser = audioCtx.createAnalyser();
+    playAnalyser.fftSize = 256;
+    playGain.connect(playAnalyser);
+    playAnalyser.connect(audioCtx.destination);
 
-    const url = resolveWsUrl();
-    log('connecting to ' + url + ' ...');
-    let connected = null;
-    for (let attempt = 1; attempt <= 30; attempt++) {
-      const result = await openRealtimeSocket(url);
-      if (result.ok) { connected = result.sock; break; }
-      if (attempt === 1 || attempt % 5 === 0) log('realtime slot busy — retrying (' + attempt + '/30)...');
-      await sleep(500);
+    const bufferSize = 4096;
+    micNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+    source.connect(micNode);
+    micNode.connect(audioCtx.destination); // keep graph alive; silent via gain 0 sink
+    // route silence to destination without feedback: use gain 0
+    const silent = audioCtx.createGain();
+    silent.gain.value = 0;
+    micNode.disconnect();
+    source.connect(micNode);
+    micNode.connect(silent);
+    silent.connect(audioCtx.destination);
+
+    micNode.onaudioprocess = (e) => {
+      if (!wsOpen || micMuted) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const down = downsampleTo16k(input, audioCtx.sampleRate);
+      const pcm = floatTo16BitPCM(down);
+      try {
+        ws.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio: bufferToBase64(pcm),
+        }));
+      } catch (err) {}
+    };
+  }
+
+  function stopMic() {
+    if (micNode) { try { micNode.disconnect(); } catch (e) {} micNode = null; }
+    if (micStream) {
+      micStream.getTracks().forEach(t => t.stop());
+      micStream = null;
     }
-    if (!connected) {
-      log('websocket error — could not connect to ' + url);
-      endCall();
+  }
+
+  async function connect() {
+    await configReady;
+    setUiStatus('connecting', { force: true });
+    if (hintEl) hintEl.textContent = 'Connecting…';
+    try {
+      await startMic();
+    } catch (e) {
+      log('mic: ' + e.message);
+      setUiStatus('IDLE', { force: true });
+      if (hintEl) hintEl.textContent = 'Microphone permission required';
       return;
     }
-    ws = connected;
-    ws.onmessage = (e) => { let d; try { d = JSON.parse(e.data); } catch (err) { return; } handleServerEvent(d); };
-    ws.onerror = () => { if (!intentionalClose && !reconnecting) { log('websocket error'); endCall(); } };
-    ws.onclose = () => { if (!intentionalClose && !reconnecting) { log('websocket closed'); endCall(); } };
-    wsOpen = true;
-    sendSessionUpdate();
-    setStatus('listening');
-    log('connected');
+    const url = resolveWsUrl();
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      wsOpen = true;
+      setUiStatus('LISTENING', { force: true });
+      stage.classList.add('in-call');
+      if (hintEl) hintEl.textContent = '';
+      sendSessionUpdate();
+      // Arm session for PTT profiles (open-mic VAD still works when not required).
+      try {
+        ws.send(JSON.stringify({
+          type: 'session.update',
+          session: { arm: true, ptt: true },
+        }));
+      } catch (e) {}
+    };
+    ws.onmessage = (ev) => {
+      try { handleServerEvent(JSON.parse(ev.data)); }
+      catch (e) { log('parse: ' + e.message); }
+    };
+    ws.onclose = () => {
+      wsOpen = false;
+      stopPlayback('ws_close');
+      stopMic();
+      setUiStatus('IDLE', { force: true });
+      stage.classList.remove('in-call');
+      if (hintEl) hintEl.textContent = '';
+    };
+    ws.onerror = () => log('ws error');
   }
 
-  function endCall() {
-    intentionalClose = true;
-    wsOpen = false;
+  function disconnect() {
+    stopPlayback('user_stop');
     if (ws) { try { ws.close(); } catch (e) {} ws = null; }
-    stopPlayback();
-    if (captureProcessor) { captureProcessor.disconnect(); captureProcessor.onaudioprocess = null; captureProcessor = null; }
-    if (silentSink) { silentSink.disconnect(); silentSink = null; }
-    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
-    micAnalyser = null; playAnalyser = null; micMuted = false;
-    micBtn.classList.remove('muted');
-    orbWrap.classList.remove('disabled');
+    wsOpen = false;
+    stopMic();
+    setUiStatus('IDLE', { force: true });
     stage.classList.remove('in-call');
-    asstPartial = '';
-    liveCards = { you: null, assistant: null };
-    setStatus('idle');
   }
 
-  orbWrap.addEventListener('click', () => { if (status === 'idle') startCall(); });
-  stopBtn.addEventListener('click', () => {
-    if (status === 'idle') return;
-    if (wsOpen) {
-      try { ws.send(JSON.stringify({ type: 'response.cancel' })); } catch (e) {}
-    }
-    endCall();
+  orbWrap.addEventListener('click', () => {
+    if (wsOpen) return;
+    connect();
   });
+  stopBtn.addEventListener('click', () => disconnect());
   micBtn.addEventListener('click', () => {
     micMuted = !micMuted;
     micBtn.classList.toggle('muted', micMuted);
-    micBtn.title = micMuted ? 'Unmute microphone' : 'Mute microphone';
-    log(micMuted ? 'mic muted' : 'mic unmuted');
   });
 
-  convoBtn.addEventListener('click', () => { drawer.classList.add('open'); convoDot.style.display = 'none'; });
-  drawerClose.addEventListener('click', () => drawer.classList.remove('open'));
-  benchBtn.addEventListener('click', () => { benchDrawer.classList.add('open'); pollBenchMetrics(); });
-  benchClose.addEventListener('click', () => benchDrawer.classList.remove('open'));
-
-  // ---------- Google Workspace (Settings → Connect; tokens on this Pi) ----------
-  const gcalPill = document.getElementById('gcal-pill');
-  const gcalConnect = document.getElementById('gcal-connect');
-  const gcalDisconnect = document.getElementById('gcal-disconnect');
-  const gcalHint = document.getElementById('gcal-hint');
-  let gcalPollTimer = null;
-
-  function renderGcal(st) {
-    if (!gcalPill || !gcalConnect) return;
-    if (!st || !st.configured) {
-      gcalPill.textContent = 'Not configured';
-      gcalPill.className = 'bad';
-      gcalConnect.style.display = 'block';
-      gcalConnect.disabled = true;
-      gcalConnect.textContent = 'Add OAuth client to .env';
-      if (gcalDisconnect) gcalDisconnect.style.display = 'none';
-      if (gcalHint) {
-        gcalHint.innerHTML = 'Set <code>GOOGLE_OAUTH_CLIENT_ID</code> / <code>SECRET</code> / <code>GOOGLE_CLOUD_PROJECT</code> in <code>.env</code>, then restart.';
-      }
-      return;
-    }
-    const flow = st.oauth_flow || {};
-    if (flow.active) {
-      gcalPill.textContent = 'Connecting…';
-      gcalPill.className = 'bad';
-      gcalConnect.style.display = 'block';
-      gcalConnect.disabled = true;
-      gcalConnect.textContent = 'Waiting for Google…';
-      if (gcalDisconnect) gcalDisconnect.style.display = 'none';
-      return;
-    }
-    if (flow.error) log('Google auth: ' + flow.error);
-    if (st.authenticated) {
-      const incomplete = !(st.has_calendar && st.has_gmail && st.has_drive);
-      gcalPill.textContent = incomplete ? 'Connected (reconnect for full scopes)' : 'Connected';
-      gcalPill.className = 'ok';
-      gcalConnect.style.display = incomplete ? 'block' : 'none';
-      gcalConnect.disabled = false;
-      gcalConnect.textContent = incomplete ? 'Reconnect for full Workspace' : 'Connect with Google';
-      if (gcalDisconnect) { gcalDisconnect.style.display = 'block'; gcalDisconnect.disabled = false; }
-      if (gcalHint) {
-        gcalHint.innerHTML = incomplete
-          ? 'Missing some read scopes. Tap <strong>Reconnect</strong>.'
-          : ('Connected to <code>' + (st.project_id || '') + '</code>. Tokens: <code>' + (st.token_path || 'runtime/google_oauth/') + '</code>');
-      }
-      return;
-    }
-    gcalPill.textContent = 'Disconnected';
-    gcalPill.className = 'bad';
-    gcalConnect.style.display = 'block';
-    gcalConnect.disabled = false;
-    gcalConnect.textContent = 'Connect with Google';
-    if (gcalDisconnect) gcalDisconnect.style.display = 'none';
-    if (gcalHint) {
-      gcalHint.innerHTML =
-        'One-time authorize in <em>this</em> Chrome (work profile). Tokens stay under <code>runtime/google_oauth/</code>. '
-        + 'Callback: <code>127.0.0.1:8765</code> (UI is :8766).';
-    }
+  function openDrawer() {
+    drawer.classList.add('open');
+    drawer.setAttribute('aria-hidden', 'false');
+    convoDot.style.display = 'none';
   }
-
-  async function refreshGcal() {
-    try {
-      const st = await (await fetch('/integrations/google')).json();
-      renderGcal(st);
-      return st;
-    } catch (e) {
-      if (gcalPill) { gcalPill.textContent = 'Disconnected'; gcalPill.className = 'bad'; }
-      return null;
-    }
+  function closeDrawer() {
+    drawer.classList.remove('open');
+    drawer.setAttribute('aria-hidden', 'true');
   }
-
-  async function startGoogleAuth(force) {
-    if (!gcalConnect) return;
-    gcalConnect.disabled = true;
-    gcalConnect.textContent = 'Waiting for Google…';
-    gcalPill.textContent = 'Connecting…';
-    gcalPill.className = 'bad';
-    try {
-      const res = await (await fetch('/integrations/google/auth/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ force: !!force }),
-      })).json();
-      if (res.error) { log('Google auth: ' + res.error); await refreshGcal(); return; }
-      if (res.status === 'already_authenticated') { await refreshGcal(); return; }
-      if (!res.auth_url) { log('Google auth: no auth_url'); await refreshGcal(); return; }
-      const popup = window.open(res.auth_url, 'nova_hailo_google_oauth', 'noopener,width=520,height=720');
-      if (!popup) {
-        log('Popup blocked — allow popups for this site, then Connect again.');
-        await refreshGcal();
-        return;
-      }
-      log('Google sign-in opened — finish consent, then return here.');
-      clearInterval(gcalPollTimer);
-      let n = 0;
-      gcalPollTimer = setInterval(async () => {
-        n += 1;
-        const st = await refreshGcal();
-        if (!st) return;
-        const flow = st.oauth_flow || {};
-        if (st.authenticated || flow.done) {
-          clearInterval(gcalPollTimer);
-          log('Google Workspace connected.');
-          await refreshGcal();
-        } else if (flow.error) {
-          clearInterval(gcalPollTimer);
-          log('Google auth failed: ' + flow.error);
-          await refreshGcal();
-        } else if (n > 90) {
-          clearInterval(gcalPollTimer);
-          log('Google auth timed out — try Connect again.');
-          await refreshGcal();
-        }
-      }, 1500);
-    } catch (e) {
-      log('Google auth failed: ' + e);
-      await refreshGcal();
-    }
-  }
-
-  if (gcalConnect) {
-    gcalConnect.addEventListener('click', () => {
-      const force = /reconnect/i.test(gcalConnect.textContent);
-      startGoogleAuth(force);
-    });
-  }
-  if (gcalDisconnect) {
-    gcalDisconnect.addEventListener('click', async () => {
-      clearInterval(gcalPollTimer);
-      await fetch('/integrations/google/disconnect', { method: 'POST' });
-      log('Google Workspace disconnected locally.');
-      await refreshGcal();
-    });
-  }
-  refreshGcal();
-
+  convoBtn.addEventListener('click', () => {
+    if (drawer.classList.contains('open')) closeDrawer(); else openDrawer();
+  });
+  drawerClose.addEventListener('click', closeDrawer);
 
   settingsBtn.addEventListener('click', () => overlay.classList.add('open'));
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.remove('open'); });
-  restartBtn.addEventListener('click', async () => {
+  restartBtn.addEventListener('click', () => {
     overlay.classList.remove('open');
-    if (status === 'idle') return;
-    reconnecting = true;
-    endCall();
-    await sleep(800);
-    reconnecting = false;
+    disconnect();
     convoEl.innerHTML = '';
-    await startCall();
+    setTimeout(connect, 200);
   });
 
-  gateValueEl.textContent = gateSlider.value + ' dB';
+  // keyboard: Esc closes panels
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      overlay.classList.remove('open');
+      closeDrawer();
+    }
+  });
 })();
 </script>
 </body>

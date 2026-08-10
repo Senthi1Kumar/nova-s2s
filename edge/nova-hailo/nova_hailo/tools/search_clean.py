@@ -129,10 +129,12 @@ _NUMERIC_Q_RE = re.compile(
     r"how\s+(hot|cold|far|many|long))\b",
     re.I,
 )
+# Allow uncomma'd large figures (Bitcoin ~$95000) and standard $1,234.56 forms.
+_MONEY_BODY = r"\d{1,7}(?:,\d{3})*(?:\.\d+)?"
 _LITERAL_NUM_RE = re.compile(
     r"(?<![A-Za-z0-9])("
-    r"[$€£]\s?\d{1,3}(?:,\d{3})*(?:\.\d+)?"
-    r"|\d{1,3}(?:,\d{3})*(?:\.\d+)?\s?(?:USD|EUR|GBP|percent|%|°C|°F|km|miles|mph)"
+    rf"[$€£]\s?{_MONEY_BODY}"
+    rf"|\d{{1,7}}(?:,\d{{3}})*(?:\.\d+)?\s?(?:USD|EUR|GBP|percent|%|°C|°F|km|miles|mph)"
     r")",
     re.I,
 )
@@ -143,7 +145,117 @@ def is_numeric_fact_query(query: str) -> bool:
     return bool(_NUMERIC_Q_RE.search(query or ""))
 
 
-def literal_number(text: str) -> str | None:
-    """Return a number that literally appears in the evidence, else None."""
-    m = _LITERAL_NUM_RE.search(text or "")
+_CURRENCY_NUM_RE = re.compile(
+    rf"(?<![A-Za-z0-9])([$€£]\s?{_MONEY_BODY})",
+    re.I,
+)
+_STOCK_Q_RE = re.compile(
+    r"\b(stock|share\s+price|ticker|nasdaq|nyse|bitcoin|btc|crypto)\b",
+    re.I,
+)
+# Left context that marks a *change* amount, not the share price.
+_PRICE_CHANGE_CTX_RE = re.compile(
+    r"(?:\b(?:up|down|rose|fell|gain(?:ed|s)?|drop(?:ped)?|change[ds]?|moved|"
+    r"increased|decreased|surged|slid|tumbled|climbed)\b|"
+    r"[+\-±]|by)\s*$",
+    re.I,
+)
+# Right/left context that marks a real share/quote price.
+_PRICE_QUOTE_CTX_RE = re.compile(
+    r"(?:price|quote|trading\s+at|trades?\s+at|last|close[sd]?|opens?|"
+    r"share|stock|at)\s*$",
+    re.I,
+)
+
+
+def _parse_money(raw: str) -> float | None:
+    try:
+        return float(re.sub(r"[^\d.]", "", raw.replace(",", "")))
+    except ValueError:
+        return None
+
+
+def _near_keyword(body: str, pos: int, keywords: Iterable[str], radius: int = 72) -> bool:
+    """True if any keyword appears within radius chars of pos."""
+    lo = max(0, pos - radius)
+    hi = min(len(body), pos + radius)
+    window = body[lo:hi]
+    for kw in keywords:
+        k = (kw or "").strip()
+        if not k:
+            continue
+        if re.search(rf"\b{re.escape(k)}\b", window, re.I):
+            return True
+    return False
+
+
+def pick_stock_price(
+    text: str,
+    *,
+    near: Iterable[str] | None = None,
+    exclude: Iterable[str] | None = None,
+) -> str | None:
+    """Pick the most plausible *share price* from evidence, not a daily change.
+
+    Live 2026-08-08: Amazon stock answer spoke "$2.2" (a change / fragment)
+    instead of the ~$200+ share price. Score every currency amount and take
+    the best; decline when nothing looks like a quote.
+
+    Optional ``near`` keywords: when provided, only amounts within the
+    proximity window of an entity/ticker count (multi-ticker honesty — do not
+    invent a second quote from unrelated $ amounts). Also boosts score.
+    Optional ``exclude`` skips already-chosen prices.
+    """
+    body = text or ""
+    excluded = {re.sub(r"\s+", " ", e).strip() for e in (exclude or []) if e}
+    near_kws = [k for k in (near or []) if k]
+    best: tuple[float, str] | None = None
+    for m in _CURRENCY_NUM_RE.finditer(body):
+        raw = re.sub(r"\s+", " ", m.group(1)).strip()
+        if raw in excluded:
+            continue
+        # Multi-entity: require proximity so oil $72 is never "Tesla".
+        if near_kws and not _near_keyword(body, m.start(), near_kws):
+            continue
+        val = _parse_money(raw)
+        if val is None:
+            continue
+        left = body[max(0, m.start() - 28) : m.start()]
+        score = 0.0
+        if _PRICE_CHANGE_CTX_RE.search(left):
+            score -= 80.0
+        if _PRICE_QUOTE_CTX_RE.search(left):
+            score += 40.0
+        # Typical equity range; high band covers Bitcoin / crypto quotes.
+        if 15.0 <= val <= 8000.0:
+            score += 35.0
+        elif 8000.0 < val <= 250000.0:
+            score += 28.0
+        elif 5.0 <= val < 15.0:
+            score += 5.0
+        else:
+            score -= 25.0  # $2.2, $0.97, extreme outliers
+        if re.search(r"\.\d{2}\b", raw):
+            score += 12.0
+        if near_kws:
+            score += 55.0
+        # Prefer earlier (higher-ranked) hits slightly.
+        score -= m.start() / max(len(body), 1) * 5.0
+        if best is None or score > best[0]:
+            best = (score, raw)
+    if best is None or best[0] < 10.0:
+        return None
+    return best[1]
+
+
+def literal_number(text: str, *, query: str | None = None) -> str | None:
+    """Return a number that literally appears in the evidence, else None.
+
+    For stock/share/crypto queries use pick_stock_price (quote vs change).
+    Otherwise take the first currency/unit match on the top result line only.
+    """
+    first_line = (text or "").split("\n", 1)[0]
+    if query and _STOCK_Q_RE.search(query):
+        return pick_stock_price(text or "")
+    m = _LITERAL_NUM_RE.search(first_line)
     return re.sub(r"\s+", " ", m.group(1)).strip() if m else None
