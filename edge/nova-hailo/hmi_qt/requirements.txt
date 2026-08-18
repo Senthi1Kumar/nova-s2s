@@ -1,0 +1,5 @@
+# Fallback only when hmi_qt/run.sh cannot use ../.venv.
+# Preferred: `source scripts/setup_env.sh` (installs PySide6 via pyproject.toml).
+PySide6>=6.5
+numpy>=1.24
+sounddevice>=0.4.6

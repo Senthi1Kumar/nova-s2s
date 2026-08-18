@@ -28,8 +28,18 @@ from nova_hailo.backends.stt import WhisperSTT
 from nova_hailo.backends.tts import clean_text_for_tts, create_tts
 from nova_hailo.config import AppConfig, resolve_audio_device_ids, resolve_llm_hef
 from nova_hailo.context_history import ConversationHistory
+from nova_hailo.edge_harness.controller import (
+    gate_after_router,
+    is_thin_utterance,
+)
+from nova_hailo.edge_harness.interrupt import GenerationGuard
+from nova_hailo.edge_harness.memory_store import MemoryStore
+from nova_hailo.edge_harness.router import CLARIFY_SPEAK
+from nova_hailo.edge_harness.speak_sanitize import sanitize_for_tts
+from nova_hailo.edge_harness.task_state import TaskState, record_clarify
 from nova_hailo.metrics import SessionMetrics, Timer, TurnMetrics
 from nova_hailo.response_contract import first_complete_clause, validate_spoken_unit
+from nova_hailo.web.fail_closed import FAIL_CLOSED_SPEAK
 from nova_hailo.stream_text import SentenceBuffer
 from nova_hailo.tools.oem_tools import OemToolGateway
 from nova_hailo.tools.registry import (
@@ -102,6 +112,9 @@ class NovaPipeline:
         self._barge_in_flag = False
         self._genai_lock = threading.Lock()
         self.active_generation_id = 0
+        self.gen_guard = GenerationGuard()
+        mem_path = cfg.get("pipeline", "memory_path", default=None)
+        self.memory = MemoryStore(mem_path)
 
         self.audio_in_id, self.audio_out_id = resolve_audio_device_ids(
             audio_in or cfg.get("voice", "input_device"),
@@ -123,7 +136,7 @@ class NovaPipeline:
         self.research_poll_timeout_sec = float(
             cfg.get("tools", "research_poll_timeout_sec", default=45) or 45
         )
-        self.summarize_search = bool(cfg.get("tools", "summarize_search", default=True))
+        self.summarize_search = bool(cfg.get("tools", "summarize_search", default=False))
         self.summarizer_max_tokens = int(
             cfg.get("tools", "summarizer_max_tokens", default=DEFAULT_SUMMARIZER_MAX_TOKENS)
             or DEFAULT_SUMMARIZER_MAX_TOKENS
@@ -174,11 +187,12 @@ class NovaPipeline:
             no_think=self.no_think,
         )
         # Optional dedicated summarizer HEF (true 2nd agent). Same VDevice + GenAI
-        # lock; if unset or same path as chat, reuse self.llm.
+        # lock; if unset or same path as chat, reuse self.llm. Skipped entirely
+        # when summarize_search is off (search speak = tool/cleaner fallback).
         self.summarizer_llm: HailoLLM | None = None
         self._summarizer_owns_llm = False
         summarizer_hef = str(cfg.get("tools", "summarizer_hef", default="") or "").strip()
-        if summarizer_hef:
+        if self.summarize_search and summarizer_hef:
             try:
                 sum_path = resolve_llm_hef(summarizer_hef)
                 if sum_path != llm_path:
@@ -417,8 +431,22 @@ class NovaPipeline:
         research_job_id: str | None = None,
         add_history: bool = True,
     ) -> TurnResult:
+        speak = sanitize_for_tts(speak, fallback="I'm here.")
         contract = validate_spoken_unit(speak, max_chars=self.tool_speak_max_chars)
-        speak = contract["speak"]
+        speak = sanitize_for_tts(str(contract["speak"] or ""), fallback="I'm here.")
+        if not self.gen_guard.should_enqueue_pcm(self.gen_guard.generation_id):
+            metrics.notes.append("pcm_invalidated")
+            metrics.total_latency_ms = (time.perf_counter() - wall0) * 1000
+            if record_session:
+                self.session.add(metrics)
+            return TurnResult(
+                user_text,
+                speak,
+                metrics,
+                auth_decision,
+                tool_name,
+                research_job_id=research_job_id,
+            )
         if self.on_validated_clause is not None:
             try:
                 self.on_validated_clause(speak)
@@ -551,6 +579,7 @@ class NovaPipeline:
     def on_abort(self):
         self._barge_in_flag = True
         self.active_generation_id += 1  # invalidate in-flight emitters
+        self.gen_guard.invalidate("barge_in")
         self.abort_event.set()
         self.tts.interrupt()
 
@@ -560,11 +589,16 @@ class NovaPipeline:
         self.auth.reset_session()
         print("Context cleared.")
 
+    def startup_greet(self) -> str:
+        """Compact last-session greet. Never dumps a full transcript."""
+        return self.memory.startup_greet()
+
     def begin_turn(self):
         """Clear abort/barge-in state before a new user turn."""
         self._barge_in_flag = False
         self.abort_event.clear()
         self.tts.clear_interruption()
+        self.gen_guard.begin()
 
     def _messages(self, user_text: str, *, tool_result_speak: str | None = None) -> list:
         # Native mode: HailoRT GenAI keeps conversation context on-device between
@@ -689,11 +723,18 @@ class NovaPipeline:
         if not self.sequential_stt:
             metrics.notes.append("resident_stt")
         user_text = (user_text or "").strip()
-        if not user_text:
-            metrics.total_latency_ms = (time.perf_counter() - wall0) * 1000
-            if record_session:
-                self.session.add(metrics)
-            return TurnResult("", "", metrics, AuthDecision.BYPASS.value)
+        if not user_text or is_thin_utterance(user_text):
+            metrics.notes.append("fail_closed_thin" if user_text else "empty transcript")
+            return self._speak_tool_line(
+                FAIL_CLOSED_SPEAK,
+                wall0=wall0,
+                metrics=metrics,
+                user_text=user_text,
+                auth_decision=AuthDecision.BYPASS.value,
+                tool_name=None,
+                record_session=record_session,
+                add_history=False,
+            )
 
         if self.clear_each:
             self.llm.clear()
@@ -738,6 +779,14 @@ class NovaPipeline:
             tool_t = Timer()
             tool_out = self.oem_gateway.route_and_execute(user_text)
             metrics.tool_ms = tool_t.ms()
+            if getattr(self.oem_gateway, "last_clear_llm", False) and not self.clear_each:
+                try:
+                    self.llm.clear()
+                    self.history.clear()
+                    self._native_seeded = False
+                    metrics.notes.append("task_boundary_clear")
+                except Exception:
+                    pass
             if tool_out is not None:
                 tool_name = tool_out.get("name")
                 tool_speak = str(tool_out.get("speak") or "")
@@ -750,6 +799,17 @@ class NovaPipeline:
                 )
                 # Fast path: tool speak (optional grounded summarizer) then TTS
                 if tool_out.get("ok") and tool_speak:
+                    if tool_name in {
+                        "web_search",
+                        "deep_research",
+                        "check_calendar",
+                        "check_email",
+                        "list_drive_files",
+                    }:
+                        try:
+                            self.memory.add(f"{tool_name}: {user_text[:80]}")
+                        except Exception:
+                            pass
                     job_id = None
                     if tool_name == "deep_research":
                         job_id = (tool_out.get("result") or {}).get("job_id")
@@ -834,6 +894,58 @@ class NovaPipeline:
                         add_history=False,
                     )
 
+            # Unmatched / empty / thin: never unconstrained 1.5B free chat.
+            state = getattr(self.oem_gateway, "task_state", None) or TaskState()
+            decision = gate_after_router(user_text, state, None)
+            if decision is not None and decision.invoke_llm:
+                metrics.notes.append(f"host_gate:chat_llm")
+                # Fall through to _agent_loop (bounded speak, not tool ReAct).
+            elif decision is not None and decision.path == "force_search":
+                try:
+                    forced = self.oem_gateway.execute("web_search", query=user_text)
+                except Exception:
+                    forced = None
+                if forced is not None:
+                    tool_out = forced
+                    tool_name = forced.get("name") or "web_search"
+                    tool_speak = str(forced.get("speak") or "")
+                    metrics.tool_name = tool_name
+                    metrics.notes.append("host_gate:force_search")
+                    if tool_speak:
+                        if forced.get("ok"):
+                            try:
+                                self.memory.add(f"web_search: {user_text[:80]}")
+                            except Exception:
+                                pass
+                        return self._speak_tool_line(
+                            tool_speak,
+                            wall0=wall0,
+                            metrics=metrics,
+                            user_text=user_text,
+                            auth_decision=auth.decision.value,
+                            tool_name=tool_name,
+                            record_session=record_session,
+                            add_history=bool(forced.get("ok")),
+                        )
+            elif decision is not None:
+                if decision.path == "clarify":
+                    try:
+                        self.oem_gateway.task_state = record_clarify(state)
+                    except Exception:
+                        pass
+                speak = decision.speak or CLARIFY_SPEAK
+                metrics.notes.append(f"host_gate:{decision.path}")
+                return self._speak_tool_line(
+                    speak,
+                    wall0=wall0,
+                    metrics=metrics,
+                    user_text=user_text,
+                    auth_decision=auth.decision.value,
+                    tool_name=None,
+                    record_session=record_session,
+                    add_history=False,
+                )
+
         speak_text, tool_name2, llm_bundle = self._agent_loop(
             user_text,
             auth_accepted=(auth.decision == AuthDecision.ACCEPT),
@@ -877,6 +989,8 @@ class NovaPipeline:
         """Atomic validated unit → UI + TTS (never raw token fragments)."""
         if self.abort_event.is_set():
             return
+        if not self.gen_guard.should_enqueue_pcm(self.gen_guard.generation_id):
+            return
         if self.tts.enabled and gid != self.tts.get_current_gen_id():
             return
         contract = (
@@ -884,7 +998,7 @@ class NovaPipeline:
             if self.validate_before_speak
             else {"ok": True, "speak": clause, "fallback": False}
         )
-        speak = str(contract.get("speak") or "")
+        speak = sanitize_for_tts(str(contract.get("speak") or ""), fallback="")
         if not speak:
             return
         if self.on_validated_clause is not None:

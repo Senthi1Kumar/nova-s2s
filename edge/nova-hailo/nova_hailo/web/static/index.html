@@ -814,6 +814,9 @@
     switch (data.type) {
       case 'session.created':
         if (data.session && data.session.fsm) applyServerFsm(data.session.fsm);
+        if (data.session && data.session.greeting) {
+          addTurn('assistant', String(data.session.greeting));
+        }
         bridgeOps(data);
         break;
       case 'nova.fsm':

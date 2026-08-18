@@ -14,3 +14,14 @@ hailort.log
 .env
 .env.local
 runtime/google_oauth/
+
+# Native LLM backend: build on the Pi, never commit the ABI-specific .so
+csrc/build/
+nova_hailo/backends/hailo_llm_cpp*.so
+
+# Qt HMI: official client is Python/PySide; skip CMake trees and theme dumps
+hmi_qt/.venv/
+hmi_qt/build/
+hmi_qt/nova-animation/
+hmi_qt/**/__pycache__/
+hmi_qt/*.zip

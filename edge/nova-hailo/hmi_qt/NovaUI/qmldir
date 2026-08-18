@@ -1,0 +1,6 @@
+module NovaUI
+singleton Theme 1.0 Theme.qml
+Shell 1.0 Shell.qml
+Orb 1.0 Orb.qml
+Transcript 1.0 Transcript.qml
+StatusStrip 1.0 StatusStrip.qml

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "format": "tN(name=value, ...)",
+  "note": "Octopus-v2 style logical tokens. Inference does not inject this schema into the Hailo prompt. Host validates before ToolBroker.",
+  "tokens": {
+    "t0": {
+      "tool": "web_search",
+      "required": ["query"],
+      "optional": []
+    },
+    "t1": {
+      "tool": "deep_research",
+      "required": ["query"],
+      "optional": []
+    },
+    "t2": {
+      "tool": "check_calendar",
+      "required": [],
+      "optional": ["day"]
+    },
+    "t3": {
+      "tool": "check_email",
+      "required": [],
+      "optional": ["query"]
+    },
+    "t4": {
+      "tool": "list_drive_files",
+      "required": [],
+      "optional": ["query"]
+    },
+    "t5": {
+      "tool": "respond",
+      "required": ["message"],
+      "optional": []
+    },
+    "t6": {
+      "tool": "handoff",
+      "required": ["reason"],
+      "optional": ["query"]
+    }
+  }
+}

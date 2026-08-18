@@ -8,6 +8,346 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/1.1.0/).
 
 ---
 
+## [Unreleased] — v0.0.2 (in progress)
+
+### Added — share/nova-hailo-poc-v002 (host harness + Qt HMI)
+
+Standalone Pi + Hailo-10H drop. No Tailscale; clone this branch on the
+device that has the HAT.
+
+- **Host controller** (`edge_harness/controller.py`, `task_state.py`,
+  memories, barge-in helpers, speak sanitize). Tools stay off-prompt.
+- **Octopus Phase A only**: compact codec `t0`–`t6` + `token_map.json`.
+  Host parses fail-closed. No LoRA (B), no new HEF tokens (C).
+- **Official Qt HMI** (`hmi_qt/run.sh`, PySide6 + QML). Same
+  `/v1/realtime` as the web UI. Mock Listen/Think/Speak/Idle chips removed.
+- **Native LLM backend source** (`csrc/hailo_llm_cpp.cpp`,
+  `scripts/build_hailo_llm_cpp.sh`). Build the `.so` on each Pi; do not
+  commit `hailo_llm_cpp*.so`.
+- **Search speak without Qwen summarizer** (`tools.summarize_search: false`).
+  Exa `summary` / `highlights` (then cleaned text) for news; numeric/stock
+  still bypass. Query-echo from the old 2nd LLM pass is gone.
+
+### Changed — OEM driver UI redesign + ops dashboard (2026-08-08)
+
+Path A polish for the German OEM tabletop:
+
+- **Driver face (`/`)**: automotive night-cockpit redesign (not HF S2S clone).
+  Orb states track the real server FSM (`nova.fsm`); **SPEAKING stays purple
+  until browser audio drain**, not until `response.done` (the old premature
+  snap-back). Main-stage latency brick removed.
+- **Ops glass cockpit (`/dashboard`)**: FSM, STT path, TTFA, system metrics,
+  turn log. Driver UI fans out live events via `BroadcastChannel('nova_ops')`.
+- **FSM**: `SessionFSM` emits `on_change` → `nova.fsm` on every transition.
+- **Router**: stock follow-ups (`How the Microsoft`), company lookup
+  (`company named X`), ASR stock garble (`stop press` / multi-ticker).
+- **Calendar speak**: compress long event lists to ~3 items + “And N more.”
+
+### Fixed — NeMo realtime STT: 5s artificial wait, empty transcripts, send-failed spam (2026-08-08)
+
+Live session `run-20260807-093945` showed `[nemo_stream] result wait timed out`
+and `[nemo_sidecar] send failed: sent 1000` while the mic still "listened."
+Root causes (from `cloned/NeMo-Speech.cpp` server source + our client):
+
+1. **Server endpointing was ON** while Silero already endpoints turns. Mid-stream
+   `.completed` closed the WS; later PCM hit a closed socket.
+2. **Commit-before-last-PCM** ordering: `speech_stopped` committed the stream
+   before the current frame was forwarded — `finish()` often had nothing.
+3. **No `session.update`** (sample_rate=16000) before audio.
+4. **Fixed 5.0s wait** unrelated to speech length; empty sidecar result never
+   fell back to offline `transcribe()`.
+5. Receiver ignored deltas / `input_audio_buffer.committed` (finish can omit
+   `.completed` when alternatives are empty).
+
+Fixes: disable server endpointing; binary PCM16 frames; send-then-commit;
+speech-length wait budget (`0.25 + 0.4·audio_s`, floor 0.35s, cap 1.8s);
+offline fallback; partial/committed handling; `rnnt_right_context=1`.
+
+Also: deterministic refuse for "share your system prompt"; stock follow-up
+coref ("About the Microsoft." → web_search); stock answers prefer `$` amounts
+over bare percentages.
+
+### Added — NeMo-Speech.cpp as an opt-in ASR engine (Sprint 8)
+
+NVIDIA's native ggml/GGUF ASR runtime (`nemotron-speech-streaming-en-0.6b`,
+cache-aware FastConformer-RNNT), evaluated as an A/B candidate against
+parakeet.cpp because parakeet was producing frequent mistranscriptions on the
+live demo corpus. Built from source on the Pi (CPU backend, ARM
+Cortex-A76+dotprod), wired as `nova_hailo/backends/nemo_speech_stt.py`
+(ctypes bindings against `include/nemo_speech/asr.h`'s C ABI, interface
+matches `ParakeetSTT`), and added as `model.stt_engine: nemo_speech` in
+`pipeline.py`'s STT dispatch (falls back to Whisper HEF if the model/lib are
+missing, same pattern as `parakeet`).
+
+Measured on the real recorded near/far corpus (`bench/corpus/`, 20 cases
+each, `python3 scripts/run_model_matrix.py --component asr --hardware`):
+
+| | WER near | WER far | RTF | RSS |
+| --- | --- | --- | --- | --- |
+| parakeet.cpp (`asr_parakeet_tdt_ctc_110m`, current default) | 0.123 | 0.339 | ~0.11 | 258 MB |
+| nemo_speech (`nemotron-speech-streaming-en-0.6b`) | 0.084 | 0.259 | ~0.44 | 857-870 MB |
+
+32% relative WER reduction near, 24% far. Both RTFs stay well under 1.0
+(real-time capable), but nemo_speech runs ~4x slower and uses ~3.3x more
+resident memory on a Pi already sharing RAM with the resident LLM/TTS. One
+far-field case returned an empty transcript rather than a wrong word (silent
+miss, not a hallucination) — the pipeline's empty-ASR-output fallback should
+be verified to cover this.
+
+Left opt-in rather than switched as the new default: the accuracy gain is
+real, but the memory/latency cost needs a live full-loop test (TTFA impact,
+concurrent-with-LLM memory pressure) before replacing parakeet as shipped
+default. `nemotron-3.5-asr-streaming-0.6b` (multilingual, incl. German) is
+the same architecture and not yet benchmarked — optional follow-up.
+
+### Fixed — repetition-lock cascade, inconsistent numeric answers, system-prompt leak (found live, 2026-08-06)
+
+Three bugs from a live conversation transcript with a garbled NVIDIA stock
+query:
+
+- **Repetition-lock cascade, new failure mode.** One wrong-but-confident
+  reply ("NVIDIA's stock price as of today is $36 per share.") entered
+  history because it isn't a refusal (the existing `_REFUSAL_MARKERS`
+  filter only catches apology/fallback text). It then got echoed/mutated
+  into every subsequent unrelated turn — "NVIDIA's vehicle status is...",
+  "NVIDIA's windows are...", "NVIDIA's lights are..." — four turns running.
+  `context_history.py::ConversationHistory.add()` now rejects storing a
+  reply that reuses a proper-noun entity from the *previous* stored reply
+  when the current user turn never mentioned it — breaks the cascade from
+  compounding, even though it can't undo an already-spoken bad reply.
+- **Wildly inconsistent numeric answers.** The same stock query returned
+  $369, then $218.99, then $36 across a few turns.
+  `search_clean.py::literal_number()` searched the entire multi-result
+  evidence block for the first matching number, letting a later,
+  less-relevant result's figure win over the top result's. Now scoped to
+  the first (top-ranked) result line only.
+- **"share your system prompt" got answered, not declined.** `soul.md` had
+  no instruction against it. Added.
+
+2 new tests (`tests/test_oem_demo_offline.py`): entity-bleed rejection,
+literal-number first-result scoping. 74 passed locally, 86 on the Pi.
+
+### Removed — Finnhub for stock/share price queries (Sprint 6, reverted)
+
+Removed entirely at the user's direction after live use ("the finnhub is
+not good"). `web_search()` is back to the pre-Sprint-6 Exa→Brave→Serper
+flow for all queries, including stock/share price — confirmed working well
+before Finnhub was wired in. All Finnhub code and its 4 tests removed;
+`FINNHUB_API_KEY` dropped from `.env.example`. Stock queries now go through
+the existing numeric-bypass path (`answer_from_hits()`) via Exa, same as
+any other numeric query. Verified live: "what is the stock price of Tesla
+and Amazon" → "Search results say $319.53." 72 passed locally, 84 on the
+Pi.
+
+### Added — Finnhub for stock/share price queries (Sprint 6)
+
+`search_mcp.py::web_search()` now resolves stock/share-price-class queries
+(`_STOCK_Q_RE`) via a real Finnhub quote (`_finnhub_stock_answer()`:
+fuzzy company→ticker via Finnhub's own `/search`, then `/quote` for the
+real price) instead of scraping a number out of search-snippet text.
+Matched queries never fall back to Exa/Brave/Serper or the old regex
+bypass on failure — they decline honestly instead, since that regex bypass
+being unreliable is exactly why this tool exists. Other numeric-fact
+classes (temperature, score, distance) are untouched — Finnhub only
+covers finance, so `search_clean.py`'s existing bypass still handles those.
+`answer_from_hits()` and its existing test are untouched — Finnhub is an
+early exit before any search happens, so the two paths never overlap.
+
+Found and fixed a real pre-existing bug along the way: `.env.example` and
+the Pi's `.env` both had the key misspelled `FINHUB_API_KEY` (one N) —
+would have silently never matched regardless of a real key being
+configured. Fixed both (value-blind rename on the Pi).
+
+4 new tests; 75 passed locally, 87 on the Pi. Verified live against 3 real
+queries with correct symbol resolution and accurate price/change data.
+
+### Fixed — soul.md, router coverage, summarizer language (found live, 2026-08-06)
+
+Three real bugs from a live conversation transcript with all five tools
+enabled (`config.oem_v002_test.yaml`):
+
+- **`prompts/soul.md` described tools as LLM-invoked** ("You have these
+  available tools: [...] use web_search when...", user-edited against the
+  hailo-apps `agent_tools_example` reference). Wrong for this architecture
+  — tool routing is 100% deterministic (`edge_harness/router.py`, before
+  the LLM ever runs); the chat LLM has no function-calling wired up at all,
+  so describing tools to it doesn't grant new capability, it just burns
+  prompt budget and risks confusing output. Rewritten to state tools run
+  automatically before the LLM sees the message, and it must never emit
+  JSON/tool syntax.
+- **`_WEB_RE` too narrow**: "current status of gas supply in Germany" fell
+  through the router (no match) to the chat LLM, which correctly declined
+  since it genuinely can't search — but the query should have routed to
+  `web_search` in the first place. Added `status of` / `situation in|with|of`
+  coverage. New test: `test_route_matches_status_and_situation_phrasings`.
+- **Summarizer answered entirely in German** when evidence was German
+  ("Die Hauptquellen für aktuelle Nachrichten..."). `SUMMARIZER_SYSTEM` had
+  no explicit language instruction — added "always answer in English, even
+  if evidence is in another language."
+
+72 passed locally, 84 on the Pi. Verified the router fix live
+(`route_and_execute("what is the current status of gas supply in Germany")`
+→ `web_search`, previously `None`).
+
+**Known issues, not fixed this pass** (same transcript, lower priority /
+needs more diagnosis):
+- Summarizer occasionally conflates distinct entities (stated both of
+  Tamil Nadu's rival parties as "the current ruling party" before
+  self-correcting on a later turn) — a synthesis-quality issue, would need
+  a stronger "do not merge distinct entities" instruction and more testing
+  to confirm it helps rather than just hides the symptom.
+- Several turns produced no assistant response at all (not even a decline)
+  — needs server-side logs to diagnose (likely an ASR/VAD empty-transcript
+  case), not diagnosable from a client transcript alone.
+
+### Fixed — `overlap_ms == 0` measurement bug (Sprint 1)
+
+`pipeline.py::_stream_llm_to_tts()`'s `decode_end` timestamp was only ever
+set inside the exception handler, never on the successful path — so
+`overlap_ms` silently measured nothing on every normal turn. Fixed; also
+hardened `first_complete_clause()` against false clause-boundary splits on
+abbreviations ("Dr.", "PM.") and decimals ("3.14"). Full writeup:
+`ROADMAP.md` §6d.
+
+### Added — native C++ LLM backend, opt-in (Sprint 1b)
+
+`csrc/hailo_llm_cpp.cpp`: a `pybind11` wrapper around `hailort::genai::LLM`
+directly (bypassing `hailo_platform.genai`'s Python binding) with the GIL
+explicitly released around the blocking decode loop. Fixes GIL contention
+that was starving the TTS worker thread during decode — verified through
+the real pipeline: `overlap_ms` 4274ms (was ~0). Opt-in via
+`model.llm_backend: cpp` / `NOVA_HAILO_LLM_BACKEND=cpp`; default stays the
+Python path. TTFT/decode throughput unchanged from the Python backend once
+correctly joined to the shared VDevice group — the entire win is the
+overlap fix, not a speed-up. Build: `scripts/build_hailo_llm_cpp.sh`
+(Pi-only, needs HailoRT's CMake package + pybind11, not part of
+`pip install -e .`). Tests: `tests/test_hailo_llm_cpp.py`. Full writeup:
+`ROADMAP.md` §6d.
+
+### Measured — FireRedVAD vs Silero vs WebRTC A/B (Sprint 2)
+
+Desk-harness synthetic-tone run first (`scripts/run_model_matrix.py vad
+--hardware`), then superseded by a **live recorded corpus**
+(`scripts/record_vad_corpus.py` on the Pi, WM8960 @ 100% mic gain — 6 speech
+prompts, 2 silence, 2 real background-noise takes; scored with
+`scripts/run_model_matrix.py vad --hardware --live-corpus`) because the
+synthetic-tone run scored all three candidates at 0% false-accept and
+couldn't discriminate anything — sine-tone-vs-silence is trivial for any
+VAD. Real audio does discriminate:
+
+| Candidate | ok/10 | False-accept rate | Detection latency (mean / p50 / p95) |
+| --- | --- | --- | --- |
+| `vad_silero` | 10/10 | **0%** | 605 / 480 / 1305 ms |
+| `vad_firered` | 9/10 | 20% | 425 / 465 / 645 ms |
+| `vad_webrtc` | 6/10 | 40% | 230 / 150 / 630 ms |
+
+WebRTC false-fired `speech_started` on **all 4** silence/noise rows — under
+real room noise it isn't discriminating speech from ambient sound at all,
+matching its published FLEURS-VAD-102 F1 of 52.3% vs Silero's 95.95%
+(`ROADMAP.md` §6a). FireRedVAD is genuinely faster (~180ms lower mean
+latency than Silero) but false-fired on 1 of 4 non-speech rows at its
+current `threshold=0.5` — consistent with the existing caveat that it's a
+generic, not target-speaker, VAD. Silero was clean on all 10 cases.
+
+**Decision: keep Silero as default**, now confirmed on real recorded audio,
+not just synthetic tones. 0% false-accept matters more for demo credibility
+than ~150-200ms of extra detection latency, especially with real background
+noise in the room. FireRedVAD stays a documented, tested A/B option
+(`NOVA_HAILO_VAD=firered`); WebRTC is disqualified as a candidate for this
+role. Raw results: `logs/model-matrix/sprint2-vad-live/`.
+
+### Added — canonical action space, typed tool broker, capability profiles (Sprint 3)
+
+Extracted `nova_hailo/edge_harness/` (`types.py`, `policy.py`, `router.py`,
+`result_compressor.py`, `tool_broker.py`) from `oem_tools.py`'s
+`OemToolGateway`, per the SCENIC canonical-action-space pattern in
+`ROADMAP.md §2`: `route()` now returns a typed `RoutedIntent` (canonical
+`Intent` + query + slots) instead of a bare string, `ToolBroker` is the sole
+code path allowed to invoke `mcp_web_search`/`mcp_deep_research`/
+`mcp_research_status`/the Workspace MCP tool classes (enforced by a new
+grep-based test, not just a review claim), and `CapabilityProfile` replaces
+the inline `enabled`/`write_enabled` set logic. `result_compressor.py` is
+new (not moved): implements the "bounded typed block with an explicit
+`instruction=` line" spec, truncating the body but never the instruction
+line — staged for Sprint 5's Workspace tools return, not wired into the LLM
+context path yet. `OemToolGateway` is now a thin facade preserving its exact
+pre-Sprint-3 API; `pipeline.py` needed zero changes. 13 new tests
+(`tests/test_edge_harness.py`); every pre-existing router/persona test
+passes unchanged. 55 → 68 passed locally, 67 → 80 passed on the Pi.
+
+### Measured — Brave vs Serper vs Tavily vs Exa websearch A/B (Sprint 4)
+
+Live run on the Pi (`scripts/bench_websearch_providers.py`, real API keys, 4
+queries × 6 provider/type combos). Serper live-timed-out on 1 of 4 queries
+against our real `tools.timeout_sec: 1.5` production ceiling (Brave never
+did); Exa `instant`/`fast` were both faster than Brave/Serper (mean
+918/925ms vs 1207/1502ms) and returned richer per-result text, including a
+literal price for the numeric query where Brave's snippet had none.
+`exa.search(type="deep")` does not return a synthesized answer at any
+`type` (needs `output_schema`) — wrong Exa endpoint for `deep_research`'s
+role. **Correction, tested live against all 4 queries paired with Tavily:**
+Exa's separate Agent product (`exa.agent.runs.create()`, async, billed) does
+synthesize — mean 26.1s vs Tavily's 4.3s (~6.1x), flat $0.025/run,
+consistently as-good-or-better quality (numeric: exact after-hours price +
+citation vs Tavily's one sentence). Exa Agent's output is heavily
+markdown-formatted, which is a liability for direct TTS (would read as
+literal `##`/`**`/`[link]()` syntax) but a good fit for a saved document.
+**Decision: `web_search` primary → Exa `fast`, fallback → Brave (Serper
+demoted, timed out on 3 separate runs across different queries);
+`deep_research`'s spoken summary stays on Tavily (prose already speakable,
+~6x faster); Exa Agent becomes the concrete input for a new, separately
+scoped Sprint 7 (Drive/Docs artifact storage) instead of a deep_research
+replacement.** Full writeup:
+`docs/benchmarks/nova-hailo-v0.0.2-sprint4-websearch-report.md`, raw data
+`logs/bench-search/sprint4*.json`.
+
+### Added — Exa-primary web_search, pulled forward from Sprint 5 (2026-08-06)
+
+No reason to leave known-inferior Brave→Serper live in the shipped code
+while other sprints ran once Sprint 4's evidence was solid. `search_mcp.py::
+web_search()` now tries Exa (`type="fast"`) → Brave → Serper (Serper
+demoted to last-resort, not removed), via a new `exa_search()` using raw
+`httpx` (no `exa-py` dependency in the shipped pipeline, matching Brave/
+Serper's existing style). Also fixed a real content bug this surfaced:
+Exa's raw page-text extraction can include literal markdown (`# Weather
+for...`) that would be spoken aloud as syntax — `_compact()` now strips
+markdown links/headers/emphasis uniformly (no-op for Brave/Serper's already
+-clean HTML snippets). `test_oem_web_search_fail_closed_without_keys`
+updated to also clear `EXA_API_KEY` — the Pi's `.env` has a real one, so
+without the delenv that test would silently make a live call there instead
+of testing the fail-closed path. 80/80 on the Pi, verified live. New
+`config.oem_v002_test.yaml` for testing `websearch_readonly`/`deep_research`
+without touching `config.oem.yaml`'s demo default.
+
+### Fixed — tool-result speech cut off mid-sentence (found live, 2026-08-06)
+
+`validate_spoken_unit()`'s sentence-completeness check only asked "does
+this end in `.?!`" — but "...on a deal. 2." and "...54°F (12." both do,
+while being truncation artifacts (a cut-off list marker, a cut-off decimal)
+not real sentences. Fixed by reusing `first_complete_clause()`'s existing
+`_is_decimal_period`/`_is_abbreviation_period` logic inside
+`validate_spoken_unit()` too, so trimming now finds the last *genuine*
+sentence end. Root cause of the frequent mid-list cutoffs:
+`summarizer_max_tokens: 48` was too small for a 2-3 item summary — raised
+to 96 in `config.oem_v002_test.yaml`. Also added `model.llm_backend: cpp`
+there so the test config now exercises the full stack together. 3 new
+tests (`tests/test_oem_demo_offline.py`) reproducing both live examples
+plus a control case. 71 passed locally, 83 on the Pi.
+
+### Correction — Workspace tools were never actually blocked (2026-08-06)
+
+Earlier same-day entries claimed Workspace tools were "genuinely blocked
+on Google OAuth connect" -- checked the wrong path. The real token path
+(`google_oauth.py::DEFAULT_TOKEN_PATH`, `runtime/google_oauth/tokens.json`)
+has had a valid, authenticated token since 2026-07-30.
+`check_calendar`/`check_email`/`list_drive_files` all tested live via
+`route_and_execute()`, real API round-trips, `ok=True` on all three.
+`config.oem_v002_test.yaml` now runs `profile: oem_readonly` with all five
+tools enabled (`web_search`, `deep_research`, `check_calendar`,
+`check_email`, `list_drive_files`).
+
+---
+
 ## [Unreleased] — v0.0.1 demo readiness
 
 ### Added — websearch FastMCP tools (built for v0.0.2, gated off for v0.0.1)

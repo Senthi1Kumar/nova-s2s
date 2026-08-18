@@ -101,7 +101,8 @@ tools:
   write_enabled: false
   timeout_sec: 1.5
   research_poll_timeout_sec: 45
-  summarize_search: true
+  # Off: spoken search uses cleaner.speak_fallback, not a 2nd LLM pass.
+  summarize_search: false
   summarizer_max_tokens: 48
   # Dedicated summarizer HEF (2nd GenAI agent). Prefer a different alias than
   # model.llm_hef so chat KV is not used for search speak. Falls back to chat HEF

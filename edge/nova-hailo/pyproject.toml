@@ -5,7 +5,7 @@ description = "Cascaded on-device voice agent for Raspberry Pi 5 + Hailo-10H"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy",
+    "numpy>=1.24",
     "pyyaml",
     "python-dotenv",
     "sounddevice==0.5.1",
@@ -13,6 +13,11 @@ dependencies = [
     "webrtcvad-wheels",
     "piper-tts<=1.3.0",
     "kokoro-onnx>=0.4.9",
+    # Inflect-Nano-v2 ONNX (default TTS)
+    "phonemizer",
+    "espeakng-loader",
+    "num2words",
+    "Unidecode",
     "requests",
     "psutil",
     "onnxruntime",
@@ -24,6 +29,8 @@ dependencies = [
     # Live web_search: Exa / Brave / Serper REST via httpx (search_mcp.py).
     # Pipeline does not import the exa-py SDK; set EXA_API_KEY in .env.
     "httpx>=0.27",
+    # Official Qt HMI (hmi_qt/run.sh) — same venv as the backend
+    "PySide6>=6.5",
 ]
 
 [project.optional-dependencies]

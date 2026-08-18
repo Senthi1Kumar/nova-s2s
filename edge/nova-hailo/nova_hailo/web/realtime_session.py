@@ -173,6 +173,13 @@ class RealtimeSession:
         await self.ws.accept()
         self.fsm.arm()
         self.fsm.begin_listen()
+        greeting = ""
+        try:
+            mem = getattr(self.pipeline, "memory", None)
+            if mem is not None and mem.last_session_fact():
+                greeting = self.pipeline.startup_greet()
+        except Exception:
+            greeting = ""
         await self.send(
             {
                 "type": "session.created",
@@ -184,6 +191,7 @@ class RealtimeSession:
                     "pvad": self.pvad.status(),
                     "fsm": self.fsm.snapshot(),
                     "stt_engine": getattr(self.pipeline, "stt_engine", None),
+                    "greeting": greeting,
                 },
             }
         )
@@ -338,6 +346,8 @@ class RealtimeSession:
     def _barge_in(self, reason: str):
         ctx = self.fsm.interrupt(reason=reason)
         self.pipeline.on_abort()
+        if hasattr(self.pipeline, "gen_guard"):
+            self.pipeline.gen_guard.invalidate(reason)
         # Playback is being dropped, so stop gating the mic immediately.
         self._echo_until = 0.0
         # Drop any open sidecar stream so stale finals cannot land on the next turn.

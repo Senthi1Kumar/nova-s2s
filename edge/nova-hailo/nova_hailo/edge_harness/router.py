@@ -40,7 +40,25 @@ _WEB_RE = re.compile(
     r"(price|quote)\s+of\s+\w+|"
     r"(ticker|nasdaq|nyse)\b|"
     r"(current|latest)\s+status|status\s+of|"
-    r"situation\s+(in|with|of)"
+    r"situation\s+(in|with|of)|"
+    # Local / POI lookups (ASR often garbles the city name).
+    r"coffee(\s+shops?)?|cafes?|restaurants?|eateries|"
+    r"(best|good|top|nearby|nearest)\s+"
+    r"(coffee|cafes?|restaurants?|shops?|places?|bars?|hotels?)|"
+    r"(shops?|places?|restaurants?|cafes?)\s+(near|in|around|by|close)|"
+    r"find(\s+(me|some|a|the|uh|the\s+best|\s+some))*\s+"
+    r"(best|good|some|uh|a|the)?\s*"
+    r"(coffee|cafes?|restaurants?|shops?|places?)"
+    r")\b",
+    re.I,
+)
+
+# Place/POI search even when the city is ASR-garbled (Las Ghettos / Los Gh).
+_POI_LOOKUP_RE = re.compile(
+    r"\b("
+    r"coffee(\s+shops?)?|cafes?|restaurants?|eateries|"
+    r"(best|good|top)\s+(coffee|cafes?|restaurants?|shops?|places?)|"
+    r"(near|nearby|around)\s+\w+"
     r")\b",
     re.I,
 )
@@ -113,9 +131,17 @@ _IDENTITY_RE = re.compile(
 _CAPABILITY_RE = re.compile(
     r"\b(what\s+can\s+you\s+do|what\s+do\s+you\s+do|how\s+can\s+you\s+help|"
     r"what\s+else\s+can\s+you\s+do|your\s+capabilit(y|ies)|"
-    r"what\s+are\s+your\s+capabilit)\b",
+    r"what\s+are\s+your\s+capabilit|"
+    r"can\s+you\s+do|what\s+can\s+you)\b",
     re.I,
 )
+_JOKE_RE = re.compile(r"\b(joke|funny|make\s+me\s+laugh)\b", re.I)
+_FRUSTRATION_RE = re.compile(
+    r"\b(what\s+the\s+hell|what\s+happened(\s+to\s+you)?|what'?s\s+wrong|"
+    r"the\s+hell\s+is\s+happen)\b",
+    re.I,
+)
+MISSED_SPEAK = "Sorry — I missed that. Ask me to search the web, or ask what I can do."
 # Bare clarifiers after a bad/misheard turn — do not let the LLM free-chat.
 # Whole-utterance only (anchors): "no problem" / "not really" must not match.
 _CLARIFY_RE = re.compile(
@@ -242,6 +268,22 @@ _SEARCH_AGAIN_RE = re.compile(
     r")\s*[?.!]*\s*$",
     re.I,
 )
+
+
+def looks_like_place_search(query: str) -> bool:
+    """True for coffee/restaurant/near lookups even if the city name is garbled."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    return bool(_POI_LOOKUP_RE.search(q) or _WEB_RE.search(q))
+
+
+def looks_like_joke(query: str) -> bool:
+    return bool(_JOKE_RE.search(query or ""))
+
+
+def looks_like_frustration(query: str) -> bool:
+    return bool(_FRUSTRATION_RE.search(query or ""))
 
 
 def is_search_again(query: str) -> bool:
@@ -501,5 +543,11 @@ def route(query: str, profile: CapabilityProfile) -> RoutedIntent | None:
         # Stateful re-run is Task 2; avoid searching the meta phrase itself.
         return None
     if profile.allows(Intent.WEB_SEARCH) and _WEB_RE.search(q) and not _CHAT_BLOCK_WEB.search(q):
+        return RoutedIntent(Intent.WEB_SEARCH, q)
+    if (
+        profile.allows(Intent.WEB_SEARCH)
+        and looks_like_place_search(q)
+        and not _CHAT_BLOCK_WEB.search(q)
+    ):
         return RoutedIntent(Intent.WEB_SEARCH, q)
     return None

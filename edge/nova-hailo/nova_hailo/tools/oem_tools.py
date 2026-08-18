@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from nova_hailo.edge_harness.policy import OEM_READONLY, WEBSEARCH_READONLY, CapabilityProfile
+from nova_hailo.edge_harness.task_state import TaskState, apply_routed_turn
 from nova_hailo.edge_harness.router import (
     _SMALLTALK,  # noqa: F401 -- re-exported for test_persona_drift.py
     _UNAVAILABLE_CAPS,  # noqa: F401 -- re-exported for test_persona_drift.py
@@ -78,6 +79,9 @@ class OemToolGateway:
         # Session memory for stateful "search again" / pure meta re-run.
         self._last_tool_intent: str | None = None
         self._last_tool_query: str | None = None
+        # Host-owned compact task state (Hailo KV is never source of truth).
+        self.task_state = TaskState()
+        self.last_clear_llm = False
 
     def route(self, query: str) -> str | None:
         routed = _route(query, self.profile)
@@ -89,13 +93,16 @@ class OemToolGateway:
         if rerun is not None:
             result = self._broker.execute(rerun)
             self._maybe_store_last_tool(rerun, result)
+            self._apply_task_state(query, rerun, result, search_again=True)
             return result
 
         routed = _route(query, self.profile)
         if routed is None:
+            self.last_clear_llm = False
             return None
         result = self._broker.execute(routed)
         self._maybe_store_last_tool(routed, result)
+        self._apply_task_state(query, routed, result, search_again=False)
         return result
 
     def execute(self, name: str, **kwargs: Any) -> dict[str, Any]:
@@ -143,3 +150,34 @@ class OemToolGateway:
             return
         self._last_tool_intent = routed.intent.value
         self._last_tool_query = routed.query
+
+    def _apply_task_state(
+        self,
+        query: str,
+        routed: RoutedIntent,
+        result: dict[str, Any] | None,
+        *,
+        search_again: bool,
+    ) -> None:
+        compact = None
+        ok = None
+        if isinstance(result, dict):
+            ok = bool(result.get("ok"))
+            speak = str(result.get("speak") or "").strip()
+            if speak:
+                compact = speak[:240]
+        nxt, clear = apply_routed_turn(
+            self.task_state,
+            user_text=query,
+            new_intent=routed.intent.value,
+            slots=dict(routed.slots or {}),
+            search_again=search_again,
+            compact_result=compact,
+            tool_ok=ok,
+        )
+        self.task_state = nxt
+        self.last_clear_llm = clear
+        # Keep legacy last-tool fields aligned with host state.
+        if nxt.last_tool:
+            self._last_tool_intent = nxt.last_tool
+            self._last_tool_query = nxt.last_query

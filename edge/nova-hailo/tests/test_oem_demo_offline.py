@@ -233,6 +233,45 @@ def test_literal_number_ignores_later_results():
     assert literal_number(evidence) == "$185.40"
 
 
+def test_exa_body_prefers_summary_then_highlight():
+    from nova_hailo.tools.search_mcp import _exa_body
+
+    news = {
+        "summary": "Iran and the US signaled progress on a Hormuz deal.",
+        "highlights": ["Talks continued in Oman on Sunday."],
+        "text": "Published 12 Aug 2026. 4 min read. Skip to content. Tehran (Reuters) - ...",
+    }
+    assert _exa_body(news, "latest news") == "Iran and the US signaled progress on a Hormuz deal."
+    no_sum = {**news, "summary": ""}
+    assert _exa_body(no_sum, "latest news") == "Talks continued in Oman on Sunday."
+    stock = {
+        "summary": "Amazon traded mixed.",
+        "highlights": ["Shares moved after hours."],
+        "text": "Amazon AMZN last price $185.40 in late trading.",
+    }
+    assert "$185.40" in _exa_body(stock, "stock price of Amazon today")
+
+
+def test_speak_fallback_skips_page_chrome():
+    from nova_hailo.tools.search_clean import SearchResultCleaner
+
+    cleaner = SearchResultCleaner()
+    hits = [
+        {
+            "title": "Wire",
+            "snippet": "Published 12 August 2026. 4 min read. Tehran officials met Oman mediators.",
+        },
+        {
+            "title": "Follow",
+            "snippet": "The talks produced a draft ceasefire framework overnight.",
+        },
+    ]
+    spoken = cleaner.speak_fallback(hits)
+    assert "Published" not in spoken
+    assert "min read" not in spoken
+    assert "Tehran" in spoken or "ceasefire" in spoken
+
+
 def test_answer_from_hits_tags_needs_summary():
     from nova_hailo.tools.search_mcp import answer_from_hits
 

@@ -49,6 +49,11 @@ except Exception as e:
 try:
     import piper, sounddevice, webrtcvad, nova_hailo
     print("  deps OK")
+try:
+    import PySide6
+    print("  hmi PySide6 OK")
+except Exception as e:
+    print("  hmi PySide6 FAIL", e, "(uv pip install -e .)")
 except Exception as e:
     print("  deps FAIL", e)
 PY

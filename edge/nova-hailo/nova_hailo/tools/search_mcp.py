@@ -130,6 +130,7 @@ _CRYPTO_PRICE_RE = re.compile(
 )
 _PRICE_OF_RE = re.compile(r"\bprice\s+of\b|\bhow\s+much\s+is\b|\bquote\s+for\b", re.I)
 _PRICE_WORD_RE = re.compile(r"\b(price|quote|worth|cost)\b", re.I)
+_NEWS_QUERY_RE = re.compile(r"\b(news|headlines|breaking)\b", re.I)
 
 
 def _stock_entities_in_query(query: str) -> list[tuple[str, str, list[str]]]:
@@ -246,6 +247,32 @@ def serper_search(
     return [_compact(r.get("title"), r.get("link"), r.get("snippet")) for r in organic[:5]]
 
 
+def _first_highlight(raw: Any) -> str:
+    if isinstance(raw, str):
+        return raw.strip()
+    if not isinstance(raw, list) or not raw:
+        return ""
+    first = raw[0]
+    if isinstance(first, dict):
+        return str(first.get("text") or first.get("highlight") or "").strip()
+    return str(first).strip()
+
+
+def _exa_body(result: dict[str, Any], query: str) -> str:
+    """Prefer Exa's query-aware summary, then highlights, then page text.
+
+    Without this, news speak is the first 180 chars of raw extract — bylines,
+    dates, 'min read' — the metadata-like line users hear when the Qwen
+    summarizer is off.
+    """
+    summary = _strip_markdown(str(result.get("summary") or "")).strip()
+    highlight = _strip_markdown(_first_highlight(result.get("highlights")))
+    text = _strip_markdown(str(result.get("text") or "")).strip()
+    if _is_stock_query(query):
+        return text or highlight or summary
+    return summary or highlight or text
+
+
 def exa_search(
     query: str, api_key: str, timeout_sec: float = DEFAULT_SEARCH_TIMEOUT, type_: str = "fast"
 ) -> list[dict[str, str]]:
@@ -253,29 +280,42 @@ def exa_search(
     style — REST only (httpx); no exa-py SDK. type="fast"
     is the fastest reliable option of the real-time search types, with
     richer per-result text than Brave/Serper (see CHANGELOG.md)."""
+    stockish = _is_stock_query(query)
     # Longer excerpts for quotes/news so the top line isn't just a headline.
-    max_chars = 900 if _is_stock_query(query) else 700
+    max_chars = 900 if stockish else 700
+    contents: dict[str, Any] = {
+        "text": {"maxCharacters": max_chars},
+        "highlights": {"query": query, "maxCharacters": 400},
+    }
+    if not stockish:
+        # Exa-side abstractive summary (Gemini Flash). Replaces the old Qwen
+        # second pass for news/general; skip on stocks so we keep the quote.
+        contents["summary"] = {"query": query}
+    payload: dict[str, Any] = {
+        "query": query,
+        "type": type_,
+        "numResults": 5,
+        "contents": contents,
+    }
+    if _NEWS_QUERY_RE.search(query or ""):
+        payload["category"] = "news"
     resp = httpx.post(
         "https://api.exa.ai/search",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        json={
-            "query": query,
-            "type": type_,
-            "numResults": 5,
-            "contents": {"text": {"maxCharacters": max_chars}},
-        },
+        json=payload,
         timeout=timeout_sec,
     )
     resp.raise_for_status()
     results = resp.json().get("results") or []
-    # Stock snippets often need more than 180 chars to include the actual quote.
     out: list[dict[str, str]] = []
     for r in results[:5]:
-        c = _compact(r.get("title"), r.get("url"), r.get("text"))
-        if _is_stock_query(query):
-            full = re.sub(r"\s+", " ", _strip_markdown(str(r.get("text") or ""))).strip()
-            if full:
-                c["snippet"] = full[:480]
+        if not isinstance(r, dict):
+            continue
+        body = _exa_body(r, query)
+        c = _compact(r.get("title"), r.get("url"), body)
+        # Keep more of Exa's body than Brave's 180-char snippet ceiling.
+        if body:
+            c["snippet"] = re.sub(r"\s+", " ", body).strip()[: 480 if stockish else 400]
         out.append(c)
     return out
 
@@ -307,8 +347,8 @@ def answer_from_hits(query: str, hits: list, *, tool_name: str = "web_search") -
             speak,
             {"evidence": evidence, "numeric": True, "needs_summary": False},
         )
-    # News / general: let the grounded summarizer phrase from evidence (not raw
-    # first-snippet dump, which produces "At least eight." mid-list junk).
+    # News / general: speak Exa summary/highlight (or first clean snippet).
+    # Qwen summarizer is opt-in via tools.summarize_search (currently off).
     return _ok(
         tool_name,
         cleaner.speak_fallback(hits),

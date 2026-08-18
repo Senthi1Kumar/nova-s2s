@@ -5,9 +5,10 @@ Single reference for what runs by default, which configs exist, and which model 
 ## Launch
 
 ```bash
-cd ~/nsk/nova-hailo   # or edge/nova-hailo on the laptop
+cd nova-s2s/edge/nova-hailo
 ./scripts/run_demo_oem.sh
-# UI: http://localhost:8766/
+# Driver UI:  cd hmi_qt && ./run.sh
+# Web UI:     http://localhost:8766/
 ```
 
 Default config: `config.oem_v002_test.yaml`  
@@ -25,15 +26,15 @@ Override any profile with `NOVA_HAILO_CONFIG=/path/to.yaml`.
 
 | Stage | Implementation | Where it runs |
 | --- | --- | --- |
-| Capture / playback | Browser WebSocket PCM, PipeWire | Host browser |
+| Capture / playback | Qt HMI (`hmi_qt/run.sh`) or browser WS PCM | This Pi (or laptop client) |
 | VAD | Silero ONNX | CPU |
 | Utterance gate | rms / peak / speech fraction | CPU |
 | ASR | NeMo Speech EN streaming GGUF + optional sidecar | CPU |
-| Router / tools | Deterministic allowlist → broker | CPU |
-| LLM | Qwen2-1.5B HEF (`llm_backend: cpp`) | Hailo-10H |
-| Web search | Exa → Brave → Serper (HTTP via `httpx`) | Network |
+| Host | Router + controller; compact codec `t0`–`t6` (Phase A) | CPU |
+| LLM | Qwen2-1.5B HEF (`llm_backend: cpp` after on-device `.so` build) | Hailo-10H |
+| Web search | Exa (summary/highlights) → Brave → Serper | Network |
 | Deep research | Tavily async job | Network |
-| TTS | Inflect-Nano-v2 ONNX → browser | CPU |
+| TTS | Inflect-Nano-v2 ONNX | CPU |
 
 Barge-in while speaking is **off** (UI stop button still interrupts).
 
@@ -41,15 +42,15 @@ Barge-in while speaking is **off** (UI stop button still interrupts).
 
 | Role | Path / setting |
 | --- | --- |
-| ASR (default) | `models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf` |
-| ASR lib | `models/nemo_speech/libnemo_speech_asr_c.so` |
-| ASR VAD mask (optional) | `models/nemo_speech/silero-v6.2.0.gguf` |
-| ASR rollback | `models/parakeet/tdt_ctc-110m-f16.gguf` (`model.stt_engine: parakeet`) |
-| ASR NPU fallback | Whisper HEF (`whisper_hef: base`) if CPU ASR missing |
-| LLM | HEF alias `qwen2` (device install path via Hailo apps) |
-| TTS | Inflect ONNX under `cloned/Inflect-Nano-v2-ONNX` (or configured path) |
-| TTS rollback | `models/piper/en_US-amy-low.onnx` (`model.tts_engine: piper`) |
-| VAD | `models/silero_vad.onnx` (or package default) |
+| ASR (default) | `models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf` | `./scripts/fetch_models.sh` (NVIDIA HF) |
+| ASR lib | `models/nemo_speech/libnemo_speech_asr_c.so` | `./scripts/fetch_models.sh` builds NeMo-Speech.cpp |
+| ASR VAD mask (optional) | `models/nemo_speech/silero-v6.2.0.gguf` | optional |
+| ASR rollback | `models/parakeet/tdt_ctc-110m-f16.gguf` | optional |
+| ASR NPU fallback | Whisper HEF (`whisper_hef: base`) | hailo-apps |
+| LLM | HEF alias `qwen2` | hailo-apps |
+| TTS | `models/Inflect-Nano-v2-ONNX/` (also `cloned/Inflect-Nano-v2-ONNX`) | `fetch_models.sh` |
+| TTS rollback | `models/piper/en_US-amy-low.onnx` | `fetch_models.sh` |
+| VAD | `models/silero_vad.onnx` | `fetch_models.sh` |
 
 Sidecar binary (when used):  
 `cloned/NeMo-Speech.cpp/build/cpu-server/bin/nemo-speech`  
@@ -70,7 +71,8 @@ Under `model:`:
 
 Under `tools:`:
 
-- `profile`, `enabled`, `summarize_search`, `timeout_sec`
+- `profile`, `enabled`, `summarize_search` (**false** in this drop), `timeout_sec`
+- Native LLM: `scripts/build_hailo_llm_cpp.sh` → `nova_hailo/backends/hailo_llm_cpp*.so` (gitignored)
 
 ## Secrets (`.env`)
 

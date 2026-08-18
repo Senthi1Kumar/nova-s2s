@@ -32,6 +32,22 @@ _SITE_NAME_RE = re.compile(
     r"bloomberg|forbes|techcrunch|the verge)\b", re.I)
 # Site names trail titles as "Real Title - Wikipedia" / "... | AccuWeather".
 _TITLE_SITE_RE = re.compile(r"\s*[|–—-]\s*[^|–—-]{2,30}$")
+# Page chrome that Exa raw `text` often leads with (dates, bylines, "min read").
+_LEAD_CHROME_RE = re.compile(
+    r"^(?:"
+    r"(?:published|updated|posted|written|byline)\b[^.]{0,48}[.—-]\s*|"
+    r"(?:by\s+[A-Z][\w.'\-]+(?:\s+[A-Z][\w.'\-]+){0,3}\s*[.—-]\s*)|"
+    r"(?:\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\s*[.—-]\s*)|"
+    r"(?:\d+\s+min(?:ute)?s?\s+read\s*[.—-]?\s*)|"
+    r"(?:skip to (?:main )?content\s*[.—-]?\s*)"
+    r")+",
+    re.I,
+)
+_CHROME_ONLY_RE = re.compile(
+    r"^(published|updated|posted|skip to|min read|share this|"
+    r"subscribe|advertisement|photo:|image:)\b",
+    re.I,
+)
 
 DEFAULT_MAX_CHARS = 700
 DEFAULT_MAX_RESULTS = 4
@@ -114,10 +130,31 @@ class SearchResultCleaner:
         snips = self.snippets(hits)
         if not snips:
             return "I couldn't find anything useful on that."
-        first = snips[0].text
-        if len(first) > 220:
-            first = first[:219].rsplit(" ", 1)[0].rstrip(" ,;:-") + "."
-        return first
+        parts: list[str] = []
+        used = 0
+        budget = 320
+        for snip in snips:
+            text = _LEAD_CHROME_RE.sub("", snip.text).strip(" -|–—,")
+            if not text or len(text) < MIN_SNIPPET_CHARS:
+                continue
+            if _CHROME_ONLY_RE.search(text) and len(text) < 80:
+                continue
+            chunk = text
+            if used + len(chunk) > budget:
+                remaining = budget - used
+                if remaining < 60:
+                    break
+                chunk = chunk[:remaining].rsplit(" ", 1)[0].rstrip(" ,;:-") + "."
+            parts.append(chunk)
+            used += len(chunk) + 1
+            if used >= 160 or len(parts) >= 2:
+                break
+        if not parts:
+            first = snips[0].text
+            if len(first) > 220:
+                first = first[:219].rsplit(" ", 1)[0].rstrip(" ,;:-") + "."
+            return first
+        return " ".join(parts)
 
 
 # Numeric asks must never reach the LLM. Measured 2026-07-30: given evidence
