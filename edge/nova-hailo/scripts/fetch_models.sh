@@ -164,14 +164,31 @@ build_nemo() {
 }
 
 install_nemo_lib() {
-  local found
-  found="$(find "$NEMO_SRC/build" -name 'libnemo_speech_asr_c.so' -type f 2>/dev/null | head -1 || true)"
-  if [[ -z "$found" ]]; then
-    log "ERROR: libnemo_speech_asr_c.so not produced under $NEMO_SRC/build"
+  # cpu-server writes shared libs to build/<preset>/bin/ (CMAKE_LIBRARY_OUTPUT_DIRECTORY).
+  # SOVERSION=1 → libnemo_speech_asr_c.so.1. ctypes wants libnemo_speech_asr_c.so.
+  # _c is linked to libnemo_speech_asr.so via $ORIGIN — copy the pair.
+  local dest bindir
+  dest="$(dirname "$LIB_DST")"
+  mkdir -p "$dest"
+  bindir="$(find "$NEMO_SRC/build" -type d -name bin 2>/dev/null | head -1 || true)"
+  if [[ -n "$bindir" ]]; then
+    find "$bindir" -maxdepth 1 -name 'libnemo_speech_asr*.so*' -exec cp -a {} "$dest/" \;
+  else
+    find "$NEMO_SRC/build" \( -name 'libnemo_speech_asr*.so' -o -name 'libnemo_speech_asr*.so.*' \) \
+      -exec cp -a {} "$dest/" \;
+  fi
+  if [[ ! -e "$LIB_DST" ]]; then
+    local ver
+    ver="$(ls -1 "$dest"/libnemo_speech_asr_c.so.* 2>/dev/null | head -1 || true)"
+    if [[ -n "$ver" ]]; then
+      ln -sfn "$(basename "$ver")" "$LIB_DST"
+    fi
+  fi
+  if [[ ! -e "$LIB_DST" ]]; then
+    log "ERROR: libnemo_speech_asr_c.so* not under $NEMO_SRC/build"
+    find "$NEMO_SRC/build" -name 'libnemo_speech*' 2>/dev/null | head -20 || true
     return 1
   fi
-  mkdir -p "$(dirname "$LIB_DST")"
-  cp -f "$found" "$LIB_DST"
   log "installed $LIB_DST ($(du -h "$LIB_DST" | awk '{print $1}'))"
 }
 
