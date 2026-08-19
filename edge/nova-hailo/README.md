@@ -57,7 +57,7 @@ cp -n .env.example .env          # fill API keys — never commit .env
 
 # If you already created .venv with uv's Python, wipe it first:
 #   rm -rf .venv
-source scripts/setup_env.sh      # system Python + hailo_platform + HMI deps
+source scripts/setup_env.sh      # uv venv; first install is slow, leave it running
 /usr/bin/python3 -c "import hailo_platform; print(hailo_platform.__file__)"
 # if that fails: dpkg -l | grep -i hailo   (install HailoRT 5.1.1 python binding)
 ./scripts/fetch_models.sh        # STT/VAD/TTS weights + build NeMo-Speech .so
@@ -121,9 +121,9 @@ wrapper needs HailoRT CMake + pybind11 (`scripts/build_hailo_llm_cpp.sh`).
 
 HMI: PySide6 is in the same `pyproject.toml` as the backend. `source scripts/setup_env.sh` installs everything; `hmi_qt/run.sh` uses that venv. No C++ Qt build.
 
-## Models (`models/` — not in git)
+## Models (`models/`)
 
-Default STT is **Nemo-Speech**. One script downloads weights **and** builds
+Default STT is **Nemo-Speech**. One script downloads weights and builds
 the C ABI library (no USB copy):
 
 ```bash
