@@ -66,6 +66,10 @@ nova_hailo_setup_env() {
 
   export PYTHONPATH="${root}:${HAILO_APPS}:${PYTHONPATH:-}"
   export NOVA_HAILO_ROOT="$root"
+  _nemo_lib="${root}/models/nemo_speech"
+  if [[ -d "$_nemo_lib" ]]; then
+    export LD_LIBRARY_PATH="${_nemo_lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  fi
 
   echo "nova-hailo env ready ($root)"
   echo "  python: $(command -v python3)"

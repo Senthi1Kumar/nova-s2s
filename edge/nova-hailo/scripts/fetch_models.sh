@@ -172,11 +172,15 @@ install_nemo_lib() {
   mkdir -p "$dest"
   bindir="$(find "$NEMO_SRC/build" -type d -name bin 2>/dev/null | head -1 || true)"
   if [[ -n "$bindir" ]]; then
-    find "$bindir" -maxdepth 1 -name 'libnemo_speech_asr*.so*' -exec cp -a {} "$dest/" \;
-  else
-    find "$NEMO_SRC/build" \( -name 'libnemo_speech_asr*.so' -o -name 'libnemo_speech_asr*.so.*' \) \
-      -exec cp -a {} "$dest/" \;
+    # ASR C ABI + ggml runtime (dlopen of _c.so needs libggml.so.0 next to it)
+    find "$bindir" -maxdepth 1 \( \
+        -name 'libnemo_speech_asr*.so*' -o -name 'libggml*.so*' \
+      \) -exec cp -a {} "$dest/" \;
   fi
+  find "$NEMO_SRC/build" \( \
+      -name 'libnemo_speech_asr*.so' -o -name 'libnemo_speech_asr*.so.*' \
+      -o -name 'libggml.so*' -o -name 'libggml-*.so*' \
+    \) -exec cp -a {} "$dest/" \;
   if [[ ! -e "$LIB_DST" ]]; then
     local ver
     ver="$(ls -1 "$dest"/libnemo_speech_asr_c.so.* 2>/dev/null | head -1 || true)"

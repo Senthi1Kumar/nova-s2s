@@ -130,6 +130,15 @@ def test_history_rejects_entity_bleed_from_previous_reply():
     assert len(h) == 2  # unrelated, legitimate reply still stores normally
 
 
+def test_fsm_on_change_emits_snapshot():
+    seen: list[str] = []
+    fsm = SessionFSM(on_change=lambda snap: seen.append(str(snap.get("state"))))
+    fsm.arm()
+    fsm.begin_listen()
+    assert "ARMED" in seen
+    assert "LISTENING" in seen
+
+
 def test_fsm_generation_invalidates_on_interrupt():
     fsm = SessionFSM()
     fsm.arm()

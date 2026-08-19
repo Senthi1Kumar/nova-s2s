@@ -10,6 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from collections.abc import Callable
 from typing import Any
 
 
@@ -80,7 +81,11 @@ class TurnContext:
 class SessionFSM:
     """Thread-safe session state + monotonic generation IDs."""
 
-    def __init__(self, session_idle_sec: float = 45.0):
+    def __init__(
+        self,
+        session_idle_sec: float = 45.0,
+        on_change: Callable[[dict[str, Any]], None] | None = None,
+    ):
         self._lock = threading.RLock()
         self.state = SessionState.IDLE
         self.session_idle_sec = float(session_idle_sec)
@@ -88,12 +93,24 @@ class SessionFSM:
         self._armed_until: float | None = None
         self.current: TurnContext | None = None
         self.last_terminal: TurnTerminal | None = None
+        self._on_change = on_change
+
+    def _emit(self) -> None:
+        cb = self._on_change
+        if cb is None:
+            return
+        try:
+            cb(self.snapshot())
+        except Exception:
+            pass
 
     def _transition(self, new: SessionState) -> bool:
         allowed = _ALLOWED.get(self.state, set())
         if new not in allowed and new != self.state:
             return False
-        self.state = new
+        if new != self.state:
+            self.state = new
+            self._emit()
         return True
 
     def arm(self, hold_sec: float | None = None) -> None:
@@ -108,6 +125,7 @@ class SessionFSM:
                 if time.perf_counter() >= self._armed_until:
                     self.state = SessionState.IDLE
                     self._armed_until = None
+                    self._emit()
                     return True
             return False
 
@@ -122,6 +140,7 @@ class SessionFSM:
             # Force TRANSCRIBING even if prior arm/listen skipped (PTT commit)
             if not self._transition(SessionState.TRANSCRIBING):
                 self.state = SessionState.TRANSCRIBING
+                self._emit()
             ctx = TurnContext(
                 turn_id="turn_" + uuid.uuid4().hex[:10],
                 generation_id=self._generation,
@@ -175,6 +194,7 @@ class SessionFSM:
                 self.state = SessionState.LISTENING
             else:
                 self.state = SessionState.IDLE
+            self._emit()
             return True
 
     def is_current(self, generation_id: int) -> bool:

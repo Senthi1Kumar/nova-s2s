@@ -109,6 +109,17 @@ class _RecognitionOptions(ctypes.Structure):
     ]
 
 
+def _preload_nemo_native_deps(lib_path: Path) -> None:
+    """Load libggml*.so from the same dir before libnemo_speech_asr_c.so."""
+    d = Path(lib_path).resolve().parent
+    for pat in ("libggml.so*", "libggml-*.so*"):
+        for p in sorted(d.glob(pat)):
+            try:
+                ctypes.CDLL(str(p), mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                continue
+
+
 def _find_first(paths: list[Path]) -> Path | None:
     for p in paths:
         if p.is_file():
@@ -128,7 +139,9 @@ class NemoSpeechSTT:
         language: str | None = None,
         vad_model: str | Path | None = None,
     ):
-        self._lib = ctypes.CDLL(str(lib_path))
+        lib_p = Path(lib_path)
+        _preload_nemo_native_deps(lib_p)
+        self._lib = ctypes.CDLL(str(lib_p))
         self._bind()
         self.language = language
         self.model_path = str(gguf_path)
