@@ -130,10 +130,10 @@ Needs `git`, `ninja`, `g++` (script will `apt` them if missing). Rebuild:
 | --- | --- | --- |
 | STT GGUF | `models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf` | HF nvidia/nemotron-speech-streaming-en-0.6b |
 | STT lib | `models/nemo_speech/libnemo_speech_asr_c.so` | **built by `fetch_models.sh`** |
-| VAD | `models/silero_vad.onnx` | HF snakers4/silero-vad |
+| VAD | `models/silero_vad.onnx` | GitHub snakers4/silero-vad (not HF) |
 | TTS | `models/Inflect-Nano-v2-ONNX/` | HF owensong/Inflect-Nano-v2-ONNX |
 | TTS rollback | `models/piper/en_US-amy-low.onnx` | HF rhasspy/piper-voices |
-| LLM | Hailo `qwen2` HEF | hailo-apps (not this script) |
+| LLM | `models/Qwen2-1.5B-Instruct.hef` | Hailo Model Zoo GenAI (`dev-public.hailo.ai/v5.1.1`, same HEF we run) |
 
 ## Audio / display
 

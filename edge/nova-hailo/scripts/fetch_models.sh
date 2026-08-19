@@ -4,9 +4,9 @@
 #   source scripts/setup_env.sh
 #   ./scripts/fetch_models.sh
 #
-# Downloads public weights into models/, clones/builds NVIDIA NeMo-Speech.cpp
-# (cpu-server), and installs libnemo_speech_asr_c.so next to the GGUF.
-# No USB / manual .so copy.
+# Downloads public STT/VAD/TTS weights + the Qwen2-1.5B Hailo HEF we run,
+# clones/builds NVIDIA NeMo-Speech.cpp (cpu-server), and installs
+# libnemo_speech_asr_c.so next to the GGUF. No USB / manual .so copy.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -40,11 +40,6 @@ hf_hub_download(
     local_dir=str(root / "models" / "nemo_speech"),
 )
 
-print("VAD  snakers4/silero-vad → models/silero_vad.onnx")
-p = hf_hub_download("snakers4/silero-vad", "src/silero_vad/data/silero_vad.onnx")
-dest = root / "models" / "silero_vad.onnx"
-dest.write_bytes(Path(p).read_bytes())
-
 print("TTS  owensong/Inflect-Nano-v2-ONNX → models/Inflect-Nano-v2-ONNX/")
 snapshot_download(
     "owensong/Inflect-Nano-v2-ONNX",
@@ -64,6 +59,55 @@ for name in ("en_US-amy-low.onnx", "en_US-amy-low.onnx.json"):
 
 print("weights ok")
 PY
+
+# Silero is a GitHub project, not a public HF model (HF returns 401 / repo-not-found).
+# Same URL as nova_hailo/web/silero_vad.py::ONNX_URL.
+VAD_DST="$ROOT/models/silero_vad.onnx"
+VAD_URL="https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+if [[ -s "$VAD_DST" ]]; then
+  log "VAD already at $VAD_DST"
+else
+  log "VAD  $VAD_URL → models/silero_vad.onnx"
+  mkdir -p "$(dirname "$VAD_DST")"
+  if command -v curl >/dev/null; then
+    curl -fsSL -o "$VAD_DST" "$VAD_URL"
+  else
+    wget -q -O "$VAD_DST" "$VAD_URL"
+  fi
+  [[ -s "$VAD_DST" ]] || { log "ERROR: Silero VAD download empty"; exit 1; }
+fi
+
+# ---------------------------------------------------------------------------
+# 1b. Hailo LLM HEF — Qwen2-1.5B-Instruct (alias qwen2, HailoRT 5.1.1)
+#     Official public blob from Hailo Model Zoo GenAI (same file we run today).
+# ---------------------------------------------------------------------------
+HEF_NAME="Qwen2-1.5B-Instruct.hef"
+HEF_DST="$ROOT/models/$HEF_NAME"
+HEF_URL="${HAILO_LLM_HEF_URL:-https://dev-public.hailo.ai/v5.1.1/blob/${HEF_NAME}}"
+if [[ -s "$HEF_DST" ]]; then
+  log "LLM already at $HEF_DST"
+else
+  for cand in \
+    /usr/local/hailo/resources/models/hailo10h/"$HEF_NAME" \
+    "${HOME}/Downloads/${HEF_NAME}"
+  do
+    if [[ -s "$cand" ]]; then
+      log "LLM reuse $cand → $HEF_DST"
+      ln -sfn "$cand" "$HEF_DST"
+      break
+    fi
+  done
+fi
+if [[ ! -s "$HEF_DST" ]]; then
+  log "LLM  $HEF_URL → models/${HEF_NAME}  (~1 GB, HailoRT 5.1.1)"
+  mkdir -p "$(dirname "$HEF_DST")"
+  if command -v curl >/dev/null; then
+    curl -fL --retry 3 --retry-delay 2 -o "$HEF_DST" "$HEF_URL"
+  else
+    wget -q -O "$HEF_DST" "$HEF_URL"
+  fi
+  [[ -s "$HEF_DST" ]] || { log "ERROR: HEF download empty"; exit 1; }
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Build NeMo-Speech.cpp (CPU) and install libnemo_speech_asr_c.so
@@ -149,7 +193,8 @@ for rel in \
   models/nemo_speech/libnemo_speech_asr_c.so \
   models/silero_vad.onnx \
   models/Inflect-Nano-v2-ONNX \
-  models/piper/en_US-amy-low.onnx
+  models/piper/en_US-amy-low.onnx \
+  models/Qwen2-1.5B-Instruct.hef
 do
   if [[ -e "$ROOT/$rel" ]]; then
     log "OK  $rel"
@@ -159,9 +204,8 @@ do
   fi
 done
 
-log "LLM HEF (qwen2) comes from hailo-apps, not this script."
 if [[ "$ok" -eq 1 ]]; then
-  log "STT + VAD + TTS ready under models/"
+  log "STT + VAD + TTS + LLM HEF ready under models/"
 else
   log "some artifacts missing — see lines above"
   exit 1
