@@ -38,8 +38,15 @@ Connect *this* Pi to the car (or HDMI + HAT audio) and run locally.
 
 ## Clone and run (on the Pi)
 
-Needs the same hardware class: Pi 5 + Hailo-10H AI HAT+ 2, HailoRT 5.1.1,
-hailo-apps / `hailo_platform`, Qwen2 HEF already installed.
+Needs the same hardware class: Pi 5 + Hailo-10H AI HAT+ 2, HailoRT **5.1.1**,
+and the HailoRT **system** Python package (`hailo_platform` from `h10-hailort`
+/ hailo-apps — not pip). We use **`uv venv`**, not `python -m venv`, but it
+must be:
+
+`uv venv --python /usr/bin/python3 --system-site-packages .venv`
+
+Bare `uv venv` downloads uv’s own CPython 3.12, which cannot see
+`hailo_platform` → `No module named hailo_platform`.
 
 ```bash
 git clone -b share/nova-hailo-poc-v002 https://github.com/Senthi1Kumar/nova-s2s.git
@@ -48,7 +55,11 @@ cd nova-s2s/edge/nova-hailo
 cp -n .env.example .env          # fill API keys — never commit .env
 # export HAILO_APPS=/path/to/hailo-apps   # if hailo-apps is not on the default path
 
-source scripts/setup_env.sh      # one venv: backend + HMI (PySide6, numpy, …)
+# If you already created .venv with uv's Python, wipe it first:
+#   rm -rf .venv
+source scripts/setup_env.sh      # system Python + hailo_platform + HMI deps
+/usr/bin/python3 -c "import hailo_platform; print(hailo_platform.__file__)"
+# if that fails: dpkg -l | grep -i hailo   (install HailoRT 5.1.1 python binding)
 ./scripts/fetch_models.sh        # STT/VAD/TTS weights + build NeMo-Speech .so
 
 ./scripts/build_hailo_llm_cpp.sh # hailo_llm_cpp*.so on THIS Pi

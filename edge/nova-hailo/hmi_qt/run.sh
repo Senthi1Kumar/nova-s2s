@@ -12,11 +12,13 @@ elif [[ -f .venv/bin/activate ]]; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
 else
-  python3 -m venv .venv
+  echo "HMI: no parent .venv — uv venv --system-site-packages (run source ../scripts/setup_env.sh normally)"
+  SYS_PY="${NOVA_HAILO_PYTHON:-/usr/bin/python3}"
+  [[ -x "$SYS_PY" ]] || SYS_PY="$(command -v python3)"
+  uv venv --python "$SYS_PY" --system-site-packages .venv
   # shellcheck disable=SC1091
   source .venv/bin/activate
-  pip install -q --upgrade pip
-  pip install -q -r requirements.txt
+  uv pip install -r requirements.txt
 fi
 WS="${NOVA_HAILO_WS_URL:-ws://127.0.0.1:8766/v1/realtime}"
 export NOVA_HAILO_WS_URL="$WS"
