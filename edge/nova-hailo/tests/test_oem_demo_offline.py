@@ -261,6 +261,28 @@ def test_exa_body_prefers_summary_then_highlight():
     assert "$185.40" in _exa_body(stock, "stock price of Amazon today")
 
 
+def test_speak_fallback_skips_news_boilerplate():
+    from nova_hailo.tools.search_clean import SearchResultCleaner
+
+    cleaner = SearchResultCleaner()
+    hits = [
+        {
+            "title": "NBC Bay Area",
+            "snippet": (
+                "The Bay Area's source for breaking news and live streaming video online. "
+                "Covering San Francisco, Oakland and San Jose."
+            ),
+        },
+        {
+            "title": "BART strike averted after overnight talks",
+            "snippet": "Union leaders and management reached a tentative deal early Tuesday.",
+        },
+    ]
+    spoken = cleaner.speak_fallback(hits)
+    assert "source for breaking news" not in spoken.lower()
+    assert "BART" in spoken or "tentative" in spoken
+
+
 def test_speak_fallback_skips_page_chrome():
     from nova_hailo.tools.search_clean import SearchResultCleaner
 

@@ -42,6 +42,13 @@ if [[ -n "${LAN:-}" ]]; then
   echo "Open: http://${LAN}:${NOVA_HAILO_PORT}/"
 fi
 
+# teed logs hide print() until a client connects unless unbuffered
+export PYTHONUNBUFFERED=1
+_nemo_lib="${ROOT}/models/nemo_speech"
+if [[ -d "$_nemo_lib" ]]; then
+  export LD_LIBRARY_PATH="${_nemo_lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 exec python3 -m uvicorn nova_hailo.web.app:app \
   --host "$NOVA_HAILO_HOST" \
   --port "$NOVA_HAILO_PORT" \

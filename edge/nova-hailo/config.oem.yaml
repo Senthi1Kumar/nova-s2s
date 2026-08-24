@@ -108,5 +108,5 @@ tools:
   # model.llm_hef so chat KV is not used for search speak. Falls back to chat HEF
   # if missing / same path / load fails.
   summarizer_hef: qwen2
-  brave_primary: true
-  serper_fallback: true
+  brave_primary: false
+  serper_fallback: false

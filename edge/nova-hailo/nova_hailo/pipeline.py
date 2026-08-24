@@ -259,7 +259,7 @@ class NovaPipeline:
                 enabled=list(enabled or []),
                 timeout_sec=float(cfg.get("tools", "timeout_sec", default=1.5)),
                 write_enabled=bool(cfg.get("tools", "write_enabled", default=False)),
-                serper_fallback=bool(cfg.get("tools", "serper_fallback", default=True)),
+                serper_fallback=bool(cfg.get("tools", "serper_fallback", default=False)),
             )
             self.system_prompt = cfg.soul_prompt + (
                 "\n\nSpeak naturally in one or two short sentences. "

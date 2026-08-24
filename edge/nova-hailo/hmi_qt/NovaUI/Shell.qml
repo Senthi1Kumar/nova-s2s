@@ -94,6 +94,7 @@ Item {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     model: transcriptModel
+                    link: nova.link
                 }
             }
         }

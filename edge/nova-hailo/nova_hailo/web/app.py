@@ -90,14 +90,14 @@ def _build_pipeline() -> NovaPipeline:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pipeline
-    print("Initializing Nova-Hailo web pipeline…")
+    print("Initializing Nova-Hailo web pipeline…", flush=True)
     _pipeline = _build_pipeline()
-    print(f"LLM: {_pipeline.llm.hef_path}")
+    print(f"LLM: {_pipeline.llm.hef_path}", flush=True)
     if _pipeline.stt:
-        print(f"STT resident [{_pipeline.stt_engine}]: {_pipeline.stt.hef_path}")
+        print(f"STT resident [{_pipeline.stt_engine}]: {_pipeline.stt.hef_path}", flush=True)
     else:
-        print("STT: on-demand (sequential_stt)")
-    print(f"TTS local_play={_pipeline.tts.local_play} stream_tts={_pipeline.stream_tts}")
+        print("STT: on-demand (sequential_stt)", flush=True)
+    print(f"TTS local_play={_pipeline.tts.local_play} stream_tts={_pipeline.stream_tts}", flush=True)
     if _pipeline.stt_engine == "nemo_speech":
         from nova_hailo.backends.nemo_speech_stt import (
             resolve_nemo_speech_paths,

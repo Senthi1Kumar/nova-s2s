@@ -171,16 +171,15 @@ install_nemo_lib() {
   dest="$(dirname "$LIB_DST")"
   mkdir -p "$dest"
   bindir="$(find "$NEMO_SRC/build" -type d -name bin 2>/dev/null | head -1 || true)"
-  if [[ -n "$bindir" ]]; then
-    # ASR C ABI + ggml runtime (dlopen of _c.so needs libggml.so.0 next to it)
-    find "$bindir" -maxdepth 1 \( \
-        -name 'libnemo_speech_asr*.so*' -o -name 'libggml*.so*' \
-      \) -exec cp -a {} "$dest/" \;
-  fi
+  # Shared libs live under build/<preset>/bin AND ggml's own cmake dirs.
   find "$NEMO_SRC/build" \( \
       -name 'libnemo_speech_asr*.so' -o -name 'libnemo_speech_asr*.so.*' \
-      -o -name 'libggml.so*' -o -name 'libggml-*.so*' \
-    \) -exec cp -a {} "$dest/" \;
+      -o -name 'libggml.so' -o -name 'libggml.so.*' \
+      -o -name 'libggml-base.so*' -o -name 'libggml-cpu.so*' \
+      -o -name 'libggml-*.so*' \
+    \) \( -type f -o -type l \) -exec cp -aL {} "$dest/" \;
+  log "native libs in $dest:"
+  ls -l "$dest"/lib*.so* 2>/dev/null | sed 's/^/[fetch_models]   /' || true
   if [[ ! -e "$LIB_DST" ]]; then
     local ver
     ver="$(ls -1 "$dest"/libnemo_speech_asr_c.so.* 2>/dev/null | head -1 || true)"

@@ -110,14 +110,24 @@ class _RecognitionOptions(ctypes.Structure):
 
 
 def _preload_nemo_native_deps(lib_path: Path) -> None:
-    """Load libggml*.so from the same dir before libnemo_speech_asr_c.so."""
+    """Load libggml*.so from the ASR lib dir (and the NeMo build tree) first."""
     d = Path(lib_path).resolve().parent
+    extras: list[Path] = []
+    build = Path(__file__).resolve().parents[2] / "cloned" / "NeMo-Speech.cpp" / "build"
+    if build.is_dir():
+        extras.extend(build.rglob("libggml*.so*"))
     for pat in ("libggml.so*", "libggml-*.so*"):
-        for p in sorted(d.glob(pat)):
-            try:
-                ctypes.CDLL(str(p), mode=ctypes.RTLD_GLOBAL)
-            except OSError:
-                continue
+        extras.extend(d.glob(pat))
+    seen: set[str] = set()
+    for p in extras:
+        key = p.name
+        if key in seen or p.is_dir():
+            continue
+        seen.add(key)
+        try:
+            ctypes.CDLL(str(p.resolve()), mode=ctypes.RTLD_GLOBAL)
+        except OSError:
+            continue
 
 
 def _find_first(paths: list[Path]) -> Path | None:

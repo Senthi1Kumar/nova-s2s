@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -33,6 +34,8 @@ from nova_hailo.tools.search_clean import (
 TAVILY_URL = "https://api.tavily.com/search"
 RESEARCH_FILLER = "Looking that up."
 DEFAULT_SEARCH_TIMEOUT = 1.5
+# Exa contents.summary + highlights need more than the Brave snippet budget.
+EXA_TIMEOUT_SEC = 8.0
 DEFAULT_TAVILY_TIMEOUT = 12.0
 
 
@@ -222,9 +225,12 @@ def _multi_stock_speak(query: str, evidence: str) -> str | None:
 def brave_search(
     query: str, api_key: str, timeout_sec: float = DEFAULT_SEARCH_TIMEOUT
 ) -> list[dict[str, str]]:
+    params: dict[str, Any] = {"q": query, "count": 5, "search_lang": "en"}
+    if _NEWS_QUERY_RE.search(query or ""):
+        params["freshness"] = "pw"  # past week — avoid 1972-style evergreen hits
     resp = httpx.get(
         "https://api.search.brave.com/res/v1/web/search",
-        params={"q": query, "count": 5, "search_lang": "en"},
+        params=params,
         headers={"Accept": "application/json", "X-Subscription-Token": api_key},
         timeout=timeout_sec,
     )
@@ -299,6 +305,9 @@ def exa_search(
     }
     if _NEWS_QUERY_RE.search(query or ""):
         payload["category"] = "news"
+        # Last 7 days so "current news" is not a 1972 headline or a site about-page.
+        start = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00.000Z")
+        payload["startPublishedDate"] = start
     resp = httpx.post(
         "https://api.exa.ai/search",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
@@ -360,53 +369,36 @@ def web_search(
     query: str,
     *,
     timeout_sec: float = DEFAULT_SEARCH_TIMEOUT,
-    serper_fallback: bool = True,
+    serper_fallback: bool = False,
 ) -> dict[str, Any]:
-    """Exa (fast) → Brave → Serper; fail-closed without keys.
+    """Exa only (type=fast + summary/highlights). No Brave/Serper.
 
-    Ordering reflects measured reliability, not just speed: Serper is
-    demoted to last-resort (not removed) because it's measurably less
-    reliable against our timeout than Brave or Exa. See CHANGELOG.md for
-    the comparison data."""
+    ``serper_fallback`` is ignored — kept so ToolBroker's kwargs stay valid.
+    Fail closed if EXA_API_KEY is missing or the Exa call fails/times out.
+    """
+    del serper_fallback  # Exa-only; never fall through to Brave/Serper.
     q = _normalize_query(query)
     if not q:
         return _unavailable("web_search", "empty_query")
-    # Keep the user-facing query for answer phrasing; search may be rewritten.
     search_q = _stock_search_query(q) or q
     exa = (os.environ.get("EXA_API_KEY") or "").strip()
-    brave = (os.environ.get("BRAVE_API_KEY") or "").strip()
-    serper = (os.environ.get("SERPER_API_KEY") or "").strip()
-    have_fallback = bool(brave or (serper_fallback and serper))
-    if exa:
-        try:
-            # Stock quotes need a bit more text so the price isn't only a $delta.
-            hits = exa_search(
-                search_q,
-                exa,
-                timeout_sec=timeout_sec,
-                type_="fast",
-            )
-            if hits:
-                return answer_from_hits(q, hits)
-        except Exception as exc:  # noqa: BLE001
-            if not have_fallback:
-                return _unavailable("web_search", f"exa_failed:{exc}")
-    if brave:
-        try:
-            hits = brave_search(search_q, brave, timeout_sec=timeout_sec)
-            if hits:
-                return answer_from_hits(q, hits)
-        except Exception as exc:  # noqa: BLE001
-            if not serper_fallback or not serper:
-                return _unavailable("web_search", f"brave_failed:{exc}")
-    if serper_fallback and serper:
-        try:
-            hits = serper_search(search_q, serper, timeout_sec=timeout_sec)
-            if hits:
-                return answer_from_hits(q, hits)
-        except Exception as exc:  # noqa: BLE001
-            return _unavailable("web_search", f"serper_failed:{exc}")
-    return _unavailable("web_search", "no_search_api_key")
+    if not exa:
+        return _unavailable("web_search", "no_exa_api_key")
+    try:
+        hits = exa_search(
+            search_q,
+            exa,
+            timeout_sec=max(float(timeout_sec), EXA_TIMEOUT_SEC),
+            type_="fast",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable("web_search", f"exa_failed:{exc}")
+    if not hits:
+        return _unavailable("web_search", "exa_empty")
+    out = answer_from_hits(q, hits)
+    if isinstance(out.get("result"), dict):
+        out["result"]["provider"] = "exa"
+    return out
 
 
 def tavily_advanced_search(

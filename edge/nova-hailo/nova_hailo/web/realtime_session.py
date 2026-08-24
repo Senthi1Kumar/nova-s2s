@@ -75,7 +75,11 @@ class RealtimeSession:
         self.session_id = "sess_" + uuid.uuid4().hex[:12]
         cfg = pipeline.cfg
         idle = float(cfg.get("pipeline", "session_idle_sec", default=45) or 45)
-        self.fsm = SessionFSM(session_idle_sec=idle, on_change=self._on_fsm_change)
+        try:
+            self.fsm = SessionFSM(session_idle_sec=idle, on_change=self._on_fsm_change)
+        except TypeError:
+            # Older SessionFSM without on_change — still accept the WS.
+            self.fsm = SessionFSM(session_idle_sec=idle)
         self.vad = create_vad_segmenter()
         self._turn_lock = threading.Lock()
         self._closed = False

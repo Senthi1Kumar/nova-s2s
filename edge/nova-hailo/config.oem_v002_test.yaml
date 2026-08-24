@@ -95,7 +95,7 @@ tools:
   profile: oem_readonly
   enabled: [web_search, deep_research, check_calendar, check_email, list_drive_files]
   write_enabled: false
-  timeout_sec: 1.5
+  timeout_sec: 8
   research_poll_timeout_sec: 45
   # Off: Qwen restates "User asked: …" in spoken search answers.
   # Flip true to re-enable grounded rephrase (same chat HEF unless summarizer_hef differs).
@@ -103,5 +103,5 @@ tools:
   summarizer_max_tokens: 512
   max_speak_chars: 700
   summarizer_hef: qwen2
-  brave_primary: true
-  serper_fallback: true
+  brave_primary: false
+  serper_fallback: false

@@ -6,6 +6,7 @@ import NovaUI
 Item {
     id: root
     property alias model: list.model
+    property string link: "offline"
 
     ListView {
         id: list
@@ -41,11 +42,12 @@ Item {
         }
     }
 
-    // Empty state is an invitation, not a shrug.
     Text {
         anchors.centerIn: parent
         visible: list.count === 0
-        text: "Say the wake word to start"
+        text: root.link === "online" ? "Listening — speak when you're ready"
+            : root.link === "demo"   ? "Demo script (no backend)"
+                                     : "Waiting for the voice backend…"
         font.family: Theme.text
         font.pixelSize: 13
         color: Theme.textLo

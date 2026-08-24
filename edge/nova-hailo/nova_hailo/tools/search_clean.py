@@ -48,6 +48,20 @@ _CHROME_ONLY_RE = re.compile(
     r"subscribe|advertisement|photo:|image:)\b",
     re.I,
 )
+# Homepage / section SEO — not a spoken news answer.
+_BOILERPLATE_RE = re.compile(
+    r"("
+    r"source for (breaking )?news|"
+    r"delivers the latest|"
+    r"latest (news|updates) and top stories|"
+    r"browse \d+ of the top|"
+    r"find the latest .{0,40} news|"
+    r"covering .{0,40} and all of the greater|"
+    r"including ai chatbots|"
+    r"ethical issues ai raises"
+    r")",
+    re.I,
+)
 
 DEFAULT_MAX_CHARS = 700
 DEFAULT_MAX_RESULTS = 4
@@ -135,6 +149,13 @@ class SearchResultCleaner:
         budget = 320
         for snip in snips:
             text = _LEAD_CHROME_RE.sub("", snip.text).strip(" -|–—,")
+            if _BOILERPLATE_RE.search(text) or _BOILERPLATE_RE.search(snip.title):
+                # Prefer a concrete headline over "your source for news…".
+                title = (snip.title or "").strip()
+                if title and not _BOILERPLATE_RE.search(title) and len(title) >= 20:
+                    text = title if title.endswith((".", "!", "?")) else title + "."
+                else:
+                    continue
             if not text or len(text) < MIN_SNIPPET_CHARS:
                 continue
             if _CHROME_ONLY_RE.search(text) and len(text) < 80:

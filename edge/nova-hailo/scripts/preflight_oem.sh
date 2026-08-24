@@ -42,10 +42,15 @@ has_nonempty() {
   [[ -n "$v" ]]
 }
 
+if has_nonempty EXA_API_KEY; then
+  pass "EXA_API_KEY set (${#EXA_API_KEY} chars)"
+else
+  warn_ "EXA_API_KEY unset (web_search will skip Exa and use Brave/Serper snippets)"
+fi
 if has_nonempty BRAVE_API_KEY; then
   pass "BRAVE_API_KEY set (${#BRAVE_API_KEY} chars)"
 else
-  warn_ "BRAVE_API_KEY unset (web_search primary unavailable)"
+  warn_ "BRAVE_API_KEY unset (web_search fallback unavailable)"
 fi
 if has_nonempty SERPER_API_KEY; then
   pass "SERPER_API_KEY set (${#SERPER_API_KEY} chars)"

@@ -66,7 +66,7 @@ class OemToolGateway:
         *,
         timeout_sec: float = 1.5,
         write_enabled: bool = False,
-        serper_fallback: bool = True,
+        serper_fallback: bool = False,
     ):
         self.profile = CapabilityProfile.from_list(enabled, write_enabled=write_enabled)
         self.enabled = set(self.profile.enabled)
