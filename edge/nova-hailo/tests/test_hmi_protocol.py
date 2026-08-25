@@ -15,6 +15,19 @@ from nova_hmi.protocol import (
 )
 
 
+def test_level_from_rms_silence_low_speech_high():
+    import pytest
+
+    pytest.importorskip("PySide6")
+    pytest.importorskip("numpy")
+    from nova_hmi.audio import level_from_rms
+
+    assert level_from_rms(0.0005) < 0.15
+    assert level_from_rms(0.05) > 0.4
+    assert level_from_rms(0.05) < 0.9
+    assert level_from_rms(0.4) > 0.85
+
+
 def test_fsm_maps_to_qml_phases():
     assert map_fsm_to_phase("LISTENING") == "listening"
     assert map_fsm_to_phase("THINKING") == "thinking"

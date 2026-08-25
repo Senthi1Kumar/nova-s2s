@@ -27,6 +27,49 @@ except Exception:  # pragma: no cover
     sd = None
 
 
+NOISE_FLOOR = 0.004
+HOT_RMS = 0.03
+
+
+def level_from_rms(rms: float) -> float:
+    """Map raw (pre-AGC) RMS to 0..1. Silence stays near 0; speech moves."""
+    db = 20 * math.log10(max(float(rms), 1e-6))
+    return max(0.0, min(1.0, (db + 50.0) / 40.0))
+
+
+def _pick_sd_device(kind: str) -> int | None:
+    """Prefer WM8960 plug PCMs over Pulse 'default' (often 128-ch and hot)."""
+    if sd is None:
+        return None
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return None
+    best: tuple[int, int] | None = None
+    for i, d in enumerate(devices):
+        name = str(d.get("name") or "").lower()
+        n_in = int(d.get("max_input_channels") or 0)
+        n_out = int(d.get("max_output_channels") or 0)
+        if kind == "input" and n_in <= 0:
+            continue
+        if kind == "output" and n_out <= 0:
+            continue
+        score = 0
+        if "wm8960" in name:
+            score += 80
+        if kind == "input" and name.strip() in {"capture", "array"}:
+            score += 40
+        if kind == "output" and name.strip() in {"playback", "dmixed"}:
+            score += 40
+        if "hdmi" in name or "vc4" in name:
+            score -= 80
+        if best is None or score > best[0]:
+            best = (score, i)
+    if best is None or best[0] <= 0:
+        return None
+    return best[1]
+
+
 def _resample_int16(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
     if not pcm or src_rate == dst_rate or np is None:
         return pcm
@@ -67,27 +110,33 @@ class AudioDuplex(QObject):
         self._uplink: queue.Queue[bytes] = queue.Queue(maxsize=64)
         self._batch = bytearray()
         self._batch_target = int(CAPTURE_RATE * 0.06) * 2  # ~60 ms PCM16
-        self._agc = 6.0
+        self._agc = 1.0
         self._rms_log_n = 0
         self._hold_until = 0.0
-        self._echo_tail_s = 1.25
+        self._echo_tail_s = 0.55
         self._last_play_activity = 0.0
 
         if capture and sd is not None and np is not None:
             try:
-                dev = sd.query_devices(kind="input")
+                dev_idx = _pick_sd_device("input")
+                dev = sd.query_devices(dev_idx if dev_idx is not None else None, kind="input")
                 ch = int(dev.get("max_input_channels") or 1)
+                use_ch = 1 if "wm8960" in str(dev.get("name") or "").lower() else max(1, min(ch, 2))
                 print(
-                    f"[hmi] mic device: {dev.get('name')!r} "
-                    f"in_ch={ch} default_sr={dev.get('default_samplerate')}",
+                    f"[hmi] mic device: {dev.get('name')!r} idx={dev_idx} "
+                    f"in_ch={ch} use_ch={use_ch} default_sr={dev.get('default_samplerate')}",
                     flush=True,
                 )
+                in_kw = {}
+                if dev_idx is not None:
+                    in_kw["device"] = dev_idx
                 self._in = sd.InputStream(
                     samplerate=DEVICE_RATE,
                     blocksize=DEVICE_BLOCK,
-                    channels=max(1, min(ch, 2)),
+                    channels=use_ch,
                     dtype="float32",
                     callback=self._on_in,
+                    **in_kw,
                 )
                 self._in.start()
                 self._synthetic = False
@@ -100,12 +149,17 @@ class AudioDuplex(QObject):
 
         if playback and sd is not None and np is not None:
             try:
+                out_idx = _pick_sd_device("output")
+                out_kw = {}
+                if out_idx is not None:
+                    out_kw["device"] = out_idx
                 self._out = sd.OutputStream(
                     samplerate=self._play_rate,
                     blocksize=1024,
                     channels=1,
                     dtype="int16",
                     callback=self._on_out,
+                    **out_kw,
                 )
                 self._out.start()
                 print("[hmi] speaker: playback open", flush=True)
@@ -189,15 +243,37 @@ class AudioDuplex(QObject):
             a = mono48
         rms = float(np.sqrt(np.mean(a**2)) + 1e-12)
         blocked = self.uplink_blocked()
-        # Slow AGC: laptop mics sit ~0.005 RMS; Pi gate wants ≥ 0.016.
-        # Freeze AGC while the speaker is up so TTS does not train the gain.
+        # AGC is only for quiet laptop mics. WM8960 + ALC already sits near
+        # 1.0 RMS — boosting that clips, lights the orb constantly, and keeps
+        # server VAD open (seconds of extra endpoint latency).
         if not blocked:
-            target = 0.05
-            if rms > 1e-4:
-                desired = target / rms
-                self._agc = 0.90 * self._agc + 0.10 * float(min(20.0, max(1.0, desired)))
-        a = np.clip(a * self._agc, -1.0, 1.0)
-        out_rms = float(np.sqrt(np.mean(a**2)) + 1e-12)
+            if rms >= HOT_RMS:
+                self._agc = 1.0
+            elif rms > NOISE_FLOOR:
+                desired = 0.04 / rms
+                self._agc = 0.92 * self._agc + 0.08 * float(min(8.0, max(1.0, desired)))
+            else:
+                self._agc = 0.95 * self._agc + 0.05 * 1.0
+        # Orb follows the room, not the boosted uplink.
+        self._level = level_from_rms(rms)
+        nfft = 1 << int(math.ceil(math.log2(max(len(a), 2))))
+        padded = np.zeros(nfft, dtype=np.float32)
+        win = a * np.hanning(len(a))
+        padded[: len(a)] = win
+        mag = np.abs(np.fft.rfft(padded))
+        freqs = np.fft.rfftfreq(nfft, 1.0 / CAPTURE_RATE)
+        edges = np.logspace(math.log10(80), math.log10(6000), BANDS + 1)
+        peak = float(np.max(mag) + 1e-9)
+        out = []
+        for i in range(BANDS):
+            lo = int(np.searchsorted(freqs, edges[i]))
+            hi = max(int(np.searchsorted(freqs, edges[i + 1])), lo + 1)
+            seg = mag[lo:hi]
+            e = float(seg.mean()) if seg.size else 0.0
+            out.append(max(0.0, min(1.0, e / peak)))
+        self._bands = out
+        boosted = np.clip(a * self._agc, -1.0, 1.0)
+        out_rms = float(np.sqrt(np.mean(boosted**2)) + 1e-12)
         self._rms_log_n += 1
         if self._rms_log_n % 25 == 1:
             print(
@@ -205,26 +281,13 @@ class AudioDuplex(QObject):
                 f"rms_out={out_rms:.4f} blocked={blocked}",
                 flush=True,
             )
-        db = 20 * math.log10(max(out_rms, 1e-6))
-        self._level = max(0.0, min(1.0, (db + 55.0) / 55.0))
-        nfft = 1 << int(math.ceil(math.log2(max(len(a), 2))))
-        padded = np.zeros(nfft, dtype=np.float32)
-        padded[: len(a)] = a * np.hanning(len(a))
-        mag = np.abs(np.fft.rfft(padded))
-        freqs = np.fft.rfftfreq(nfft, 1.0 / CAPTURE_RATE)
-        edges = np.logspace(math.log10(80), math.log10(6000), BANDS + 1)
-        out = []
-        for i in range(BANDS):
-            lo = int(np.searchsorted(freqs, edges[i]))
-            hi = max(int(np.searchsorted(freqs, edges[i + 1])), lo + 1)
-            seg = mag[lo:hi]
-            e = float(seg.mean()) if seg.size else 0.0
-            out.append(max(0.0, min(1.0, math.log10(1 + e * 60) / 1.6)))
-        self._bands = out
         if blocked or self._muted:
             self._batch.clear()
             return
-        i16 = np.clip(a * 32767.0, -32768, 32767).astype(np.int16).tobytes()
+        # Do not send AGC-inflated hiss — Silero would stay in speech.
+        if rms < NOISE_FLOOR:
+            return
+        i16 = np.clip(boosted * 32767.0, -32768, 32767).astype(np.int16).tobytes()
         self._batch.extend(i16)
         while len(self._batch) >= self._batch_target:
             chunk = bytes(self._batch[: self._batch_target])
