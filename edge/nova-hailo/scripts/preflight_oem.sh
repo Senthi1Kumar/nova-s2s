@@ -45,20 +45,7 @@ has_nonempty() {
 if has_nonempty EXA_API_KEY; then
   pass "EXA_API_KEY set (${#EXA_API_KEY} chars)"
 else
-  warn_ "EXA_API_KEY unset (web_search will skip Exa and use Brave/Serper snippets)"
-fi
-if has_nonempty BRAVE_API_KEY; then
-  pass "BRAVE_API_KEY set (${#BRAVE_API_KEY} chars)"
-else
-  warn_ "BRAVE_API_KEY unset (web_search fallback unavailable)"
-fi
-if has_nonempty SERPER_API_KEY; then
-  pass "SERPER_API_KEY set (${#SERPER_API_KEY} chars)"
-else
-  warn_ "SERPER_API_KEY unset (Brave→Serper fallback unavailable)"
-fi
-if ! has_nonempty BRAVE_API_KEY && ! has_nonempty SERPER_API_KEY; then
-  warn_ "no search keys — web_search will fail closed"
+  warn_ "EXA_API_KEY unset (web_search will fail closed — Exa only, no Brave/Serper)"
 fi
 if has_nonempty TAVILY_API_KEY; then
   pass "TAVILY_API_KEY set (${#TAVILY_API_KEY} chars)"
@@ -97,11 +84,10 @@ if curl -fsS --max-time 3 https://www.google.com/generate_204 >/dev/null 2>&1; t
 else
   fail_ "network unreachable"
 fi
-if curl -fsS --max-time 3 https://api.search.brave.com >/dev/null 2>&1 \
-  || curl -fsS --max-time 3 https://google.serper.dev >/dev/null 2>&1; then
-  pass "search API host reachable"
+if curl -fsS --max-time 3 https://api.exa.ai >/dev/null 2>&1; then
+  pass "Exa API host reachable"
 else
-  warn_ "search API hosts not reachable"
+  warn_ "api.exa.ai not reachable"
 fi
 
 python3 - <<'PY' "$RUN_DIR" "$ROOT" || true

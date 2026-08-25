@@ -1,8 +1,8 @@
 # Nova HMI (Qt 6 / QML)
 
 Official driver UI. Same `/v1/realtime` backend as the web UI
-(mic PCM in, TTS PCM out). **Python / PySide6** — do not CMake-build this
-for the demo.
+(mic PCM in, TTS PCM out). **Python / PySide6 + QML** — do not CMake-build
+this for the demo. Empty transcript is live listening, not a wake-word mock.
 
 One voice session at a time: close the browser tab on `:8766` first.
 

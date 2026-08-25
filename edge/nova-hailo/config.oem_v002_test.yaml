@@ -1,7 +1,7 @@
 # Nova-Hailo primary demo profile (tools + search + Workspace read-only).
 # Default for: ./scripts/run_demo_oem.sh  (NOVA_HAILO_PROFILE=oem)
 #
-# Search: Exa (primary, HTTP) → Brave → Serper. Deep research: Tavily.
+# Search: Exa only (HTTP). Deep research: Tavily.
 # Workspace tools need Google OAuth tokens under runtime/google_oauth/.
 # STT: EN Nemo streaming GGUF (CPU). LLM: Hailo HEF. TTS: Inflect ONNX.
 

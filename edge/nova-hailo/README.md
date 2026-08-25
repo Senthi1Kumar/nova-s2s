@@ -30,19 +30,21 @@ flowchart LR
 | Share branch | `share/nova-hailo-poc-v002` |
 | Repo | https://github.com/Senthi1Kumar/nova-s2s.git |
 | App dir after clone | `nova-s2s/edge/nova-hailo` |
-| HailoRT | **5.3.0** (HEF + C++ GenAI API match `hailortcli fw-control identify`) |
+| HailoRT | **5.3.0** (AI HAT+ 2). HEF + C++ GenAI API follow `hailortcli fw-control identify` |
 | Default profile | **tools enabled** (`config.oem_v002_test.yaml`) |
+| Search | **Exa only** (`EXA_API_KEY`). No Brave/Serper fallback |
+| HMI | PySide6 + QML (`hmi_qt/run.sh`). Live WS — not a mock / not C++ Qt |
 
 This device is **self-contained**. No Tailscale / tunnel to another Pi.
 Connect *this* Pi to the car (or HDMI + HAT audio) and run locally.
 
 ## Clone and run (on the Pi)
 
-Needs the same hardware class: Pi 5 + Hailo-10H AI HAT+ 2, HailoRT **5.3.0**
-(or whatever `hailortcli fw-control identify` prints),
+Needs the same hardware class: Pi 5 + Hailo-10H AI HAT+ 2 with HailoRT **5.3.0**
+firmware (`hailortcli fw-control identify` → `Firmware Version: 5.3.0`),
 and the HailoRT **system** Python package (`hailo_platform` from `h10-hailort`
-/ hailo-apps — not pip). We use **`uv venv`**, not `python -m venv`, but it
-must be:
+/ hailo-apps — not pip). Older 5.1.1 HEFs will not load on 5.3.0 firmware.
+We use **`uv venv`**, not `python -m venv`, but it must be:
 
 `uv venv --python /usr/bin/python3 --system-site-packages .venv`
 
@@ -88,8 +90,8 @@ Stack and model paths: [`docs/STACK.md`](docs/STACK.md). HMI: [`hmi_qt/README.md
 | VAD | Silero ONNX | CPU |
 | ASR | EN Nemo streaming GGUF (sidecar; endpointing off) | CPU |
 | Host | Deterministic router + controller (fail-closed). Compact codec `t0`–`t6` is host-side only — Octopus Phase A, not a trained LoRA/HEF. | CPU |
-| LLM | Qwen2-1.5B HEF (`llm_backend: cpp` after on-device build) | Hailo-10H |
-| Search | Exa (`type=fast`, summary/highlights) → Brave → Serper | network |
+| LLM | Qwen2-1.5B HEF (`llm_backend: cpp`; `.so` built by `fetch_models.sh`) | Hailo-10H |
+| Search | Exa only (`type=fast`, summary/highlights). Fail-closed if `EXA_API_KEY` missing | network |
 | Research | Tavily async job | network |
 | TTS | Inflect-Nano-v2 ONNX | CPU |
 
@@ -113,12 +115,18 @@ Chat LLM is **not** the tool picker (`tools.enable_in_prompt: false`).
 
 ## Dependencies
 
-Runtime deps are in [`pyproject.toml`](pyproject.toml). Live search uses **`httpx`** against Exa/Brave/Serper REST APIs (`EXA_API_KEY` primary). The optional `exa-py` package is **only** for `scripts/bench_websearch_providers.py` (`uv sync --extra bench-search`), not the live pipeline.
+Runtime deps are in [`pyproject.toml`](pyproject.toml). Live search is **Exa
+REST** via `httpx` (`EXA_API_KEY`). Brave/Serper are not used. The optional
+`exa-py` package is **only** for `scripts/bench_websearch_providers.py`
+(`uv sync --extra bench-search`), not the live pipeline.
 
 `hailo_platform` / GenAI come from system packages, not PyPI. The native LLM
-wrapper needs HailoRT CMake + pybind11 (`scripts/build_hailo_llm_cpp.sh`).
+wrapper is compiled on the Pi by `fetch_models.sh` (HailoRT CMake + pybind11).
 
-HMI: PySide6 is in the same `pyproject.toml` as the backend. `source scripts/setup_env.sh` installs everything; `hmi_qt/run.sh` uses that venv. No C++ Qt build.
+HMI: PySide6 + QML is in the same `pyproject.toml` as the backend.
+`source scripts/setup_env.sh` installs everything; `hmi_qt/run.sh` uses that
+venv. No C++ Qt / PyQt build. Empty transcript is **listening**, not a
+wake-word mock.
 
 ## Models (`models/`)
 
@@ -147,11 +155,12 @@ wrapper only: `./scripts/build_hailo_llm_cpp.sh`.
 | VAD | `models/silero_vad.onnx` | GitHub snakers4/silero-vad (not HF) |
 | TTS | `models/Inflect-Nano-v2-ONNX/` | HF owensong/Inflect-Nano-v2-ONNX |
 | TTS rollback | `models/piper/en_US-amy-low.onnx` | HF rhasspy/piper-voices |
-| LLM | `models/Qwen2-1.5B-Instruct.hef` | Hailo Model Zoo GenAI (`dev-public.hailo.ai/v{firmware}/blob/…`). `fetch_models.sh` runs `hailortcli fw-control identify` and downloads the matching 5.1.1 / 5.2.0 / 5.3.0 HEF. |
+| LLM HEF | `models/Qwen2-1.5B-Instruct.hef` | Hailo Model Zoo (`dev-public.hailo.ai/v5.3.0/blob/…` on 5.3 firmware) |
+| LLM .so | `nova_hailo/backends/hailo_llm_cpp*.so` | **built by `fetch_models.sh`** (gitignored; HailoRT ABI) |
 
 ## Audio / display
 
-- **HMI on this Pi** (`hmi_qt/run.sh`): HDMI + this Pi’s mic/speakers (WM8960 or USB).
+- **HMI on this Pi** (`hmi_qt/run.sh`): HDMI + this Pi’s mic/speakers (WM8960 or USB). Speak — no wake word.
 - **Browser on this Pi**: `http://localhost:8766/` (secure context for mic).
 - `voice.barge_in_while_speaking: false` (WM8960 self-echo). Stop / Esc still works.
 - One voice session at a time: close the other client first.
@@ -178,6 +187,30 @@ Settings → **Connect with Google** (callback port **8765**). Tokens: `runtime/
 ./scripts/run_web.sh            # web without oem launcher wrappers
 ./scripts/verify_oem_gates.sh   # offline gate harness
 ```
+
+## HailoRT 5.3.0
+
+Firmware, HEF, and the C++ GenAI wrapper must be the same line. A 5.1.1 HEF
+on 5.3.0 firmware will fail to load.
+
+```bash
+hailortcli fw-control identify
+# Firmware Version: 5.3.0 (release,app)
+# Device Architecture: HAILO10H
+```
+
+`fetch_models.sh` maps that version to the Model Zoo blob (`v5.3.0` / `v5.2.0`
+/ `v5.1.1`) and compiles `hailo_llm_cpp` against the installed HailoRT:
+
+| HailoRT | C++ `LLM::generate` | Notes |
+| --- | --- | --- |
+| 5.1.1 | `(params, prompts)` | original PoC |
+| 5.2+ | `(params, prompts, tools={})` | native tools exist; we pass `{}` |
+| 5.3.0 | same as 5.2 + 10 min read timeout | **this drop** |
+
+Host still owns tool routing (`tools.enable_in_prompt: false`). Do not switch
+the demo to Hailo function-calling HEFs unless you opt in
+(`HAILO_FETCH_FC_HEF=1`, alias `qwen2-fc`).
 
 ## Architecture notes
 

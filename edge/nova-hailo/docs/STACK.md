@@ -26,13 +26,13 @@ Override any profile with `NOVA_HAILO_CONFIG=/path/to.yaml`.
 
 | Stage | Implementation | Where it runs |
 | --- | --- | --- |
-| Capture / playback | Qt HMI (`hmi_qt/run.sh`) or browser WS PCM | This Pi (or laptop client) |
+| Capture / playback | PySide6 HMI (`hmi_qt/run.sh`) or browser WS PCM | This Pi (or laptop client) |
 | VAD | Silero ONNX | CPU |
 | Utterance gate | rms / peak / speech fraction | CPU |
 | ASR | NeMo Speech EN streaming GGUF + optional sidecar | CPU |
 | Host | Router + controller; compact codec `t0`–`t6` (Phase A) | CPU |
-| LLM | Qwen2-1.5B HEF (`llm_backend: cpp` after on-device `.so` build) | Hailo-10H |
-| Web search | Exa (summary/highlights) → Brave → Serper | Network |
+| LLM | Qwen2-1.5B HEF (`llm_backend: cpp`; `.so` from `fetch_models.sh`) | Hailo-10H |
+| Web search | Exa only (summary/highlights). Fail-closed without `EXA_API_KEY` | Network |
 | Deep research | Tavily async job | Network |
 | TTS | Inflect-Nano-v2 ONNX | CPU |
 
@@ -47,7 +47,8 @@ Barge-in while speaking is **off** (UI stop button still interrupts).
 | ASR VAD mask (optional) | `models/nemo_speech/silero-v6.2.0.gguf` | optional |
 | ASR rollback | `models/parakeet/tdt_ctc-110m-f16.gguf` | optional |
 | ASR NPU fallback | Whisper HEF (`whisper_hef: base`) | hailo-apps |
-| LLM | `models/Qwen2-1.5B-Instruct.hef` (`qwen2`) | `./scripts/fetch_models.sh` (Hailo GenAI zoo matching `hailortcli fw-control identify`) |
+| LLM HEF | `models/Qwen2-1.5B-Instruct.hef` (`qwen2`) | `fetch_models.sh` (zoo tag from `hailortcli fw-control identify`; 5.3.0 → `v5.3.0`) |
+| LLM .so | `nova_hailo/backends/hailo_llm_cpp*.so` | `fetch_models.sh` / `build_hailo_llm_cpp.sh` on the Pi |
 | TTS | `models/Inflect-Nano-v2-ONNX/` (also `cloned/Inflect-Nano-v2-ONNX`) | `fetch_models.sh` |
 | TTS rollback | `models/piper/en_US-amy-low.onnx` | `fetch_models.sh` |
 | VAD | `models/silero_vad.onnx` | `fetch_models.sh` |
@@ -72,14 +73,13 @@ Under `model:`:
 Under `tools:`:
 
 - `profile`, `enabled`, `summarize_search` (**false** in this drop), `timeout_sec`
-- Native LLM: `scripts/build_hailo_llm_cpp.sh` → `nova_hailo/backends/hailo_llm_cpp*.so` (gitignored)
+- Native LLM: `fetch_models.sh` compiles `nova_hailo/backends/hailo_llm_cpp*.so` (gitignored) against this board’s HailoRT 5.3.0 GenAI API
 
 ## Secrets (`.env`)
 
 | Variable | Used for |
 | --- | --- |
-| `EXA_API_KEY` | Primary web search |
-| `BRAVE_API_KEY` / `SERPER_API_KEY` | Search fallbacks |
+| `EXA_API_KEY` | Web search (required for `web_search`; no Brave/Serper fallback) |
 | `TAVILY_API_KEY` | Deep research |
 | `GOOGLE_OAUTH_*` | Calendar / Gmail / Drive (after one-time connect) |
 

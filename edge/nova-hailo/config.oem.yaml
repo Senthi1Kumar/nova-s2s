@@ -3,7 +3,7 @@
 #
 # Primary tools demo: config.oem_v002_test.yaml (default ./scripts/run_demo_oem.sh).
 # Panic rollback: config.oem_rollback.yaml (NOVA_HAILO_PROFILE=oem_rollback).
-# HailoRT 5.1.1 on target device.
+# HailoRT 5.3.0 on target device (HEF from fetch_models.sh via hailortcli identify).
 #
 model:
   llm_hef: qwen2
