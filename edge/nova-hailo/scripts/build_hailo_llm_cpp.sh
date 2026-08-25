@@ -3,6 +3,9 @@
 # needs HailoRT's CMake package and pybind11; not part of the normal
 # `pip install -e .` flow, matching how hailo_platform itself is a
 # system-site-package, not a pip dependency.
+#
+# The .so is compiled against *this* HailoRT (5.1.1 vs 5.2+ tools overload vs
+# 5.3 10-minute read timeout). Rebuild after a firmware upgrade.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -18,6 +21,14 @@ python3 -c "import pybind11" 2>/dev/null || {
   UV_BIN="$(command -v uv || echo "$HOME/.local/bin/uv")"
   "$UV_BIN" pip install pybind11
 }
+
+if command -v hailortcli >/dev/null; then
+  echo "=== hailortcli fw-control identify ==="
+  hailortcli fw-control identify || true
+fi
+if command -v pkg-config >/dev/null && pkg-config --exists hailort; then
+  echo "libhailort pkg-config: $(pkg-config --modversion hailort)"
+fi
 
 BUILD_DIR="$ROOT/csrc/build"
 cmake -S "$ROOT/csrc" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \

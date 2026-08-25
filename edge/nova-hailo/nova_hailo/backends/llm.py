@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable
 from contextlib import redirect_stdout
 from io import StringIO
+from typing import Any
 
 from hailo_platform import VDevice
 from hailo_platform.genai import LLM
@@ -147,7 +148,11 @@ class HailoLLM:
         abort_callback: Callable[[], bool] | None = None,
         should_stop: Callable[[], bool] | None = None,
         quiet: bool = True,
+        tools: list[str | dict[str, Any]] | None = None,
     ) -> tuple[str, InferenceMetrics]:
+        # tools= is HailoRT 5.2+ native function-calling. Host router stays
+        # the default (empty / None); ignored on the Python GenAI binding.
+        del tools
         prompt_est = _estimate_prompt_tokens(messages)
         metrics = InferenceMetrics()
         metrics.no_think = self.no_think
@@ -252,14 +257,25 @@ class HailoLLMCpp:
             sys.path.insert(0, backends_dir)
         import hailo_llm_cpp  # noqa: PLC0415 -- optional native extension, Pi-only
 
-        logger.info("Loading LLM (native C++ backend): %s", hef_path)
-        print(f"Loading LLM (native C++ backend): {hef_path}")
+        compiled = getattr(hailo_llm_cpp, "compiled_hailort_version", "unknown")
+        has_tools = getattr(hailo_llm_cpp, "has_native_tools", False)
+        logger.info(
+            "Loading LLM (native C++ backend): %s (compiled HailoRT %s, native_tools=%s)",
+            hef_path,
+            compiled,
+            has_tools,
+        )
+        print(
+            f"Loading LLM (native C++ backend): {hef_path} "
+            f"[HailoRT {compiled}, tools={'yes' if has_tools else 'no'}]"
+        )
         # group_id must match pipeline.py's Python-side VDevice group_id --
         # otherwise this VDevice competes for an exclusive physical device
         # slot instead of joining the existing shared one (only one Hailo-10H).
         self._llm = hailo_llm_cpp.HailoLLMCpp(
             hef_path, temperature, seed, max_tokens, SHARED_VDEVICE_GROUP_ID
         )
+        self._mod = hailo_llm_cpp
         self.hef_path = hef_path
         self.temperature = temperature
         self.seed = seed
@@ -275,6 +291,7 @@ class HailoLLMCpp:
         abort_callback: Callable[[], bool] | None = None,
         should_stop: Callable[[], bool] | None = None,
         quiet: bool = True,
+        tools: list[str | dict[str, Any]] | None = None,
     ) -> tuple[str, InferenceMetrics]:
         prompt_est = _estimate_prompt_tokens(messages)
         metrics = InferenceMetrics()
@@ -287,6 +304,14 @@ class HailoLLMCpp:
         stop_flag = {"stop": False}
 
         prompt_json = [json.dumps(m) for m in messages]
+        tools_json: list[str] = []
+        for t in tools or []:
+            tools_json.append(t if isinstance(t, str) else json.dumps(t))
+        if tools_json and not getattr(self._mod, "has_native_tools", False):
+            raise RuntimeError(
+                "native LLM tools require HailoRT >= 5.2 "
+                f"(compiled {getattr(self._mod, 'compiled_hailort_version', '?')})"
+            )
 
         def _token_cb(token: str):
             nonlocal idx
@@ -322,6 +347,11 @@ class HailoLLMCpp:
             return False
 
         def _run():
+            # Pre-5.2 hailo_llm_cpp.so has no tools_json_strings kwarg.
+            if getattr(self._mod, "has_native_tools", False):
+                return self._llm.generate(
+                    prompt_json, cap, _token_cb, _should_stop, tools_json
+                )
             return self._llm.generate(prompt_json, cap, _token_cb, _should_stop)
 
         if quiet:

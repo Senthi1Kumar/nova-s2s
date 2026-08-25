@@ -142,15 +142,27 @@ else
 fi
 
 if command -v hailortcli >/dev/null 2>&1; then
+  ident="$(hailortcli fw-control identify 2>/dev/null || true)"
+  fw="$(printf '%s\n' "$ident" | grep -oE 'Firmware Version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
   ver="$(hailortcli --version 2>/dev/null | head -1 || true)"
   note "hailortcli: ${ver:-unknown}"
-  if echo "$ver" | grep -q "5.1.1"; then
-    pass "HailoRT 5.1.1"
+  if [[ -n "$fw" ]]; then
+    pass "Hailo firmware $fw"
   else
-    warn_ "expected HailoRT 5.1.1 — got: ${ver:-unknown}"
+    warn_ "hailortcli present but fw-control identify had no Firmware Version"
+  fi
+  stamp="$ROOT/models/Qwen2-1.5B-Instruct.hef.hailort-zoo"
+  if [[ -s "$stamp" && -n "$fw" ]]; then
+    zoo="$(cat "$stamp")"
+    note "LLM HEF zoo tag: $zoo (firmware $fw)"
   fi
 else
   warn_ "hailortcli not on PATH (run on Pi)"
+fi
+if find "$ROOT/nova_hailo/backends" -maxdepth 1 -name 'hailo_llm_cpp*.so' 2>/dev/null | grep -q .; then
+  pass "hailo_llm_cpp native backend (.so on this Pi)"
+else
+  warn_ "hailo_llm_cpp*.so missing — ./scripts/fetch_models.sh builds it on the Pi"
 fi
 
 summary="$RUN_DIR/preflight_summary.txt"

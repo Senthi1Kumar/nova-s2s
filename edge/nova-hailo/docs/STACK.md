@@ -47,7 +47,7 @@ Barge-in while speaking is **off** (UI stop button still interrupts).
 | ASR VAD mask (optional) | `models/nemo_speech/silero-v6.2.0.gguf` | optional |
 | ASR rollback | `models/parakeet/tdt_ctc-110m-f16.gguf` | optional |
 | ASR NPU fallback | Whisper HEF (`whisper_hef: base`) | hailo-apps |
-| LLM | `models/Qwen2-1.5B-Instruct.hef` (`qwen2`) | `./scripts/fetch_models.sh` (Hailo GenAI zoo 5.1.1) |
+| LLM | `models/Qwen2-1.5B-Instruct.hef` (`qwen2`) | `./scripts/fetch_models.sh` (Hailo GenAI zoo matching `hailortcli fw-control identify`) |
 | TTS | `models/Inflect-Nano-v2-ONNX/` (also `cloned/Inflect-Nano-v2-ONNX`) | `fetch_models.sh` |
 | TTS rollback | `models/piper/en_US-amy-low.onnx` | `fetch_models.sh` |
 | VAD | `models/silero_vad.onnx` | `fetch_models.sh` |

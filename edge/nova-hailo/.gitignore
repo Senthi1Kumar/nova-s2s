@@ -4,6 +4,8 @@ __pycache__/
 logs/
 *.jsonl
 models/*.hef
+models/*.hef.hailort-zoo
+models/.hailo_llm_fetch.env
 !models/piper/
 hailort.log
 *.wav

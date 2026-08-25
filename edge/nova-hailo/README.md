@@ -30,7 +30,7 @@ flowchart LR
 | Share branch | `share/nova-hailo-poc-v002` |
 | Repo | https://github.com/Senthi1Kumar/nova-s2s.git |
 | App dir after clone | `nova-s2s/edge/nova-hailo` |
-| HailoRT | **5.1.1** (pin; do not upgrade lightly) |
+| HailoRT | **5.3.0** (HEF + C++ GenAI API match `hailortcli fw-control identify`) |
 | Default profile | **tools enabled** (`config.oem_v002_test.yaml`) |
 
 This device is **self-contained**. No Tailscale / tunnel to another Pi.
@@ -38,7 +38,8 @@ Connect *this* Pi to the car (or HDMI + HAT audio) and run locally.
 
 ## Clone and run (on the Pi)
 
-Needs the same hardware class: Pi 5 + Hailo-10H AI HAT+ 2, HailoRT **5.1.1**,
+Needs the same hardware class: Pi 5 + Hailo-10H AI HAT+ 2, HailoRT **5.3.0**
+(or whatever `hailortcli fw-control identify` prints),
 and the HailoRT **system** Python package (`hailo_platform` from `h10-hailort`
 / hailo-apps — not pip). We use **`uv venv`**, not `python -m venv`, but it
 must be:
@@ -59,10 +60,8 @@ cp -n .env.example .env          # fill API keys — never commit .env
 #   rm -rf .venv
 source scripts/setup_env.sh      # uv venv; first install is slow, leave it running
 /usr/bin/python3 -c "import hailo_platform; print(hailo_platform.__file__)"
-# if that fails: dpkg -l | grep -i hailo   (install HailoRT 5.1.1 python binding)
-./scripts/fetch_models.sh        # STT/VAD/TTS weights + build NeMo-Speech .so
-
-./scripts/build_hailo_llm_cpp.sh # hailo_llm_cpp*.so on THIS Pi
+# if that fails: dpkg -l | grep -i hailo   (install HailoRT python binding)
+./scripts/fetch_models.sh        # STT/VAD/TTS + firmware-matched LLM HEF + hailo_llm_cpp.so
 ./scripts/preflight_oem.sh
 ./scripts/run_demo_oem.sh        # backend :8766 — all AI on this HAT
 ```
@@ -134,8 +133,12 @@ source scripts/setup_env.sh
 That clones [NVIDIA/NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp)
 into `cloned/NeMo-Speech.cpp`, configures the `cpu-server` preset (CMake ≥ 3.26,
 Ninja, g++), and installs `libnemo_speech_asr_c.so` into `models/nemo_speech/`.
-Needs `git`, `ninja`, `g++` (script will `apt` them if missing). Rebuild:
-`FORCE_NEMO_BUILD=1 ./scripts/fetch_models.sh`.
+On a Pi with HailoRT it also runs `hailortcli fw-control identify`, downloads
+`Qwen2-1.5B-Instruct.hef` from the matching Model Zoo tag (v5.3.0 / v5.2.0 /
+v5.1.1), and compiles `nova_hailo/backends/hailo_llm_cpp*.so` against that
+HailoRT. Needs `git`, `ninja`, `g++` (script will `apt` them if missing).
+Rebuild NeMo: `FORCE_NEMO_BUILD=1 ./scripts/fetch_models.sh`. Rebuild LLM
+wrapper only: `./scripts/build_hailo_llm_cpp.sh`.
 
 | Role | Path | How |
 | --- | --- | --- |
@@ -144,7 +147,7 @@ Needs `git`, `ninja`, `g++` (script will `apt` them if missing). Rebuild:
 | VAD | `models/silero_vad.onnx` | GitHub snakers4/silero-vad (not HF) |
 | TTS | `models/Inflect-Nano-v2-ONNX/` | HF owensong/Inflect-Nano-v2-ONNX |
 | TTS rollback | `models/piper/en_US-amy-low.onnx` | HF rhasspy/piper-voices |
-| LLM | `models/Qwen2-1.5B-Instruct.hef` | Hailo Model Zoo GenAI (`dev-public.hailo.ai/v5.1.1`, same HEF we run) |
+| LLM | `models/Qwen2-1.5B-Instruct.hef` | Hailo Model Zoo GenAI (`dev-public.hailo.ai/v{firmware}/blob/…`). `fetch_models.sh` runs `hailortcli fw-control identify` and downloads the matching 5.1.1 / 5.2.0 / 5.3.0 HEF. |
 
 ## Audio / display
 

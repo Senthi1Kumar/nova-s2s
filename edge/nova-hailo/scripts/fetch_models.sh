@@ -4,7 +4,8 @@
 #   source scripts/setup_env.sh
 #   ./scripts/fetch_models.sh
 #
-# Downloads public STT/VAD/TTS weights + the Qwen2-1.5B Hailo HEF we run,
+# Downloads public STT/VAD/TTS weights + the Qwen2-1.5B Hailo HEF that
+# matches this board's HailoRT firmware (hailortcli fw-control identify),
 # clones/builds NVIDIA NeMo-Speech.cpp (cpu-server), and installs
 # libnemo_speech_asr_c.so next to the GGUF. No USB / manual .so copy.
 set -euo pipefail
@@ -78,35 +79,134 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 1b. Hailo LLM HEF — Qwen2-1.5B-Instruct (alias qwen2, HailoRT 5.1.1)
-#     Official public blob from Hailo Model Zoo GenAI (same file we run today).
+# 1b. Hailo LLM HEF — Qwen2-1.5B-Instruct (alias qwen2)
+#     Zoo path is firmware-specific: a 5.1.1 HEF will not load on 5.3.0 FW.
+#     Detect via `hailortcli fw-control identify` (override: HAILO_LLM_ZOO_VERSION
+#     or HAILO_LLM_HEF_URL). Sidecar models/*.hef.hailort-zoo records the tag.
 # ---------------------------------------------------------------------------
-HEF_NAME="Qwen2-1.5B-Instruct.hef"
-HEF_DST="$ROOT/models/$HEF_NAME"
-HEF_URL="${HAILO_LLM_HEF_URL:-https://dev-public.hailo.ai/v5.1.1/blob/${HEF_NAME}}"
-if [[ -s "$HEF_DST" ]]; then
-  log "LLM already at $HEF_DST"
-else
-  for cand in \
-    /usr/local/hailo/resources/models/hailo10h/"$HEF_NAME" \
-    "${HOME}/Downloads/${HEF_NAME}"
-  do
-    if [[ -s "$cand" ]]; then
-      log "LLM reuse $cand → $HEF_DST"
-      ln -sfn "$cand" "$HEF_DST"
-      break
-    fi
-  done
-fi
-if [[ ! -s "$HEF_DST" ]]; then
-  log "LLM  $HEF_URL → models/${HEF_NAME}  (~1 GB, HailoRT 5.1.1)"
-  mkdir -p "$(dirname "$HEF_DST")"
-  if command -v curl >/dev/null; then
-    curl -fL --retry 3 --retry-delay 2 -o "$HEF_DST" "$HEF_URL"
-  else
-    wget -q -O "$HEF_DST" "$HEF_URL"
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+IDENTIFY_TXT=""
+if command -v hailortcli >/dev/null; then
+  IDENTIFY_TXT="$(hailortcli fw-control identify 2>&1 || true)"
+  if [[ -n "$IDENTIFY_TXT" ]]; then
+    log "hailortcli fw-control identify:"
+    printf '%s\n' "$IDENTIFY_TXT" | sed 's/^/[fetch_models]   /'
   fi
-  [[ -s "$HEF_DST" ]] || { log "ERROR: HEF download empty"; exit 1; }
+else
+  log "hailortcli not on PATH — HEF zoo tag from env or default 5.3.0"
+fi
+
+FETCH_META="$ROOT/models/.hailo_llm_fetch.env"
+mkdir -p "$ROOT/models"
+HAILO_IDENTIFY_TXT="$IDENTIFY_TXT" "$PY" > "$FETCH_META" <<'PY'
+import os
+import sys
+from nova_hailo.hailort_fw import (
+    DEFAULT_FC_HEF,
+    DEFAULT_FIRMWARE,
+    DEFAULT_LLM_HEF,
+    HEF_NAME_RE,
+    detect_firmware,
+    llm_hef_url,
+    zoo_tag_for_firmware,
+)
+
+identify = os.environ.get("HAILO_IDENTIFY_TXT", "")
+fw = detect_firmware(identify or None)
+zoo = zoo_tag_for_firmware(fw)
+hef = os.environ.get("HAILO_LLM_HEF_NAME") or DEFAULT_LLM_HEF
+if not HEF_NAME_RE.match(hef):
+    print(f"ERROR: invalid HAILO_LLM_HEF_NAME={hef!r}", file=sys.stderr)
+    sys.exit(1)
+url = os.environ.get("HAILO_LLM_HEF_URL") or llm_hef_url(zoo, hef)
+if "\n" in url or " " in url.strip():
+    print("ERROR: HAILO_LLM_HEF_URL must be a single URL token", file=sys.stderr)
+    sys.exit(1)
+fc_url = llm_hef_url(zoo, DEFAULT_FC_HEF)
+# KEY=value only; fetch_models.sh reads known keys, never eval.
+print(f"HAILO_FW={fw}")
+print(f"HAILO_ZOO_TAG={zoo}")
+print(f"HEF_NAME={hef}")
+print(f"HEF_URL={url}")
+print(f"FC_HEF_NAME={DEFAULT_FC_HEF}")
+print(f"FC_HEF_URL={fc_url}")
+if not identify and fw == DEFAULT_FIRMWARE and not (
+    os.environ.get("HAILO_LLM_ZOO_VERSION") or os.environ.get("HAILO_RT_VERSION")
+):
+    print(
+        f"WARN default firmware {DEFAULT_FIRMWARE} "
+        "(no hailortcli identify; set HAILO_LLM_ZOO_VERSION to pin)",
+        file=sys.stderr,
+    )
+PY
+HAILO_FW="" HAILO_ZOO_TAG="" HEF_NAME="" HEF_URL="" FC_HEF_NAME="" FC_HEF_URL=""
+while IFS= read -r line || [[ -n "$line" ]]; do
+  case "$line" in
+    HAILO_FW=*) HAILO_FW="${line#HAILO_FW=}" ;;
+    HAILO_ZOO_TAG=*) HAILO_ZOO_TAG="${line#HAILO_ZOO_TAG=}" ;;
+    HEF_NAME=*) HEF_NAME="${line#HEF_NAME=}" ;;
+    HEF_URL=*) HEF_URL="${line#HEF_URL=}" ;;
+    FC_HEF_NAME=*) FC_HEF_NAME="${line#FC_HEF_NAME=}" ;;
+    FC_HEF_URL=*) FC_HEF_URL="${line#FC_HEF_URL=}" ;;
+  esac
+done < "$FETCH_META"
+[[ -n "$HEF_NAME" && -n "$HEF_URL" && -n "$HAILO_ZOO_TAG" ]] || {
+  log "ERROR: failed to resolve Hailo LLM zoo URL (see $FETCH_META)"
+  exit 1
+}
+HEF_DST="$ROOT/models/$HEF_NAME"
+HEF_STAMP="${HEF_DST}.hailort-zoo"
+log "firmware ${HAILO_FW} → zoo ${HAILO_ZOO_TAG}"
+
+download_hef() {
+  local url="$1" dest="$2" label="$3"
+  mkdir -p "$(dirname "$dest")"
+  local tmp="${dest}.partial"
+  if command -v curl >/dev/null; then
+    curl -fL --retry 3 --retry-delay 2 -o "$tmp" "$url"
+  else
+    wget -q -O "$tmp" "$url"
+  fi
+  [[ -s "$tmp" ]] || { log "ERROR: $label download empty ($url)"; rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dest"
+}
+
+need_hef=1
+if [[ "${FORCE_LLM_HEF:-0}" == 1 ]]; then
+  log "FORCE_LLM_HEF=1 — re-download ${HEF_NAME} for ${HAILO_ZOO_TAG}"
+  need_hef=1
+elif [[ -s "$HEF_DST" && -s "$HEF_STAMP" ]] && [[ "$(cat "$HEF_STAMP")" == "$HAILO_ZOO_TAG" ]]; then
+  log "LLM already at $HEF_DST (${HAILO_ZOO_TAG})"
+  need_hef=0
+elif [[ -s "$HEF_DST" && "${HAILO_KEEP_EXISTING_HEF:-0}" == 1 ]]; then
+  log "LLM keeping existing $HEF_DST (HAILO_KEEP_EXISTING_HEF=1; wanted ${HAILO_ZOO_TAG})"
+  printf '%s\n' "$HAILO_ZOO_TAG" > "$HEF_STAMP"
+  need_hef=0
+elif [[ -s "$HEF_DST" ]]; then
+  old="$(cat "$HEF_STAMP" 2>/dev/null || echo unstamped)"
+  log "LLM HEF zoo mismatch (have ${old}, want ${HAILO_ZOO_TAG}) — re-download"
+fi
+
+if [[ "$need_hef" -eq 1 ]]; then
+  # Do not silently reuse /usr/local Hailo-apps HEFs — those are often 5.1.1.
+  log "LLM  $HEF_URL → models/${HEF_NAME}  (~1.5 GB, firmware ${HAILO_FW}, zoo ${HAILO_ZOO_TAG})"
+  download_hef "$HEF_URL" "$HEF_DST" "LLM HEF"
+  printf '%s\n' "$HAILO_ZOO_TAG" > "$HEF_STAMP"
+fi
+
+if [[ "${HAILO_FETCH_FC_HEF:-0}" == 1 ]]; then
+  FC_DST="$ROOT/models/$FC_HEF_NAME"
+  FC_STAMP="${FC_DST}.hailort-zoo"
+  if [[ -s "$FC_DST" && -s "$FC_STAMP" && "$(cat "$FC_STAMP")" == "$HAILO_ZOO_TAG" && "${FORCE_LLM_HEF:-0}" != 1 ]]; then
+    log "FC LLM already at $FC_DST (${HAILO_ZOO_TAG})"
+  else
+    log "FC LLM  $FC_HEF_URL → models/${FC_HEF_NAME}  (optional, HailoRT >= 5.2 tools HEF)"
+    if download_hef "$FC_HEF_URL" "$FC_DST" "FC LLM HEF"; then
+      printf '%s\n' "$HAILO_ZOO_TAG" > "$FC_STAMP"
+    else
+      log "FC HEF skipped (not on ${HAILO_ZOO_TAG} zoo — Instruct HEF is the demo default)"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -205,6 +305,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 2b. Native Hailo LLM C++ backend — must be compiled on THIS Pi against the
+#     installed HailoRT (5.1.1 vs 5.3 generate API). Not shipped in git.
+# ---------------------------------------------------------------------------
+if [[ "${SKIP_LLM_CPP:-0}" == 1 ]]; then
+  log "skip hailo_llm_cpp (SKIP_LLM_CPP=1)"
+elif command -v hailortcli >/dev/null 2>&1; then
+  log "building hailo_llm_cpp for firmware ${HAILO_FW:-?} (HailoRT on this board)"
+  bash "$ROOT/scripts/build_hailo_llm_cpp.sh"
+  if ! find "$ROOT/nova_hailo/backends" -maxdepth 1 -name 'hailo_llm_cpp*.so' | grep -q .; then
+    log "ERROR: hailo_llm_cpp*.so missing after build"
+    exit 1
+  fi
+else
+  log "skip hailo_llm_cpp (no hailortcli — this is not the Hailo Pi)"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. Layout check
 # ---------------------------------------------------------------------------
 ok=1
@@ -225,7 +342,7 @@ do
 done
 
 if [[ "$ok" -eq 1 ]]; then
-  log "STT + VAD + TTS + LLM HEF ready under models/"
+  log "STT + VAD + TTS + LLM HEF ready under models/ (LLM zoo ${HAILO_ZOO_TAG:-?} fw ${HAILO_FW:-?})"
 else
   log "some artifacts missing — see lines above"
   exit 1
