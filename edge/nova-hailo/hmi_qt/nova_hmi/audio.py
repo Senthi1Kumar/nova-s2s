@@ -9,6 +9,14 @@ from collections import deque
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from nova_hmi.audio_gain import (
+    HOT_RMS,
+    NOISE_FLOOR,
+    level_from_rms,
+    pick_input_index,
+    should_send_uplink,
+)
+
 BANDS = 24
 CAPTURE_RATE = 16000
 # Capture at 48 kHz (PipeWire/Pulse default) and downsample — requesting 16 kHz
@@ -27,47 +35,16 @@ except Exception:  # pragma: no cover
     sd = None
 
 
-NOISE_FLOOR = 0.004
-HOT_RMS = 0.03
-
-
-def level_from_rms(rms: float) -> float:
-    """Map raw (pre-AGC) RMS to 0..1. Silence stays near 0; speech moves."""
-    db = 20 * math.log10(max(float(rms), 1e-6))
-    return max(0.0, min(1.0, (db + 50.0) / 40.0))
-
-
-def _pick_sd_device(kind: str) -> int | None:
-    """Prefer WM8960 plug PCMs over Pulse 'default' (often 128-ch and hot)."""
+def _input_device_index() -> int | None:
     if sd is None:
         return None
     try:
-        devices = sd.query_devices()
+        default = sd.query_devices(kind="input")
+        ch = int(default.get("max_input_channels") or 1)
+        devices = list(sd.query_devices())
     except Exception:
         return None
-    best: tuple[int, int] | None = None
-    for i, d in enumerate(devices):
-        name = str(d.get("name") or "").lower()
-        n_in = int(d.get("max_input_channels") or 0)
-        n_out = int(d.get("max_output_channels") or 0)
-        if kind == "input" and n_in <= 0:
-            continue
-        if kind == "output" and n_out <= 0:
-            continue
-        score = 0
-        if "wm8960" in name:
-            score += 80
-        if kind == "input" and name.strip() in {"capture", "array"}:
-            score += 40
-        if kind == "output" and name.strip() in {"playback", "dmixed"}:
-            score += 40
-        if "hdmi" in name or "vc4" in name:
-            score -= 80
-        if best is None or score > best[0]:
-            best = (score, i)
-    if best is None or best[0] <= 0:
-        return None
-    return best[1]
+    return pick_input_index(devices, ch)
 
 
 def _resample_int16(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
@@ -118,7 +95,7 @@ class AudioDuplex(QObject):
 
         if capture and sd is not None and np is not None:
             try:
-                dev_idx = _pick_sd_device("input")
+                dev_idx = _input_device_index()
                 dev = sd.query_devices(dev_idx if dev_idx is not None else None, kind="input")
                 ch = int(dev.get("max_input_channels") or 1)
                 use_ch = 1 if "wm8960" in str(dev.get("name") or "").lower() else max(1, min(ch, 2))
@@ -149,20 +126,18 @@ class AudioDuplex(QObject):
 
         if playback and sd is not None and np is not None:
             try:
-                out_idx = _pick_sd_device("output")
-                out_kw = {}
-                if out_idx is not None:
-                    out_kw["device"] = out_idx
+                # Keep Pulse/PipeWire default. Pinning ALSA wm8960 at 16 kHz
+                # opens a silent stream (card wants 48 kHz); TTS then queues,
+                # mic stays blocked, and the user only hears/gets mid-words.
                 self._out = sd.OutputStream(
                     samplerate=self._play_rate,
                     blocksize=1024,
                     channels=1,
                     dtype="int16",
                     callback=self._on_out,
-                    **out_kw,
                 )
                 self._out.start()
-                print("[hmi] speaker: playback open", flush=True)
+                print("[hmi] speaker: default playback open (16 kHz)", flush=True)
             except Exception as exc:
                 self._out = None
                 print(f"[hmi] speaker FAILED ({exc})", flush=True)
@@ -193,7 +168,7 @@ class AudioDuplex(QObject):
     def uplink_blocked(self) -> bool:
         if self._muted:
             return True
-        if self.play_queue_depth() > 0:
+        if self._out is not None and self.play_queue_depth() > 0:
             return True
         return time.monotonic() < self._hold_until
 
@@ -206,6 +181,9 @@ class AudioDuplex(QObject):
 
     def enqueue_playback(self, pcm16: bytes, sample_rate: int = 24000) -> None:
         if not pcm16:
+            return
+        if self._out is None:
+            print("[hmi] no speaker — drop TTS (mic stays open)", flush=True)
             return
         src_rate = int(sample_rate or 24000)
         chunk = _resample_int16(pcm16, src_rate, self._play_rate)
@@ -281,11 +259,8 @@ class AudioDuplex(QObject):
                 f"rms_out={out_rms:.4f} blocked={blocked}",
                 flush=True,
             )
-        if blocked or self._muted:
+        if not should_send_uplink(rms=rms, blocked=blocked, muted=self._muted):
             self._batch.clear()
-            return
-        # Do not send AGC-inflated hiss — Silero would stay in speech.
-        if rms < NOISE_FLOOR:
             return
         i16 = np.clip(boosted * 32767.0, -32768, 32767).astype(np.int16).tobytes()
         self._batch.extend(i16)

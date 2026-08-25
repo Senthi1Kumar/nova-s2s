@@ -16,16 +16,40 @@ from nova_hmi.protocol import (
 
 
 def test_level_from_rms_silence_low_speech_high():
-    import pytest
-
-    pytest.importorskip("PySide6")
-    pytest.importorskip("numpy")
-    from nova_hmi.audio import level_from_rms
+    from nova_hmi.audio_gain import level_from_rms
 
     assert level_from_rms(0.0005) < 0.15
     assert level_from_rms(0.05) > 0.4
     assert level_from_rms(0.05) < 0.9
     assert level_from_rms(0.4) > 0.85
+
+
+def test_pick_input_only_when_default_is_wide():
+    """128-ch Pulse default is the AGC bug; a normal 1–2ch default must stay
+    so TTS/playback keep using Pulse resampling (16 kHz ALSA is silent)."""
+    from nova_hmi.audio_gain import pick_input_index
+
+    devices = [
+        {"name": "pulse", "max_input_channels": 128, "max_output_channels": 128},
+        {
+            "name": "wm8960-soundcard: - (hw:2,0)",
+            "max_input_channels": 2,
+            "max_output_channels": 2,
+        },
+        {"name": "vc4-hdmi", "max_input_channels": 0, "max_output_channels": 8},
+    ]
+    assert pick_input_index(devices, default_channels=2) is None
+    assert pick_input_index(devices, default_channels=128) == 1
+
+
+def test_quiet_attack_is_still_sent():
+    """WM8960 ALC starts quiet; dropping those frames chops the first words."""
+    from nova_hmi.audio_gain import should_send_uplink
+
+    assert should_send_uplink(rms=0.001, blocked=False, muted=False) is True
+    assert should_send_uplink(rms=0.05, blocked=False, muted=False) is True
+    assert should_send_uplink(rms=0.05, blocked=True, muted=False) is False
+    assert should_send_uplink(rms=0.05, blocked=False, muted=True) is False
 
 
 def test_fsm_maps_to_qml_phases():
