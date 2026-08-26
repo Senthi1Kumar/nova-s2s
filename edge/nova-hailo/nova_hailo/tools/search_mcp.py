@@ -25,10 +25,12 @@ from nova_hailo.tools.research_jobs import (
     ResearchJobStore,
 )
 from nova_hailo.tools.search_clean import (
+    DEFAULT_SPEAK_CHARS,
     SearchResultCleaner,
     is_numeric_fact_query,
     literal_number,
     pick_stock_price,
+    trim_to_complete_sentences,
 )
 
 TAVILY_URL = "https://api.tavily.com/search"
@@ -471,9 +473,9 @@ def _research_worker(store: ResearchJobStore, job: ResearchJob, timeout_sec: flo
     cleaner = SearchResultCleaner()
     evidence = cleaner.evidence_block(sources) if sources else ""
     if answer:
-        speak = re.sub(r"\s+", " ", answer).strip()
-        if len(speak) > 280:
-            speak = speak[:277].rstrip() + "…"
+        speak = trim_to_complete_sentences(
+            re.sub(r"\s+", " ", answer).strip(), DEFAULT_SPEAK_CHARS
+        )
     elif evidence:
         speak = cleaner.speak_fallback(sources)
     else:

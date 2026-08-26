@@ -261,6 +261,36 @@ def test_exa_body_prefers_summary_then_highlight():
     assert "$185.40" in _exa_body(stock, "stock price of Amazon today")
 
 
+def test_trim_to_complete_sentences_does_not_mid_cut():
+    from nova_hailo.tools.search_clean import trim_to_complete_sentences
+
+    long = (
+        "Iran and the US signaled progress on a Hormuz deal after talks in Oman. "
+        "Oil prices eased as shipping companies prepared to resume traffic. "
+        "Officials said a draft text could be ready this week."
+    )
+    out = trim_to_complete_sentences(long, 120)
+    assert out.endswith((".", "!", "?"))
+    assert "Hormuz" in out
+    assert not out.endswith("after talks in.")
+    assert "this week" not in out or out.endswith("week.")
+
+
+def test_speak_fallback_keeps_full_exa_summary():
+    from nova_hailo.tools.search_clean import SearchResultCleaner
+
+    summary = (
+        "OpenAI released a new business plan as enterprise adoption grew this quarter. "
+        "Analysts said Anthropic still leads on some safety benchmarks among large buyers."
+    )
+    spoken = SearchResultCleaner().speak_fallback(
+        [{"title": "AI roundup", "snippet": summary}]
+    )
+    assert "OpenAI released a new business plan" in spoken
+    assert spoken.endswith(".")
+    assert "…" not in spoken
+
+
 def test_speak_fallback_skips_news_boilerplate():
     from nova_hailo.tools.search_clean import SearchResultCleaner
 

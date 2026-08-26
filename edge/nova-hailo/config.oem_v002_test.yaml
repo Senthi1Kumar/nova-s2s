@@ -7,6 +7,8 @@
 
 model:
   llm_hef: qwen2
+  # Hailo 5.3 FC HEF (fetch_models downloads it): llm_hef: qwen2-fc
+  # Host router still picks tools; FC is optional 1st-pass experiment, not ToolBroker.
   llm_backend: cpp
   stt_engine: nemo_speech
   nemo_speech_model: models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf
@@ -99,8 +101,8 @@ tools:
   write_enabled: false
   timeout_sec: 8
   research_poll_timeout_sec: 45
-  # Off: Qwen restates "User asked: …" in spoken search answers.
-  # Flip true to re-enable grounded rephrase (same chat HEF unless summarizer_hef differs).
+  # Off: spoken news = Exa summary/highlights (complete sentences, max_speak_chars).
+  # Flip true to re-enable Qwen rephrase (often echoed the query; not the demo default).
   summarize_search: false
   summarizer_max_tokens: 512
   max_speak_chars: 700

@@ -213,6 +213,13 @@ if [[ "$need_hef" -eq 1 ]]; then
   printf '%s\n' "$HAILO_ZOO_TAG" > "$HEF_STAMP"
 fi
 
+# Function-calling HEF: 5.2+ zoo. Default on for 5.3 so qwen2-fc is on disk;
+# chat still uses Instruct unless model.llm_hef: qwen2-fc.
+if [[ "${HAILO_FETCH_FC_HEF:-}" == "0" ]]; then
+  log "skip FC HEF (HAILO_FETCH_FC_HEF=0)"
+elif [[ "${HAILO_FETCH_FC_HEF:-1}" == 1 ]] && [[ "${HAILO_ZOO_TAG:-}" == v5.2.* || "${HAILO_ZOO_TAG:-}" == v5.3.* || "${HAILO_ZOO_TAG:-}" == v5.4.* ]]; then
+  HAILO_FETCH_FC_HEF=1
+fi
 if [[ "${HAILO_FETCH_FC_HEF:-0}" == 1 ]]; then
   FC_DST="$ROOT/models/$FC_HEF_NAME"
   FC_STAMP="${FC_DST}.hailort-zoo"

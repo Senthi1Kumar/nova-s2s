@@ -66,6 +66,8 @@ _BOILERPLATE_RE = re.compile(
 DEFAULT_MAX_CHARS = 700
 DEFAULT_MAX_RESULTS = 4
 MIN_SNIPPET_CHARS = 40
+# Spoken news: enough for 2–3 full sentences. Old 160/320 caps mid-cut Exa summaries.
+DEFAULT_SPEAK_CHARS = 700
 
 
 def _clean_text(raw: str) -> str:
@@ -78,6 +80,26 @@ def _clean_text(raw: str) -> str:
     t = re.sub(r"\s+(from|at|on|via|by|and|with)(\s+(and|from|at|on|the))*\s*(?=[.,;]|$)", "", t, flags=re.I)
     t = re.sub(r"\s*[,;]\s*(?=[.,;]|$)", "", t)
     return _WS_RE.sub(" ", t).strip(" -|–—,")
+
+
+def trim_to_complete_sentences(text: str, max_chars: int = DEFAULT_SPEAK_CHARS) -> str:
+    """Keep whole sentences up to max_chars. Never rsplit mid-clause."""
+    t = _WS_RE.sub(" ", str(text or "")).strip()
+    if not t:
+        return ""
+    if t[-1:] not in ".?!":
+        t = t.rstrip(" ,;:-") + "."
+    if len(t) <= max_chars:
+        return t
+    window = t[:max_chars]
+    best = -1
+    for i, ch in enumerate(window):
+        if ch in ".?!" and (i + 1 >= len(window) or window[i + 1] in " \"'"):
+            if i >= 20:
+                best = i
+    if best >= 20:
+        return window[: best + 1].strip()
+    return window.rsplit(" ", 1)[0].rstrip(" ,;:-") + "."
 
 
 def _clean_title(raw: str) -> str:
@@ -146,7 +168,7 @@ class SearchResultCleaner:
             return "I couldn't find anything useful on that."
         parts: list[str] = []
         used = 0
-        budget = 320
+        budget = min(self.max_chars, DEFAULT_SPEAK_CHARS)
         for snip in snips:
             text = _LEAD_CHROME_RE.sub("", snip.text).strip(" -|–—,")
             if _BOILERPLATE_RE.search(text) or _BOILERPLATE_RE.search(snip.title):
@@ -160,22 +182,20 @@ class SearchResultCleaner:
                 continue
             if _CHROME_ONLY_RE.search(text) and len(text) < 80:
                 continue
-            chunk = text
+            chunk = trim_to_complete_sentences(text, max(60, budget - used))
             if used + len(chunk) > budget:
-                remaining = budget - used
-                if remaining < 60:
+                if used >= 80:
                     break
-                chunk = chunk[:remaining].rsplit(" ", 1)[0].rstrip(" ,;:-") + "."
+                chunk = trim_to_complete_sentences(text, budget)
+            if not chunk:
+                continue
             parts.append(chunk)
             used += len(chunk) + 1
-            if used >= 160 or len(parts) >= 2:
+            if used >= budget or len(parts) >= 3:
                 break
         if not parts:
-            first = snips[0].text
-            if len(first) > 220:
-                first = first[:219].rsplit(" ", 1)[0].rstrip(" ,;:-") + "."
-            return first
-        return " ".join(parts)
+            return trim_to_complete_sentences(snips[0].text, budget)
+        return trim_to_complete_sentences(" ".join(parts), budget)
 
 
 # Numeric asks must never reach the LLM. Measured 2026-07-30: given evidence
