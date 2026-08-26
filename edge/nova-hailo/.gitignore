@@ -22,6 +22,13 @@ runtime/google_oauth/
 csrc/build/
 nova_hailo/backends/hailo_llm_cpp*.so
 
+# fetch_models.sh clones (NeMo-Speech.cpp, parakeet.cpp) + built C ABI libs
+cloned/
+models/nemo_speech/*.so
+models/nemo_speech/*.so.*
+models/parakeet/*.so
+models/parakeet/*.so.*
+
 # Qt HMI: official client is Python/PySide; skip CMake trees and theme dumps
 hmi_qt/.venv/
 hmi_qt/build/

@@ -6,8 +6,8 @@
 #
 # Downloads public STT/VAD/TTS weights + the Qwen2-1.5B Hailo HEF that
 # matches this board's HailoRT firmware (hailortcli fw-control identify),
-# clones/builds NVIDIA NeMo-Speech.cpp (cpu-server), and installs
-# libnemo_speech_asr_c.so next to the GGUF. No USB / manual .so copy.
+# clones/builds NVIDIA NeMo-Speech.cpp (cpu-server) and mudler/parakeet.cpp
+# (libparakeet.so), and installs the .so files next to their GGUFs.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -16,6 +16,9 @@ NEMO_REPO="${NEMO_SPEECH_REPO:-https://github.com/NVIDIA/NeMo-Speech.cpp.git}"
 NEMO_REF="${NEMO_SPEECH_REF:-2e12e2d}"   # initial OSS release (matches our ctypes ABI)
 NEMO_SRC="${NEMO_SPEECH_SRC:-$ROOT/cloned/NeMo-Speech.cpp}"
 NEMO_PRESET="${NEMO_SPEECH_PRESET:-cpu-server}"
+PARAKEET_REPO="${PARAKEET_REPO:-https://github.com/mudler/parakeet.cpp.git}"
+PARAKEET_REF="${PARAKEET_REF:-1bfbebf}"  # C API ABI >= 5 (parakeet_stt.py)
+PARAKEET_SRC="${PARAKEET_SRC:-$ROOT/cloned/parakeet.cpp}"
 PY="${ROOT}/.venv/bin/python3"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
@@ -32,6 +35,7 @@ from huggingface_hub import hf_hub_download, snapshot_download
 
 root = Path(".").resolve()
 (root / "models" / "nemo_speech").mkdir(parents=True, exist_ok=True)
+(root / "models" / "parakeet").mkdir(parents=True, exist_ok=True)
 (root / "models" / "piper").mkdir(parents=True, exist_ok=True)
 
 print("STT  nvidia/nemotron-speech-streaming-en-0.6b")
@@ -39,6 +43,13 @@ hf_hub_download(
     "nvidia/nemotron-speech-streaming-en-0.6b",
     "nemotron-speech-streaming-en-0.6b.q8_0.gguf",
     local_dir=str(root / "models" / "nemo_speech"),
+)
+
+print("STT  mudler/parakeet-cpp-gguf tdt_ctc-110m-f16")
+hf_hub_download(
+    "mudler/parakeet-cpp-gguf",
+    "tdt_ctc-110m-f16.gguf",
+    local_dir=str(root / "models" / "parakeet"),
 )
 
 print("TTS  owensong/Inflect-Nano-v2-ONNX → models/Inflect-Nano-v2-ONNX/")
@@ -331,6 +342,80 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 2a. parakeet.cpp — libparakeet.so (C API ABI >= 5) + GGUF already in models/
+# ---------------------------------------------------------------------------
+PK_LIB_DST="$ROOT/models/parakeet/libparakeet.so"
+
+clone_parakeet() {
+  mkdir -p "$(dirname "$PARAKEET_SRC")"
+  if [[ ! -d "$PARAKEET_SRC/.git" ]]; then
+    log "clone $PARAKEET_REPO → $PARAKEET_SRC"
+    git clone --filter=blob:none "$PARAKEET_REPO" "$PARAKEET_SRC"
+  fi
+  if git -C "$PARAKEET_SRC" rev-parse --verify "${PARAKEET_REF}^{commit}" >/dev/null 2>&1; then
+    git -C "$PARAKEET_SRC" checkout --detach "$PARAKEET_REF"
+  else
+    git -C "$PARAKEET_SRC" fetch --depth 1 origin "$PARAKEET_REF"
+    git -C "$PARAKEET_SRC" checkout --detach FETCH_HEAD
+  fi
+  log "parakeet.cpp @ $(git -C "$PARAKEET_SRC" rev-parse --short HEAD)"
+  git -C "$PARAKEET_SRC" submodule update --init --depth 1 third_party/ggml
+}
+
+build_parakeet() {
+  log "configure + build parakeet shared lib (CPU C ABI)"
+  # $ORIGIN so libparakeet.so finds libggml*.so after copy to models/parakeet/.
+  cmake -S "$PARAKEET_SRC" -B "$PARAKEET_SRC/build-shared" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DPARAKEET_SHARED=ON \
+    -DPARAKEET_BUILD_CLI=OFF \
+    -DPARAKEET_BUILD_SERVER=OFF \
+    -DPARAKEET_BUILD_TESTS=OFF \
+    -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON \
+    -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+    -DCMAKE_INSTALL_RPATH='$ORIGIN'
+  cmake --build "$PARAKEET_SRC/build-shared" --config Release -j"$(nproc)"
+}
+
+install_parakeet_lib() {
+  local dest="$ROOT/models/parakeet"
+  mkdir -p "$dest"
+  find "$PARAKEET_SRC/build-shared" \( \
+      -name 'libparakeet.so' -o -name 'libparakeet.so.*' \
+      -o -name 'libggml.so' -o -name 'libggml.so.*' \
+      -o -name 'libggml-base.so*' -o -name 'libggml-cpu.so*' \
+      -o -name 'libggml-*.so*' \
+    \) \( -type f -o -type l \) -exec cp -aL {} "$dest/" \;
+  log "parakeet libs in $dest:"
+  ls -l "$dest"/lib*.so* 2>/dev/null | sed 's/^/[fetch_models]   /' || true
+  if [[ ! -e "$PK_LIB_DST" ]]; then
+    local ver
+    ver="$(ls -1 "$dest"/libparakeet.so.* 2>/dev/null | head -1 || true)"
+    if [[ -n "$ver" ]]; then
+      ln -sfn "$(basename "$ver")" "$PK_LIB_DST"
+    fi
+  fi
+  if [[ ! -e "$PK_LIB_DST" ]]; then
+    log "ERROR: libparakeet.so* not under $PARAKEET_SRC/build-shared"
+    find "$PARAKEET_SRC/build-shared" -name 'libparakeet*' 2>/dev/null | head -20 || true
+    return 1
+  fi
+  if command -v patchelf >/dev/null; then
+    find "$dest" -maxdepth 1 -name 'lib*.so*' -type f -exec patchelf --set-rpath '$ORIGIN' {} \;
+  fi
+  log "installed $PK_LIB_DST ($(du -h "$PK_LIB_DST" | awk '{print $1}'))"
+}
+
+if [[ -f "$PK_LIB_DST" && "${FORCE_PARAKEET_BUILD:-0}" != 1 ]]; then
+  log "lib already at $PK_LIB_DST (FORCE_PARAKEET_BUILD=1 to rebuild)"
+else
+  need_tools
+  clone_parakeet
+  build_parakeet
+  install_parakeet_lib
+fi
+
+# ---------------------------------------------------------------------------
 # 2b. Native Hailo LLM C++ backend — must be compiled on THIS Pi against the
 #     installed HailoRT (5.1.1 vs 5.3 generate API). Not shipped in git.
 # ---------------------------------------------------------------------------
@@ -354,6 +439,8 @@ ok=1
 for rel in \
   models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf \
   models/nemo_speech/libnemo_speech_asr_c.so \
+  models/parakeet/tdt_ctc-110m-f16.gguf \
+  models/parakeet/libparakeet.so \
   models/silero_vad.onnx \
   models/Inflect-Nano-v2-ONNX \
   models/piper/en_US-amy-low.onnx \

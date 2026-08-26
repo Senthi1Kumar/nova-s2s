@@ -141,6 +141,11 @@ source scripts/setup_env.sh
 That clones [NVIDIA/NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp)
 into `cloned/NeMo-Speech.cpp`, configures the `cpu-server` preset (CMake ≥ 3.26,
 Ninja, g++), and installs `libnemo_speech_asr_c.so` into `models/nemo_speech/`.
+It also clones [mudler/parakeet.cpp](https://github.com/mudler/parakeet.cpp)
+into `cloned/parakeet.cpp` (pin `1bfbebf`, C API ABI ≥ 5), builds
+`PARAKEET_SHARED=ON` (CLI/server/tests off), and installs `libparakeet.so`
+plus ggml `.so` files next to `models/parakeet/tdt_ctc-110m-f16.gguf`
+(rollback STT). Rebuild: `FORCE_PARAKEET_BUILD=1 ./scripts/fetch_models.sh`.
 On a Pi with HailoRT it also runs `hailortcli fw-control identify`, downloads
 `Qwen2-1.5B-Instruct.hef` from the matching Model Zoo tag (v5.3.0 / v5.2.0 /
 v5.1.1), and compiles `nova_hailo/backends/hailo_llm_cpp*.so` against that
@@ -152,6 +157,8 @@ wrapper only: `./scripts/build_hailo_llm_cpp.sh`.
 | --- | --- | --- |
 | STT GGUF | `models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf` | HF nvidia/nemotron-speech-streaming-en-0.6b |
 | STT lib | `models/nemo_speech/libnemo_speech_asr_c.so` | **built by `fetch_models.sh`** |
+| STT rollback GGUF | `models/parakeet/tdt_ctc-110m-f16.gguf` | HF mudler/parakeet-cpp-gguf |
+| STT rollback lib | `models/parakeet/libparakeet.so` | **built by `fetch_models.sh`** (parakeet.cpp)
 | VAD | `models/silero_vad.onnx` | GitHub snakers4/silero-vad (not HF) |
 | TTS | `models/Inflect-Nano-v2-ONNX/` | HF owensong/Inflect-Nano-v2-ONNX |
 | TTS rollback | `models/piper/en_US-amy-low.onnx` | HF rhasspy/piper-voices |
