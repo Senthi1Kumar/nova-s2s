@@ -61,6 +61,8 @@ voice:
   vad: true
   vad_aggressiveness: 1
   vad_energy_threshold: 0.2
+  ns: dtln
+  ns_strength: 0.5
   no_tts: false
   wait_tts: false
   wait_tts_drain: true

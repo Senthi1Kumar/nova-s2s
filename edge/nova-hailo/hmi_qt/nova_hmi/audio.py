@@ -10,11 +10,14 @@ from collections import deque
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from nova_hmi.audio_gain import (
+    AGC_ENABLED,
     HOT_RMS,
+    MANUAL_GAIN,
     NOISE_FLOOR,
     level_from_rms,
     pick_input_index,
     should_send_uplink,
+    uplink_multiplier,
 )
 
 BANDS = 24
@@ -48,19 +51,10 @@ def _input_device_index() -> int | None:
 
 
 def _resample_int16(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
-    if not pcm or src_rate == dst_rate or np is None:
-        return pcm
-    x = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
-    if x.size < 2:
-        return pcm
-    n_out = max(1, int(round(x.size * dst_rate / float(src_rate))))
-    t = np.linspace(0.0, 1.0, n_out, endpoint=False)
-    idx = t * (x.size - 1)
-    lo = np.floor(idx).astype(np.int32)
-    hi = np.minimum(lo + 1, x.size - 1)
-    frac = idx - lo
-    y = x[lo] * (1.0 - frac) + x[hi] * frac
-    return np.clip(y, -32768, 32767).astype(np.int16).tobytes()
+    """Integer-ratio 16k/24k → 48 kHz (same as qt_mic_app). Generic lerp otherwise."""
+    from nova_hmi.audio_gain import resample_int16
+
+    return resample_int16(pcm, src_rate, dst_rate)
 
 
 class AudioDuplex(QObject):
@@ -81,7 +75,7 @@ class AudioDuplex(QObject):
         self._synthetic = True
         self._play_q: deque[bytes] = deque()
         self._play_lock = threading.Lock()
-        self._play_rate = CAPTURE_RATE
+        self._play_rate = DEVICE_RATE
         self._started_play = False
         self._play_was_active = False
         self._uplink: queue.Queue[bytes] = queue.Queue(maxsize=64)
@@ -117,7 +111,11 @@ class AudioDuplex(QObject):
                 )
                 self._in.start()
                 self._synthetic = False
-                print("[hmi] mic: 48 kHz capture → 16 kHz uplink + AGC", flush=True)
+                print(
+                    f"[hmi] mic: 48 kHz capture → 16 kHz uplink  "
+                    f"gain={MANUAL_GAIN}× agc={'on' if AGC_ENABLED else 'off'}",
+                    flush=True,
+                )
             except Exception as exc:
                 self._in = None
                 print(f"[hmi] mic FAILED ({exc}) — no uplink", flush=True)
@@ -137,7 +135,7 @@ class AudioDuplex(QObject):
                     callback=self._on_out,
                 )
                 self._out.start()
-                print("[hmi] speaker: default playback open (16 kHz)", flush=True)
+                print(f"[hmi] speaker: playback {self._play_rate} Hz", flush=True)
             except Exception as exc:
                 self._out = None
                 print(f"[hmi] speaker FAILED ({exc})", flush=True)
@@ -221,15 +219,16 @@ class AudioDuplex(QObject):
             a = mono48
         rms = float(np.sqrt(np.mean(a**2)) + 1e-12)
         blocked = self.uplink_blocked()
-        # AGC is only for quiet laptop mics. WM8960 + ALC already sits near
-        # 1.0 RMS — boosting that clips, lights the orb constantly, and keeps
-        # server VAD open (seconds of extra endpoint latency).
-        if not blocked:
+        # Software AGC off on the WM8960 (hardware ALC). Bench locked 3–4×
+        # manual gain. Laptop mics can set NOVA_HMI_AGC=1.
+        if AGC_ENABLED and not blocked:
             if rms >= HOT_RMS:
                 self._agc = 1.0
             elif rms > NOISE_FLOOR:
                 desired = 0.04 / rms
-                self._agc = 0.92 * self._agc + 0.08 * float(min(8.0, max(1.0, desired)))
+                self._agc = 0.92 * self._agc + 0.08 * float(
+                    min(8.0, max(1.0, desired))
+                )
             else:
                 self._agc = 0.95 * self._agc + 0.05 * 1.0
         # Orb follows the room, not the boosted uplink.
@@ -250,12 +249,13 @@ class AudioDuplex(QObject):
             e = float(seg.mean()) if seg.size else 0.0
             out.append(max(0.0, min(1.0, e / peak)))
         self._bands = out
-        boosted = np.clip(a * self._agc, -1.0, 1.0)
+        gain = uplink_multiplier(rms=rms, agc=self._agc)
+        boosted = np.clip(a * gain, -1.0, 1.0)
         out_rms = float(np.sqrt(np.mean(boosted**2)) + 1e-12)
         self._rms_log_n += 1
         if self._rms_log_n % 25 == 1:
             print(
-                f"[hmi] uplink rms_in={rms:.4f} agc={self._agc:.1f} "
+                f"[hmi] uplink rms_in={rms:.4f} gain={gain:.2f} "
                 f"rms_out={out_rms:.4f} blocked={blocked}",
                 flush=True,
             )

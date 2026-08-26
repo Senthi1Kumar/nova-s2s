@@ -148,7 +148,7 @@ class FireRedVadConfig:
     # min_silence endpoints mid-sentence and yields fragments ASR mangles.
     min_silence_ms: int = 600
     min_speech_ms: int = 400
-    speech_pad_ms: int = 200
+    speech_pad_ms: int = 400
     max_utterance_s: float = 8.0
     onnx_path: str | None = None
     cmvn_path: str | None = None

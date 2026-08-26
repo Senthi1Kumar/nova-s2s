@@ -44,6 +44,7 @@ from nova_hailo.web.nemo_wait_budget import (
     DEFAULT_NEMO_WAIT_SCALE,
     nemo_wait_budget_s,
 )
+from nova_hailo.web.dtln import create_dtln
 from nova_hailo.web.vad import create_vad_segmenter
 
 
@@ -81,6 +82,8 @@ class RealtimeSession:
             # Older SessionFSM without on_change — still accept the WS.
             self.fsm = SessionFSM(session_idle_sec=idle)
         self.vad = create_vad_segmenter()
+        self.ns = create_dtln(cfg)
+        self._ns_held = False
         self._turn_lock = threading.Lock()
         self._closed = False
         self._response_id: str | None = None
@@ -307,12 +310,21 @@ class RealtimeSession:
             in_echo_window = time.monotonic() < (getattr(self, "_echo_until", 0.0) + tail)
             if (speaking or in_echo_window) and not self.barge_in_while_speaking:
                 self.vad.feed(pcm)  # keep VAD state coherent, discard events
+                if self.ns is not None and not self._ns_held:
+                    self.ns.reset()
+                    self._ns_held = True
                 if not self._echo_logged:
                     remain = max(0.0, self._echo_until - time.monotonic())
                     print(f"[echo] mic gated during playback ({remain:.1f}s left)")
                     self._echo_logged = True
                 return
             self._echo_logged = False
+            self._ns_held = False
+
+            if self.ns is not None:
+                pcm = self.ns.process_pcm16(pcm)
+                if not pcm:
+                    return
 
             # Process VAD events, but always forward PCM to the sidecar *before*
             # commit. Previous order committed on speech_stopped then tried to
@@ -342,6 +354,8 @@ class RealtimeSession:
                     audio_sec = float(np.asarray(payload).reshape(-1).size) / 16000.0
                     nemo_result = await self._finish_nemo_stream(audio_sec=audio_sec)
                     self._start_turn(payload, nemo_result=nemo_result)
+                    if self.ns is not None:
+                        self.ns.reset()
             return
 
         if mtype == "input_audio_buffer.commit":

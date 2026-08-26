@@ -78,6 +78,25 @@ else
   [[ -s "$VAD_DST" ]] || { log "ERROR: Silero VAD download empty"; exit 1; }
 fi
 
+# DTLN NS (breizhn ONNX). Same files as qt_mic_app / PiDTLN NS — not DTLN-aec.
+DTLN_DIR="$ROOT/models/dtln"
+mkdir -p "$DTLN_DIR"
+for name in model_1.onnx model_2.onnx; do
+  dst="$DTLN_DIR/$name"
+  if [[ -s "$dst" ]]; then
+    log "DTLN already at $dst"
+    continue
+  fi
+  url="https://github.com/breizhn/DTLN/raw/master/pretrained_model/${name}"
+  log "DTLN  $url"
+  if command -v curl >/dev/null; then
+    curl -fL --retry 3 --retry-delay 2 -o "$dst" "$url"
+  else
+    wget -q -O "$dst" "$url"
+  fi
+  [[ -s "$dst" ]] || { log "ERROR: DTLN $name empty"; rm -f "$dst"; exit 1; }
+done
+
 # ---------------------------------------------------------------------------
 # 1b. Hailo LLM HEF — Qwen2-1.5B-Instruct (alias qwen2)
 #     Zoo path is firmware-specific: a 5.1.1 HEF will not load on 5.3.0 FW.

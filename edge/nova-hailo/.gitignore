@@ -6,6 +6,7 @@ logs/
 models/*.hef
 models/*.hef.hailort-zoo
 models/.hailo_llm_fetch.env
+models/dtln/
 !models/piper/
 hailort.log
 *.wav

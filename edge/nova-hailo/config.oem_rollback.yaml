@@ -35,6 +35,8 @@ auth:
 
 voice:
   vad: true
+  ns: dtln
+  ns_strength: 0.5
   no_tts: false
   wait_tts: false
   wait_tts_drain: true

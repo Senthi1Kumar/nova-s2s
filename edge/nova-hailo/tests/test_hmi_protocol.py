@@ -42,6 +42,23 @@ def test_pick_input_only_when_default_is_wide():
     assert pick_input_index(devices, default_channels=128) == 1
 
 
+def test_resample_16k_to_48k_is_exact_triple():
+    from nova_hmi.audio_gain import resample_int16
+
+    pcm = (b"\x00\x10" * 100)
+    out = resample_int16(pcm, 16000, 48000)
+    assert len(out) == 100 * 3 * 2
+
+
+def test_manual_gain_locked_agc_off():
+    from nova_hmi.audio_gain import AGC_ENABLED, MANUAL_GAIN, uplink_multiplier
+
+    assert AGC_ENABLED is False
+    assert 3.0 <= MANUAL_GAIN <= 4.0
+    assert uplink_multiplier(rms=0.05, agc=8.0) == MANUAL_GAIN
+    assert uplink_multiplier(rms=0.2, agc=1.0) == MANUAL_GAIN
+
+
 def test_quiet_attack_is_still_sent():
     """WM8960 ALC starts quiet; dropping those frames chops the first words."""
     from nova_hmi.audio_gain import should_send_uplink

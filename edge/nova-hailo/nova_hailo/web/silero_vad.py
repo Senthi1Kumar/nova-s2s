@@ -38,7 +38,8 @@ class SileroVadConfig:
     # turn-taking needs a longer hangover — measured 2026-07-29.
     min_silence_ms: int = 600
     min_speech_ms: int = 400
-    speech_pad_ms: int = 200
+    # Pi talk-and-replay: 200 ms preroll ate "hey"; 400 ms pre+post keeps onsets/endings.
+    speech_pad_ms: int = 400
     max_utterance_s: float = 8.0
     onnx_path: str | None = None
 
@@ -112,6 +113,7 @@ class SileroVadSegmenter:
         self._temp_end = 0
         self._sample_i = 0
         self._active_speech = 0
+        self._last_voiced_utt = 0
         self._pad = int(self.cfg.sample_rate * self.cfg.speech_pad_ms / 1000)
         self._min_sil = int(self.cfg.sample_rate * self.cfg.min_silence_ms / 1000)
         self._min_speech = int(self.cfg.sample_rate * self.cfg.min_speech_ms / 1000)
@@ -137,6 +139,7 @@ class SileroVadSegmenter:
         self._temp_end = 0
         self._sample_i = 0
         self._active_speech = 0
+        self._last_voiced_utt = 0
 
     def _remember_pre(self, chunk: np.ndarray):
         self._pre.append(chunk.copy())
@@ -174,6 +177,7 @@ class SileroVadSegmenter:
                 self._pre.clear()
                 self._pre_samples = 0
                 self._active_speech = WINDOW
+                self._last_voiced_utt = sum(len(c) for c in self._utterance)
                 events.append(("speech_started", None))
                 continue
 
@@ -184,6 +188,7 @@ class SileroVadSegmenter:
             self._utterance.append(chunk.copy())
             if prob >= self._neg:
                 self._active_speech += WINDOW
+                self._last_voiced_utt = sum(len(c) for c in self._utterance)
 
             utt_len = sum(len(c) for c in self._utterance)
             if utt_len >= self._max_utt:
@@ -215,8 +220,13 @@ class SileroVadSegmenter:
         self._temp_end = 0
         self._utterance.clear()
         self._active_speech = 0
+        last_voiced = self._last_voiced_utt
+        self._last_voiced_utt = 0
         self._pre.clear()
         self._pre_samples = 0
         if active < self._min_speech or len(audio) < self._min_speech:
             return None
+        if last_voiced > 0:
+            keep = min(len(audio), last_voiced + self._pad)
+            audio = audio[:keep]
         return audio

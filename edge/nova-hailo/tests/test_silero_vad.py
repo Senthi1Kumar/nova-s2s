@@ -13,6 +13,15 @@ from nova_hailo.config import ROOT
 ONNX = ROOT / "models" / "silero_vad.onnx"
 
 
+def test_silero_pad_defaults_match_bench():
+    from nova_hailo.web.silero_vad import SileroVadConfig
+
+    cfg = SileroVadConfig()
+    assert cfg.speech_pad_ms == 400
+    assert cfg.min_speech_ms == 400
+    assert cfg.min_silence_ms == 600
+
+
 @pytest.mark.skipif(not ONNX.exists(), reason="silero_vad.onnx not present")
 def test_silero_detects_tone_as_speech_then_silence():
     pytest.importorskip("onnxruntime")
