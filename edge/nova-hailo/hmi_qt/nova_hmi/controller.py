@@ -577,7 +577,10 @@ class NovaController(QObject):
         if hasattr(self._audio, "enqueue_playback"):
             self._audio.enqueue_playback(pcm, rate)
         self._set_phase_from_server("speaking")
-        self._speak_watch.start(2200)
+        extra_ms = 2200
+        if hasattr(self._audio, "remaining_playback_s"):
+            extra_ms = max(2200, int(self._audio.remaining_playback_s() * 1000) + 800)
+        self._speak_watch.start(extra_ms)
 
     def _on_cancel(self) -> None:
         if hasattr(self._audio, "flush_playback"):

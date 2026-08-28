@@ -394,9 +394,16 @@ class RealtimeSession:
             now_m = time.monotonic()
             if now_m - self._uplink_log_at >= 5.0:
                 self._uplink_log_at = now_m
+                rms = 0.0
+                if pcm:
+                    x = np.frombuffer(pcm[: len(pcm) - (len(pcm) % 2)], dtype=np.int16)
+                    if x.size:
+                        rms = float(np.sqrt(np.mean(x.astype(np.float32) ** 2)) + 1e-12) / 32768.0
+                silent = " silent" if rms < 1e-4 else ""
                 print(
                     f"[uplink] frames={self._uplink_frames} bytes={len(pcm)} "
-                    f"fsm={self.fsm.state.value} speaking={self.pipeline.tts.is_speaking}",
+                    f"rms={rms:.4f}{silent} fsm={self.fsm.state.value} "
+                    f"speaking={self.pipeline.tts.is_speaking}",
                     flush=True,
                 )
             self.fsm.maybe_expire_arm()

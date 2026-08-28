@@ -31,7 +31,7 @@ Override any profile with `NOVA_HAILO_CONFIG=/path/to.yaml`.
 | Utterance gate | rms / peak / speech fraction | CPU |
 | ASR | NeMo Speech EN streaming GGUF + optional sidecar | CPU |
 | Host | Router + controller; compact codec `t0`–`t6` (Phase A) | CPU |
-| LLM | Qwen2-1.5B HEF (`llm_backend: cpp`; `.so` from `fetch_models.sh`) | Hailo-10H |
+| LLM | Qwen2-1.5B HEF (`llm_backend: cpp`; `.so` from `fetch_models.sh`). Optional OpenRouter via HMI Local/Cloud | Hailo-10H or Cloud |
 | Web search | Exa only (summary/highlights). Fail-closed without `EXA_API_KEY` | Network |
 | Deep research | Tavily async job | Network |
 | TTS | Inflect-Nano-v2 ONNX | CPU |
@@ -81,6 +81,9 @@ Under `tools:`:
 | --- | --- |
 | `EXA_API_KEY` | Web search (required for `web_search`; no Brave/Serper fallback) |
 | `TAVILY_API_KEY` | Deep research |
+| `OPENROUTER_API_KEY` | Optional Cloud LLM (HMI Local/Cloud). Local Hailo works without it |
+| `OPENROUTER_MODEL` | Optional Cloud model id (default `deepseek/deepseek-v4-flash-0731`) |
+| `NOVA_HAILO_LLM_BACKEND` | `openrouter` to boot Cloud; unset = Local Hailo |
 | `GOOGLE_OAUTH_*` | Calendar / Gmail / Drive (after one-time connect) |
 
 Missing keys: chat still runs; tools fail closed (honest unavailable).

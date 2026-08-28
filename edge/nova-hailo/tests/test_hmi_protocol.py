@@ -62,6 +62,40 @@ def test_manual_gain_locked_agc_off():
     assert uplink_multiplier(rms=0.2, agc=1.0) == MANUAL_GAIN
 
 
+def test_pcm16_rms_and_dead_capture():
+    from nova_hmi.audio_gain import (
+        capture_looks_dead,
+        pcm16_rms,
+        playback_done_debounce_s,
+    )
+
+    silent = b"\x00\x00" * 160
+    speech = b"\x00\x40" * 160
+    assert pcm16_rms(silent) < 1e-4
+    assert pcm16_rms(speech) > 0.001
+    assert capture_looks_dead(rms=0.0, blocked=False) is True
+    assert capture_looks_dead(rms=0.0, blocked=True) is False
+    assert capture_looks_dead(rms=0.02, blocked=False) is False
+    assert (
+        playback_done_debounce_s(
+            queue_empty=True, started_play=True, idle_s=0.05, hold_s=0.35
+        )
+        is False
+    )
+    assert (
+        playback_done_debounce_s(
+            queue_empty=True, started_play=True, idle_s=0.4, hold_s=0.35
+        )
+        is True
+    )
+    assert (
+        playback_done_debounce_s(
+            queue_empty=False, started_play=True, idle_s=1.0, hold_s=0.35
+        )
+        is False
+    )
+
+
 def test_quiet_attack_is_still_sent():
     """WM8960 ALC starts quiet; dropping those frames chops the first words."""
     from nova_hmi.audio_gain import should_send_uplink

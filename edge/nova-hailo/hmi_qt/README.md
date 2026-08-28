@@ -56,3 +56,7 @@ hmi_qt/
 
 Live Listen / Think / Speak is the orb + status strip (backend phase).
 There are no on-screen phase buttons.
+
+Top bar **Local / Cloud** (and ⚙ Settings) switches the chat LLM: Hailo HEF
+vs OpenRouter. Cloud needs `OPENROUTER_API_KEY` in the backend `.env`. See
+the parent [README](../README.md#local-vs-cloud-llm-openrouter).

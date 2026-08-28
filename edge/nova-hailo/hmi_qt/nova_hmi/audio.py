@@ -14,8 +14,10 @@ from nova_hmi.audio_gain import (
     HOT_RMS,
     MANUAL_GAIN,
     NOISE_FLOOR,
+    capture_looks_dead,
     level_from_rms,
     pick_input_index,
+    playback_done_debounce_s,
     should_send_uplink,
     uplink_multiplier,
 )
@@ -86,6 +88,14 @@ class AudioDuplex(QObject):
         self._hold_until = 0.0
         self._echo_tail_s = 0.55
         self._last_play_activity = 0.0
+        self._last_in_rms = 0.0
+        self._silent_s = 0.0
+        self._last_mic_restart = 0.0
+        self._xruns = 0
+        self._viz_pcm: np.ndarray | None = None if np is None else np.zeros(640, dtype=np.float32)
+        self._in_kw: dict = {}
+        self._in_ch = 1
+        self._restarting_in = False
 
         if capture and sd is not None and np is not None:
             try:
@@ -101,6 +111,8 @@ class AudioDuplex(QObject):
                 in_kw = {}
                 if dev_idx is not None:
                     in_kw["device"] = dev_idx
+                self._in_kw = in_kw
+                self._in_ch = use_ch
                 self._in = sd.InputStream(
                     samplerate=DEVICE_RATE,
                     blocksize=DEVICE_BLOCK,
@@ -166,9 +178,18 @@ class AudioDuplex(QObject):
     def uplink_blocked(self) -> bool:
         if self._muted:
             return True
+        # Sticky while TTS is in the device — gaps between streamed clauses
+        # used to reopen the mic and let the speaker feed Silero.
+        if self._started_play:
+            return True
         if self._out is not None and self.play_queue_depth() > 0:
             return True
         return time.monotonic() < self._hold_until
+
+    def remaining_playback_s(self) -> float:
+        with self._play_lock:
+            n = sum(len(x) for x in self._play_q)
+        return n / 2.0 / float(self._play_rate or DEVICE_RATE)
 
     def set_activity(self, _gain: float) -> None:
         return
@@ -190,9 +211,8 @@ class AudioDuplex(QObject):
             empty = not self._play_q
             self._play_q.append(chunk)
         self._last_play_activity = time.monotonic()
-        # Hold only for this audio + echo tail — never a sticky "playing" flag.
         self.hold_uplink(dur + self._echo_tail_s)
-        if empty and not self._started_play:
+        if empty or not self._started_play:
             self._started_play = True
             self._play_was_active = True
             self.playbackStarted.emit()
@@ -207,20 +227,24 @@ class AudioDuplex(QObject):
         self.hold_uplink(self._echo_tail_s)
 
     def _on_in(self, indata, frames, time_info, status):  # PortAudio thread
+        # Keep this cheap. FFT on this thread xruns the WM8960 under Piper/OR load,
+        # after which PortAudio keeps calling us with zeros (orb dead, VAD idle,
+        # backend still counts uplink frames).
         if np is None:
             return
+        if status:
+            self._xruns += 1
         raw = np.asarray(indata, dtype=np.float32)
         mono48 = raw.mean(axis=1) if raw.ndim == 2 and raw.shape[1] > 1 else raw.reshape(-1)
-        # Integer-ratio 48k → 16k (every 3rd sample after a 3-tap average).
         if mono48.size >= 3:
             n = mono48.size // 3
             a = mono48[: n * 3].reshape(n, 3).mean(axis=1)
         else:
             a = mono48
         rms = float(np.sqrt(np.mean(a**2)) + 1e-12)
+        self._last_in_rms = rms
+        self._viz_pcm = np.array(a, dtype=np.float32, copy=True)
         blocked = self.uplink_blocked()
-        # Software AGC off on the WM8960 (hardware ALC). Bench locked 3–4×
-        # manual gain. Laptop mics can set NOVA_HMI_AGC=1.
         if AGC_ENABLED and not blocked:
             if rms >= HOT_RMS:
                 self._agc = 1.0
@@ -231,8 +255,55 @@ class AudioDuplex(QObject):
                 )
             else:
                 self._agc = 0.95 * self._agc + 0.05 * 1.0
-        # Orb follows the room, not the boosted uplink.
         self._level = level_from_rms(rms)
+        gain = uplink_multiplier(rms=rms, agc=self._agc)
+        boosted = np.clip(a * gain, -1.0, 1.0)
+        if not should_send_uplink(rms=rms, blocked=blocked, muted=self._muted):
+            self._batch = bytearray()
+            return
+        i16 = np.clip(boosted * 32767.0, -32768, 32767).astype(np.int16).tobytes()
+        if len(self._batch) > self._batch_target * 4:
+            self._batch = bytearray()
+        self._batch.extend(i16)
+        while len(self._batch) >= self._batch_target:
+            chunk = bytes(self._batch[: self._batch_target])
+            del self._batch[: self._batch_target]
+            try:
+                self._uplink.put_nowait(chunk)
+            except queue.Full:
+                try:
+                    self._uplink.get_nowait()
+                    self._uplink.put_nowait(chunk)
+                except queue.Empty:
+                    break
+                except queue.Full:
+                    break
+
+    def _on_out(self, outdata, frames, time_info, status):  # PortAudio thread
+        if status:
+            self._xruns += 1
+        need = frames * 2
+        buf = bytearray()
+        with self._play_lock:
+            while len(buf) < need and self._play_q:
+                piece = self._play_q.popleft()
+                buf.extend(piece)
+            extra = bytes(buf[need:])
+            if extra:
+                self._play_q.appendleft(extra)
+            pulled = len(buf)
+        if len(buf) < need:
+            buf.extend(b"\x00" * (need - len(buf)))
+        outdata[:] = np.frombuffer(bytes(buf[:need]), dtype=np.int16).reshape(-1, 1)
+        if pulled >= 2:
+            self._last_play_activity = time.monotonic()
+
+    def _update_bands(self) -> None:
+        if np is None:
+            return
+        a = self._viz_pcm
+        if a is None or getattr(a, "size", 0) < 8:
+            return
         nfft = 1 << int(math.ceil(math.log2(max(len(a), 2))))
         padded = np.zeros(nfft, dtype=np.float32)
         win = a * np.hanning(len(a))
@@ -249,65 +320,85 @@ class AudioDuplex(QObject):
             e = float(seg.mean()) if seg.size else 0.0
             out.append(max(0.0, min(1.0, e / peak)))
         self._bands = out
-        gain = uplink_multiplier(rms=rms, agc=self._agc)
-        boosted = np.clip(a * gain, -1.0, 1.0)
-        out_rms = float(np.sqrt(np.mean(boosted**2)) + 1e-12)
-        self._rms_log_n += 1
-        if self._rms_log_n % 25 == 1:
-            print(
-                f"[hmi] uplink rms_in={rms:.4f} gain={gain:.2f} "
-                f"rms_out={out_rms:.4f} blocked={blocked}",
-                flush=True,
-            )
-        if not should_send_uplink(rms=rms, blocked=blocked, muted=self._muted):
-            self._batch.clear()
-            return
-        i16 = np.clip(boosted * 32767.0, -32768, 32767).astype(np.int16).tobytes()
-        self._batch.extend(i16)
-        while len(self._batch) >= self._batch_target:
-            chunk = bytes(self._batch[: self._batch_target])
-            del self._batch[: self._batch_target]
-            try:
-                self._uplink.put_nowait(chunk)
-            except queue.Full:
-                break
 
-    def _on_out(self, outdata, frames, time_info, status):  # PortAudio thread
-        need = frames * 2
-        buf = bytearray()
-        with self._play_lock:
-            while len(buf) < need and self._play_q:
-                piece = self._play_q.popleft()
-                buf.extend(piece)
-            extra = bytes(buf[need:])
-            if extra:
-                self._play_q.appendleft(extra)
-            drained = not self._play_q and len(buf) <= need
-        if len(buf) < need:
-            buf.extend(b"\x00" * (need - len(buf)))
-        outdata[:] = np.frombuffer(bytes(buf[:need]), dtype=np.int16).reshape(-1, 1)
-        if drained and self._started_play:
-            self._started_play = False
-        if len(buf) >= 2:
-            self._last_play_activity = time.monotonic()
+    def _restart_input(self) -> None:
+        if sd is None or np is None or self._restarting_in or self._in is None:
+            return
+        self._restarting_in = True
+        try:
+            if self._in is not None:
+                try:
+                    self._in.stop()
+                    self._in.close()
+                except Exception:
+                    pass
+                self._in = None
+            self._in = sd.InputStream(
+                samplerate=DEVICE_RATE,
+                blocksize=DEVICE_BLOCK,
+                channels=self._in_ch,
+                dtype="float32",
+                callback=self._on_in,
+                **self._in_kw,
+            )
+            self._in.start()
+            self._synthetic = False
+            print("[hmi] mic InputStream restarted", flush=True)
+        except Exception as exc:
+            self._in = None
+            print(f"[hmi] mic restart FAILED ({exc})", flush=True)
+        finally:
+            self._restarting_in = False
 
     def _on_tick(self) -> None:
+        self._update_bands()
         self.frame.emit(self._level, list(self._bands))
+        now = time.monotonic()
+        idle_s = (now - self._last_play_activity) if self._last_play_activity else 9e9
         # Stale queue (device never pulls) must not mute the mic forever.
-        if (
-            self.play_queue_depth() > 0
-            and self._last_play_activity
-            and time.monotonic() - self._last_play_activity > 3.0
-        ):
+        if self.play_queue_depth() > 0 and self._last_play_activity and idle_s > 3.0:
             print("[hmi] playback stalled — flush and reopen mic", flush=True)
             self.flush_playback()
-        if not self._started_play and self._play_was_active:
+        if playback_done_debounce_s(
+            queue_empty=self.play_queue_depth() == 0,
+            started_play=self._started_play,
+            idle_s=idle_s,
+            hold_s=0.35,
+        ):
+            self._started_play = False
             self._play_was_active = False
             self.hold_uplink(self._echo_tail_s)
             print(f"[hmi] playback done — mute uplink {self._echo_tail_s:.2f}s", flush=True)
             self.playbackQueueEmpty.emit()
         elif self._started_play:
             self._play_was_active = True
+        self._rms_log_n += 1
+        if self._rms_log_n % 60 == 1:
+            print(
+                f"[hmi] uplink rms_in={self._last_in_rms:.4f} "
+                f"blocked={self.uplink_blocked()} xruns={self._xruns} "
+                f"play_q={self.play_queue_depth()}",
+                flush=True,
+            )
+        # Zombie capture: callbacks still fire with digital zeros, not a quiet room.
+        zombie = self._in is not None and capture_looks_dead(
+            rms=self._last_in_rms,
+            blocked=self.uplink_blocked(),
+            threshold=1e-6,
+        )
+        if zombie:
+            if self._silent_s <= 0.0:
+                self._silent_s = now
+            elif now - self._silent_s >= 4.0 and now - self._last_mic_restart > 15.0:
+                print(
+                    f"[hmi] mic silent rms={self._last_in_rms:.6f} — restarting capture",
+                    flush=True,
+                )
+                self._silent_s = 0.0
+                self._last_mic_restart = now
+                self._restart_input()
+        else:
+            self._silent_s = 0.0
 
     def _drain_uplink(self) -> None:
         while True:

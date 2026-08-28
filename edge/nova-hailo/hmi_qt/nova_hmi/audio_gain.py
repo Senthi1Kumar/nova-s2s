@@ -75,6 +75,48 @@ def should_send_uplink(*, rms: float, blocked: bool, muted: bool) -> bool:
     return not blocked and not muted
 
 
+DEAD_CAPTURE_RMS = 1e-4
+
+
+def pcm16_rms(pcm: bytes) -> float:
+    """Peak-normalized RMS of PCM16. Empty → 0."""
+    if not pcm or len(pcm) < 2:
+        return 0.0
+    try:
+        import numpy as np
+    except ImportError:
+        n = len(pcm) // 2
+        if n <= 0:
+            return 0.0
+        acc = 0.0
+        for i in range(n):
+            s = int.from_bytes(pcm[i * 2 : i * 2 + 2], "little", signed=True)
+            acc += s * s
+        return (acc / n) ** 0.5 / 32768.0
+    x = np.frombuffer(pcm[: len(pcm) - (len(pcm) % 2)], dtype=np.int16)
+    if x.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(x.astype(np.float32) ** 2)) + 1e-12) / 32768.0
+
+
+def capture_looks_dead(*, rms: float, blocked: bool, threshold: float = DEAD_CAPTURE_RMS) -> bool:
+    """True when the InputStream is still ticking but delivering near-silence."""
+    if blocked:
+        return False
+    return float(rms) < float(threshold)
+
+
+def playback_done_debounce_s(
+    *,
+    queue_empty: bool,
+    started_play: bool,
+    idle_s: float,
+    hold_s: float = 0.35,
+) -> bool:
+    """Clear the sticky playing flag only after a gap, not between TTS clauses."""
+    return bool(started_play and queue_empty and idle_s >= hold_s)
+
+
 def pick_input_index(devices: list, default_channels: int) -> int | None:
     """Pin WM8960 only when the default input is a wide Pulse device."""
     if int(default_channels or 0) <= WIDE_DEFAULT_CH:
