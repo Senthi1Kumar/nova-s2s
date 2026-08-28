@@ -107,7 +107,7 @@ Chat LLM is **not** the tool picker (`tools.enable_in_prompt: false`).
 | --- | --- | --- |
 | `model.stt_engine` | `nemo_speech` | `parakeet`, `whisper_hef` |
 | `model.llm_hef` | `qwen2` | other HEF aliases |
-| `model.llm_backend` | `cpp` (build on Pi) | `python` |
+| `model.llm_backend` | `cpp` (build on Pi) | `python`, `openrouter` (HMI Local/Cloud) |
 | `model.tts_engine` | `inflect` | `piper`, `kokoro` |
 | `tools.profile` | `oem_readonly` | `conversation`, `off` |
 | `tools.summarize_search` | `false` | `true` re-enables Qwen rephrase |

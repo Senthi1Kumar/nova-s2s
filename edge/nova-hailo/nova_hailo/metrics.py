@@ -192,6 +192,15 @@ class TurnMetrics:
             "stt_infer_ms": _r(self.stt_infer_ms, 1),
             "auth_ms": _r(self.auth_ms, 1),
             "llm_ms": _r(self.llm_ms, 1),
+            "llm_ttft_ms": _r(
+                (self.llm or {}).get("ttft_ms") if isinstance(self.llm, dict) else None
+            ),
+            "llm_decode_ms": _r(
+                (self.llm or {}).get("decode_ms") if isinstance(self.llm, dict) else None
+            ),
+            "llm_total_ms": _r(
+                (self.llm or {}).get("llm_total_ms") if isinstance(self.llm, dict) else None
+            ),
             "tool_ms": _r(self.tool_ms, 1),
             "tts_ms": _r(self.tts_ms, 1),
             "tts_synth_ms": _r(self.tts_synth_ms, 1),
@@ -228,6 +237,12 @@ class TurnMetrics:
             ):
                 if k in self.llm and self.llm[k] is not None:
                     d[k] = self.llm[k]
+            if d.get("llm_ms") is None and self.llm.get("llm_total_ms") is not None:
+                d["llm_ms"] = _r(self.llm.get("llm_total_ms"))
+            if d.get("llm_ttft_ms") is None and self.llm.get("ttft_ms") is not None:
+                d["llm_ttft_ms"] = _r(self.llm.get("ttft_ms"))
+            if d.get("llm_decode_ms") is None and self.llm.get("decode_ms") is not None:
+                d["llm_decode_ms"] = _r(self.llm.get("decode_ms"))
         if self.llm_calls:
             d["llm_calls"] = self.llm_calls
         if self.notes:

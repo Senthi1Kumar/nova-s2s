@@ -4,3 +4,8 @@ Shell 1.0 Shell.qml
 Orb 1.0 Orb.qml
 Transcript 1.0 Transcript.qml
 StatusStrip 1.0 StatusStrip.qml
+SettingsPanel 1.0 SettingsPanel.qml
+TopBar 1.0 TopBar.qml
+LiveStrip 1.0 LiveStrip.qml
+ChatDrawer 1.0 ChatDrawer.qml
+OpsDrawer 1.0 OpsDrawer.qml

@@ -222,6 +222,13 @@ public:
         return exp ? exp.release() : 0;
     }
 
+    // Drop GenAI LLM before constructing another HEF. Hailo-10H has one KV-cache.
+    void release() {
+        std::lock_guard<std::mutex> generate_lock(generate_mu_);
+        llm_.reset();
+        vdevice_.reset();
+    }
+
 private:
     std::string group_id_;
     std::shared_ptr<hailort::VDevice> vdevice_;
@@ -257,6 +264,7 @@ PYBIND11_MODULE(hailo_llm_cpp, m) {
              py::arg("should_stop") = py::none(),
              py::arg("tools_json_strings") = std::vector<std::string>{})
         .def("clear_context", &HailoLLMCpp::clear_context)
+        .def("release", &HailoLLMCpp::release)
         .def("context_usage_size", &HailoLLMCpp::context_usage_size)
         .def("max_context_capacity", &HailoLLMCpp::max_context_capacity);
 }

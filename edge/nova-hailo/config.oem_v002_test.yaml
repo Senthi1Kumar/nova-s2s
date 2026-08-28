@@ -10,6 +10,8 @@ model:
   # Hailo 5.3 FC HEF (fetch_models downloads it): llm_hef: qwen2-fc
   # Host router still picks tools; FC is optional 1st-pass experiment, not ToolBroker.
   llm_backend: cpp
+  # Cloud alternative (HMI ⚙): llm_backend: openrouter + OPENROUTER_API_KEY
+  # Default OR model: deepseek/deepseek-v4-flash-0731 (low latency, tools).
   # stt_engine: nemo_speech
   # nemo_speech_model: models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf
   # nemo_rnnt_right_context: 1

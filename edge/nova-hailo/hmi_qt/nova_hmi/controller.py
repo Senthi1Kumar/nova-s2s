@@ -28,6 +28,32 @@ class NovaController(QObject):
     backendLabelChanged = Signal(str)
     transcriptAdded = Signal(str, str)
     cleared = Signal()
+    llmModeChanged = Signal(str)
+    localHefChanged = Signal(str)
+    orModelChanged = Signal(str)
+    llmStatusChanged = Signal(str)
+    hasOrKeyChanged = Signal(bool)
+    settingsOpenChanged = Signal(bool)
+    localModelsChanged = Signal()
+    orModelsChanged = Signal()
+    chatOpenChanged = Signal(bool)
+    opsOpenChanged = Signal(bool)
+    liveUserChanged = Signal(str)
+    liveAssistantChanged = Signal(str)
+    liveVisibleChanged = Signal(bool)
+    toolCapsuleChanged = Signal(str)
+    toolCapsuleStatusChanged = Signal(str)
+    sttMsChanged = Signal(float)
+    llmMsChanged = Signal(float)
+    llmTtftMsChanged = Signal(float)
+    llmDecodeMsChanged = Signal(float)
+    ttsMsChanged = Signal(float)
+    ttfaMsChanged = Signal(float)
+    e2eMsChanged = Signal(float)
+    sttPathChanged = Signal(str)
+    nsStrengthChanged = Signal(float)
+    gateRmsChanged = Signal(float)
+    nsOnChanged = Signal(bool)
 
     def __init__(self, audio, bridge=None, parent=None):
         super().__init__(parent)
@@ -37,6 +63,46 @@ class NovaController(QObject):
         self._link = "demo"
         self._latency = 0
         self._backend_label = "connecting…" if bridge is not None else "demo script"
+        self._llm_mode = "local"
+        self._local_hef = "qwen2"
+        self._or_model = "deepseek/deepseek-v4-flash-0731"
+        self._llm_status = ""
+        self._has_or_key = False
+        self._settings_open = False
+        self._local_models = [
+            {"id": "qwen2", "label": "Qwen2 1.5B"},
+            {"id": "qwen25", "label": "Qwen2.5 1.5B"},
+            {"id": "qwen3", "label": "Qwen3 1.7B"},
+        ]
+        self._or_models = [
+            {"id": "deepseek/deepseek-v4-flash-0731", "label": "DeepSeek V4 Flash"},
+            {"id": "deepseek/deepseek-v3.2", "label": "DeepSeek V3.2"},
+            {"id": "qwen/qwen3.8-flash", "label": "Qwen3.8 Flash"},
+            {"id": "z-ai/glm-4.7-flash", "label": "GLM 4.7 Flash"},
+            {"id": "thinkingmachines/inkling-small", "label": "Inkling Small"},
+        ]
+        self._chat_open = False
+        self._ops_open = False
+        self._live_user = ""
+        self._live_asst = ""
+        self._live_visible = False
+        self._tool_capsule = ""
+        self._tool_capsule_status = ""
+        self._stt_ms = 0.0
+        self._llm_ms = 0.0
+        self._llm_ttft_ms = 0.0
+        self._llm_decode_ms = 0.0
+        self._tts_ms = 0.0
+        self._ttfa_ms = 0.0
+        self._e2e_ms = 0.0
+        self._stt_path = ""
+        self._ns_strength = 0.5
+        self._gate_rms = 0.016
+        self._ns_on = True
+        self._ns_timer = QTimer(self)
+        self._ns_timer.setSingleShot(True)
+        self._ns_timer.setInterval(350)
+        self._ns_timer.timeout.connect(self._flush_ns_strength)
         self._asst = ""
         self._last_nova = ""
         self._audio = audio
@@ -65,6 +131,12 @@ class NovaController(QObject):
             bridge.turnDone.connect(self._on_turn_done)
             if hasattr(bridge, "failClosed"):
                 bridge.failClosed.connect(self._on_fail_closed)
+            if hasattr(bridge, "settingsChanged"):
+                bridge.settingsChanged.connect(self._on_settings)
+            if hasattr(bridge, "llmStatus"):
+                bridge.llmStatus.connect(self._on_llm_status)
+            if hasattr(bridge, "turnMetrics"):
+                bridge.turnMetrics.connect(self._on_metrics)
 
         self._speak_watch = QTimer(self)
         self._speak_watch.setSingleShot(True)
@@ -101,6 +173,234 @@ class NovaController(QObject):
     @Property(str, notify=backendLabelChanged)
     def backendLabel(self) -> str:
         return self._backend_label
+
+    @Property(str, notify=llmModeChanged)
+    def llmMode(self) -> str:
+        return self._llm_mode
+
+    @Property(str, notify=localHefChanged)
+    def localHef(self) -> str:
+        return self._local_hef
+
+    @Property(str, notify=orModelChanged)
+    def orModel(self) -> str:
+        return self._or_model
+
+    @Property(str, notify=llmStatusChanged)
+    def llmStatus(self) -> str:
+        return self._llm_status
+
+    @Property(bool, notify=hasOrKeyChanged)
+    def hasOrKey(self) -> bool:
+        return self._has_or_key
+
+    @Property(bool, notify=settingsOpenChanged)
+    def settingsOpen(self) -> bool:
+        return self._settings_open
+
+    @Property("QVariantList", notify=localModelsChanged)
+    def localModels(self) -> list:
+        return self._local_models
+
+    @Property("QVariantList", notify=orModelsChanged)
+    def orModels(self) -> list:
+        return self._or_models
+
+    @Slot()
+    def toggleSettings(self) -> None:
+        self._settings_open = not self._settings_open
+        if self._settings_open:
+            self._chat_open = False
+            self._ops_open = False
+            self.chatOpenChanged.emit(False)
+            self.opsOpenChanged.emit(False)
+        self.settingsOpenChanged.emit(self._settings_open)
+
+    @Slot()
+    def toggleChat(self) -> None:
+        self._chat_open = not self._chat_open
+        if self._chat_open:
+            self._settings_open = False
+            self._ops_open = False
+            self.settingsOpenChanged.emit(False)
+            self.opsOpenChanged.emit(False)
+        self.chatOpenChanged.emit(self._chat_open)
+
+    @Slot()
+    def toggleOps(self) -> None:
+        self._ops_open = not self._ops_open
+        if self._ops_open:
+            self._settings_open = False
+            self._chat_open = False
+            self.settingsOpenChanged.emit(False)
+            self.chatOpenChanged.emit(False)
+        self.opsOpenChanged.emit(self._ops_open)
+
+    @Property(bool, notify=chatOpenChanged)
+    def chatOpen(self) -> bool:
+        return self._chat_open
+
+    @Property(bool, notify=opsOpenChanged)
+    def opsOpen(self) -> bool:
+        return self._ops_open
+
+    @Property(str, notify=liveUserChanged)
+    def liveUser(self) -> str:
+        return self._live_user
+
+    @Property(str, notify=liveAssistantChanged)
+    def liveAssistant(self) -> str:
+        return self._live_asst
+
+    @Property(bool, notify=liveVisibleChanged)
+    def liveVisible(self) -> bool:
+        return self._live_visible
+
+    @Property(str, notify=toolCapsuleChanged)
+    def toolCapsule(self) -> str:
+        return self._tool_capsule
+
+    @Property(str, notify=toolCapsuleStatusChanged)
+    def toolCapsuleStatus(self) -> str:
+        return self._tool_capsule_status
+
+    @Property(float, notify=sttMsChanged)
+    def sttMs(self) -> float:
+        return self._stt_ms
+
+    @Property(float, notify=llmMsChanged)
+    def llmMs(self) -> float:
+        return self._llm_ms
+
+    @Property(float, notify=llmTtftMsChanged)
+    def llmTtftMs(self) -> float:
+        return self._llm_ttft_ms
+
+    @Property(float, notify=llmDecodeMsChanged)
+    def llmDecodeMs(self) -> float:
+        return self._llm_decode_ms
+
+    @Property(float, notify=ttsMsChanged)
+    def ttsMs(self) -> float:
+        return self._tts_ms
+
+    @Property(float, notify=ttfaMsChanged)
+    def ttfaMs(self) -> float:
+        return self._ttfa_ms
+
+    @Property(float, notify=e2eMsChanged)
+    def e2eMs(self) -> float:
+        return self._e2e_ms
+
+    @Property(str, notify=sttPathChanged)
+    def sttPath(self) -> str:
+        return self._stt_path
+
+    @Property(float, notify=nsStrengthChanged)
+    def nsStrength(self) -> float:
+        return self._ns_strength
+
+    @Property(float, notify=gateRmsChanged)
+    def gateRms(self) -> float:
+        return self._gate_rms
+
+    @Property(bool, notify=nsOnChanged)
+    def nsOn(self) -> bool:
+        return self._ns_on
+
+    @Slot()
+    def closeDrawers(self) -> None:
+        if self._settings_open:
+            self._settings_open = False
+            self.settingsOpenChanged.emit(False)
+        if self._chat_open:
+            self._chat_open = False
+            self.chatOpenChanged.emit(False)
+        if self._ops_open:
+            self._ops_open = False
+            self.opsOpenChanged.emit(False)
+
+    @Slot(float)
+    def setGateRms(self, value: float) -> None:
+        self._gate_rms = float(value)
+        self.gateRmsChanged.emit(self._gate_rms)
+        if self._bridge is not None:
+            self._bridge.set_voice_settings(gate_min_rms=self._gate_rms)
+            thr = min(0.95, max(0.05, self._gate_rms / 0.08))
+            self._bridge.set_vad_threshold(thr)
+
+    @Slot(float)
+    def setNsStrength(self, value: float) -> None:
+        self._ns_strength = max(0.0, min(1.0, float(value)))
+        self.nsStrengthChanged.emit(self._ns_strength)
+        self._ns_timer.start()
+
+    def _flush_ns_strength(self) -> None:
+        if self._bridge is not None:
+            self._bridge.set_voice_settings(ns_strength=self._ns_strength)
+
+    @Slot(bool)
+    def setNsOn(self, on: bool) -> None:
+        self._ns_on = bool(on)
+        self.nsOnChanged.emit(self._ns_on)
+        if self._bridge is not None:
+            self._bridge.set_voice_settings(ns="dtln" if on else "off")
+
+    @Slot(str, str, str)
+    def applyLlmSettings(self, mode: str, local_hef: str, or_model: str) -> None:
+        if self._bridge is None:
+            return
+        self._bridge.set_settings(mode, local_hef, or_model)
+
+    def _on_settings(self, payload: dict) -> None:
+        mode = str(payload.get("mode") or "local")
+        if mode != self._llm_mode:
+            self._llm_mode = mode
+            self.llmModeChanged.emit(mode)
+        hef = str(payload.get("local_hef") or self._local_hef)
+        if hef != self._local_hef:
+            self._local_hef = hef
+            self.localHefChanged.emit(hef)
+        orm = str(payload.get("or_model") or self._or_model)
+        if orm != self._or_model:
+            self._or_model = orm
+            self.orModelChanged.emit(orm)
+        key = bool(payload.get("has_or_key"))
+        if key != self._has_or_key:
+            self._has_or_key = key
+            self.hasOrKeyChanged.emit(key)
+        if payload.get("ns_strength") is not None:
+            try:
+                self._ns_strength = float(payload["ns_strength"])
+                self.nsStrengthChanged.emit(self._ns_strength)
+            except (TypeError, ValueError):
+                pass
+        if payload.get("gate_min_rms") is not None:
+            try:
+                self._gate_rms = float(payload["gate_min_rms"])
+                self.gateRmsChanged.emit(self._gate_rms)
+            except (TypeError, ValueError):
+                pass
+        if payload.get("ns") is not None:
+            self._ns_on = str(payload.get("ns")).lower() not in {"off", "none", "0"}
+            self.nsOnChanged.emit(self._ns_on)
+        loc = payload.get("local_models")
+        if isinstance(loc, list) and loc:
+            self._local_models = loc
+            self.localModelsChanged.emit()
+        orm_list = payload.get("or_models")
+        if isinstance(orm_list, list) and orm_list:
+            self._or_models = orm_list
+            self.orModelsChanged.emit()
+        tag = "Cloud" if mode == "openrouter" else "Local"
+        model = orm if mode == "openrouter" else hef
+        self._set_label(f"{tag} · {model}")
+
+    def _on_llm_status(self, status: str) -> None:
+        self._llm_status = status or ""
+        self.llmStatusChanged.emit(self._llm_status)
+        if status and status not in {"ready"}:
+            self._set_label(status)
 
     @Slot(str)
     def setPhase(self, value: str) -> None:
@@ -145,6 +445,14 @@ class NovaController(QObject):
     def _set_label(self, text: str) -> None:
         self._backend_label = text
         self.backendLabelChanged.emit(text)
+        st = (text or "").rsplit(" · ", 1)[-1].lower() if " · " in (text or "") else ""
+        if st in {"running", "searching", "generating", "done", "failed", "complete", "completed"}:
+            self._tool_capsule = text
+            self._tool_capsule_status = st
+            self.toolCapsuleChanged.emit(self._tool_capsule)
+            self.toolCapsuleStatusChanged.emit(st)
+            if st in {"running", "searching", "generating"}:
+                self.transcriptAdded.emit("tool", text)
 
     def _on_user(self, text: str) -> None:
         t = (text or "").strip()
@@ -153,6 +461,16 @@ class NovaController(QObject):
         if self._is_echo(t):
             print(f"[hmi] drop echo transcript: {t!r}", flush=True)
             return
+        self._live_user = t
+        self._live_asst = ""
+        self._live_visible = True
+        self.liveUserChanged.emit(t)
+        self.liveAssistantChanged.emit("")
+        self.liveVisibleChanged.emit(True)
+        self._tool_capsule = ""
+        self._tool_capsule_status = ""
+        self.toolCapsuleChanged.emit("")
+        self.toolCapsuleStatusChanged.emit("")
         self.transcriptAdded.emit("user", t)
 
     def _is_echo(self, user: str) -> bool:
@@ -169,13 +487,83 @@ class NovaController(QObject):
 
     def _on_asst_delta(self, piece: str) -> None:
         self._asst += piece
+        self._live_asst = self._asst
+        self._live_visible = True
+        self.liveAssistantChanged.emit(self._asst)
+        self.liveVisibleChanged.emit(True)
 
     def _on_asst_done(self, text: str) -> None:
         final = (text or self._asst).strip()
         self._asst = ""
         if final:
             self._last_nova = final
+            self._live_asst = final
+            self._live_visible = True
+            self.liveAssistantChanged.emit(final)
+            self.liveVisibleChanged.emit(True)
             self.transcriptAdded.emit("nova", final)
+
+    def _on_metrics(self, payload: dict) -> None:
+        def _f(key, dest_attr, sig):
+            v = payload.get(key)
+            if v is None:
+                return
+            try:
+                val = float(v)
+            except (TypeError, ValueError):
+                return
+            setattr(self, dest_attr, val)
+            sig.emit(val)
+
+        _f("stt_ms", "_stt_ms", self.sttMsChanged)
+        _f("llm_ms", "_llm_ms", self.llmMsChanged)
+        if self._llm_ms <= 0:
+            _f("llm_total_ms", "_llm_ms", self.llmMsChanged)
+        if self._llm_ms <= 0:
+            # OR logs had ttft+decode but never llm_ms
+            ttft = payload.get("llm_ttft_ms") or payload.get("ttft_ms")
+            dec = payload.get("llm_decode_ms") or payload.get("decode_ms")
+            try:
+                parts = [float(x) for x in (ttft, dec) if x is not None]
+                if parts:
+                    self._llm_ms = sum(parts)
+                    self.llmMsChanged.emit(self._llm_ms)
+            except (TypeError, ValueError):
+                pass
+        _f("llm_ttft_ms", "_llm_ttft_ms", self.llmTtftMsChanged)
+        if self._llm_ttft_ms <= 0:
+            _f("ttft_ms", "_llm_ttft_ms", self.llmTtftMsChanged)
+        _f("llm_decode_ms", "_llm_decode_ms", self.llmDecodeMsChanged)
+        if self._llm_decode_ms <= 0:
+            _f("decode_ms", "_llm_decode_ms", self.llmDecodeMsChanged)
+        _f("tts_ms", "_tts_ms", self.ttsMsChanged)
+        _f("ttfa_ms", "_ttfa_ms", self.ttfaMsChanged)
+        e2e = payload.get("speech_end_to_audible_ms") or payload.get("total_latency_ms") or payload.get("ttfa_ms")
+        if e2e is not None:
+            try:
+                self._e2e_ms = float(e2e)
+                self.e2eMsChanged.emit(self._e2e_ms)
+                self._set_latency(int(self._e2e_ms))
+            except (TypeError, ValueError):
+                pass
+        path = payload.get("stt_path") or payload.get("stt_engine")
+        if path:
+            self._stt_path = str(path)
+            self.sttPathChanged.emit(self._stt_path)
+
+    @Slot()
+    def clearToolCapsule(self) -> None:
+        if self._tool_capsule:
+            self._tool_capsule = ""
+            self._tool_capsule_status = ""
+            self.toolCapsuleChanged.emit("")
+            self.toolCapsuleStatusChanged.emit("")
+
+    @Slot()
+    def hideLive(self) -> None:
+        if self._live_visible:
+            self._live_visible = False
+            self.liveVisibleChanged.emit(False)
 
     def _force_listen(self) -> None:
         self._speak_watch.stop()

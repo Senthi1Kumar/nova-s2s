@@ -17,8 +17,11 @@ from nova_hmi.protocol import (
     assistant_delta,
     assistant_done,
     is_user_transcript,
+    llm_status_label,
     map_fsm_to_phase,
+    settings_payload,
     tool_status_label,
+    turn_metrics_payload,
 )
 
 
@@ -37,6 +40,9 @@ class RealtimeBridge(QObject):
     latencyMs = Signal(int)
     turnDone = Signal()
     failClosed = Signal(str)
+    settingsChanged = Signal(dict)
+    llmStatus = Signal(str)
+    turnMetrics = Signal(dict)
 
     def __init__(self, url: str, parent=None):
         super().__init__(parent)
@@ -94,6 +100,46 @@ class RealtimeBridge(QObject):
     def cancel(self) -> None:
         self.send({"type": "response.cancel"})
 
+    def request_settings(self) -> None:
+        self.send({"type": "nova.settings.get"})
+
+    def set_settings(self, mode: str, local_hef: str, or_model: str) -> None:
+        self.send(
+            {
+                "type": "nova.settings.set",
+                "mode": mode,
+                "local_hef": local_hef,
+                "or_model": or_model,
+            }
+        )
+
+    def set_voice_settings(self, *, gate_min_rms=None, ns=None, ns_strength=None) -> None:
+        payload: dict = {"type": "nova.settings.set"}
+        if gate_min_rms is not None:
+            payload["gate_min_rms"] = float(gate_min_rms)
+        if ns is not None:
+            payload["ns"] = ns
+        if ns_strength is not None:
+            payload["ns_strength"] = float(ns_strength)
+        self.send(payload)
+
+    def set_vad_threshold(self, threshold: float) -> None:
+        self.send(
+            {
+                "type": "session.update",
+                "session": {
+                    "audio": {
+                        "input": {
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "threshold": float(threshold),
+                            }
+                        }
+                    }
+                },
+            }
+        )
+
     def playback_started(self, generation_id=None) -> None:
         self.send(
             {
@@ -110,6 +156,7 @@ class RealtimeBridge(QObject):
         self._retry.stop()
         print("[hmi] ws connected — arming session", flush=True)
         self.arm()
+        self.request_settings()
         self.connected.emit()
 
     def _on_disconnected(self) -> None:
@@ -200,6 +247,20 @@ class RealtimeBridge(QObject):
         if kind == "nova.research_status":
             self.toolStatus.emit(f"research · {msg.get('status') or 'running'}")
             self.phaseReceived.emit("thinking")
+            return
+        metrics = turn_metrics_payload(msg)
+        if metrics is not None:
+            self.turnMetrics.emit(metrics)
+            return
+        settings = settings_payload(msg)
+        if settings is not None:
+            self.settingsChanged.emit(settings)
+            return
+        st = llm_status_label(msg)
+        if st is not None:
+            self.llmStatus.emit(st)
+            if st not in {"ready", "loading", "queued"}:
+                self.toolStatus.emit(st)
             return
         if kind == "error":
             err = msg.get("error") or {}

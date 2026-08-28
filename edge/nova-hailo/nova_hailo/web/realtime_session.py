@@ -28,6 +28,8 @@ from nova_hailo.audio_gate import (
 from nova_hailo.bench.session_tracker import BenchTracker
 from nova_hailo.metrics import Timer, TurnMetrics
 from nova_hailo.pipeline import NovaPipeline
+from nova_hailo.session_log import current as session_log_current
+from nova_hailo.web.dtln import DEFAULT_STRENGTH, create_dtln
 from nova_hailo.pvad_optional import OptionalFireRedPVAD
 from nova_hailo.session_fsm import SessionFSM, SessionState, TurnTerminal
 from nova_hailo.voice_loop import prepare_for_whisper
@@ -44,8 +46,22 @@ from nova_hailo.web.nemo_wait_budget import (
     DEFAULT_NEMO_WAIT_SCALE,
     nemo_wait_budget_s,
 )
-from nova_hailo.web.dtln import create_dtln
+
 from nova_hailo.web.vad import create_vad_segmenter
+
+
+def _transcript_is_echo(user: str, last_assistant: str) -> bool:
+    """True when ASR likely captured Nova's own last speak-back."""
+    u = (user or "").strip().lower()
+    prev = (last_assistant or "").strip().lower()
+    if not prev or len(u) < 4:
+        return False
+    pw = {w for w in prev.replace("'", "").split() if len(w) > 2}
+    uw = {w for w in u.replace("'", "").split() if len(w) > 2}
+    if not uw:
+        return False
+    overlap = len(pw & uw) / max(1, len(uw))
+    return overlap >= 0.55 or u in prev or prev[:24] in u
 
 
 def _pcm16_b64(audio: np.ndarray) -> str:
@@ -151,6 +167,9 @@ class RealtimeSession:
         self._playback_stop_ack_at: float | None = None
         self._first_audio_ack_at: float | None = None
         self._last_fail_closed_mono: float = float("-inf")
+        self._echo_hold_started: float = 0.0
+        self._uplink_frames: int = 0
+        self._uplink_log_at: float = 0.0
 
     async def send(self, event: dict[str, Any]):
         if self._closed or self.ws.client_state != WebSocketState.CONNECTED:
@@ -164,6 +183,68 @@ class RealtimeSession:
         if self._closed:
             return
         asyncio.run_coroutine_threadsafe(self.send(event), self.loop)
+
+    def _voice_snapshot(self) -> dict[str, Any]:
+        ns = self.ns
+        strength = float(getattr(ns, "strength", DEFAULT_STRENGTH) or DEFAULT_STRENGTH) if ns else 0.0
+        return {
+            "gate_min_rms": self.gate_min_rms,
+            "ns": "dtln" if ns is not None else "off",
+            "ns_strength": strength,
+            "stt_engine": getattr(self.pipeline, "stt_engine", None),
+        }
+
+    def _settings_payload(self) -> dict[str, Any]:
+        snap = {}
+        fn = getattr(self.pipeline, "llm_settings_snapshot", None)
+        if fn is not None:
+            try:
+                snap = fn() or {}
+            except Exception:
+                snap = {}
+        snap.update(self._voice_snapshot())
+        return snap
+
+    def _apply_voice_settings(self, payload: dict[str, Any]) -> None:
+        if payload.get("gate_min_rms") is not None:
+            self.gate_min_rms = max(0.002, min(0.12, float(payload["gate_min_rms"])))
+        ns_name = payload.get("ns")
+        if ns_name is not None:
+            want = str(ns_name).strip().lower()
+            if want in {"off", "none", "0", "false"}:
+                self.ns = None
+                print("[dtln] disabled via settings", flush=True)
+            elif self.ns is None:
+                self.ns = create_dtln(self.pipeline.cfg)
+        if payload.get("ns_strength") is not None and self.ns is not None:
+            self.ns.strength = max(0.0, min(1.0, float(payload["ns_strength"])))
+            print(f"[dtln] mix={self.ns.strength}", flush=True)
+
+    async def _apply_llm_settings_bg(self, payload: dict[str, Any]) -> None:
+        apply = getattr(self.pipeline, "apply_llm_settings", None)
+        if apply is None:
+            await self.send(
+                {
+                    "type": "nova.llm_status",
+                    "status": "error",
+                    "error": "llm settings not supported",
+                }
+            )
+            return
+        try:
+            snap = await asyncio.to_thread(
+                lambda: apply(
+                    mode=payload.get("mode"),
+                    local_hef=payload.get("local_hef"),
+                    or_model=payload.get("or_model"),
+                )
+            )
+            await self.send({"type": "nova.settings", **{**snap, **self._voice_snapshot()}})
+            await self.send({"type": "nova.llm_status", "status": "ready"})
+        except Exception as exc:  # noqa: BLE001
+            await self.send(
+                {"type": "nova.llm_status", "status": "error", "error": str(exc)}
+            )
 
     def _on_fsm_change(self, snapshot: dict[str, Any]) -> None:
         """Push every FSM transition to the browser (driver orb + /dashboard)."""
@@ -199,9 +280,13 @@ class RealtimeSession:
                     "fsm": self.fsm.snapshot(),
                     "stt_engine": getattr(self.pipeline, "stt_engine", None),
                     "greeting": greeting,
+                    "llm": getattr(self.pipeline, "llm_settings_snapshot", lambda: {})(),
                 },
             }
         )
+        snap = getattr(self.pipeline, "llm_settings_snapshot", None)
+        if snap is not None:
+            await self.send({"type": "nova.settings", **snap()})
         # Explicit first paint for clients that only listen for nova.fsm
         await self.send(
             {
@@ -241,6 +326,22 @@ class RealtimeSession:
                 self.fsm.arm()
                 self.fsm.begin_listen()
                 await self.send({"type": "session.armed", "fsm": self.fsm.snapshot()})
+            return
+
+        if mtype == "nova.settings.get":
+            await self.send({"type": "nova.settings", **self._settings_payload()})
+            return
+
+        if mtype == "nova.settings.set":
+            payload = msg.get("settings") if isinstance(msg.get("settings"), dict) else msg
+            voice_only = payload.get("mode") is None and payload.get("or_model") is None
+            self._apply_voice_settings(payload)
+            if voice_only:
+                await self.send({"type": "nova.settings", **self._settings_payload()})
+                return
+            # Do not await HEF load on the WS reader — that froze the mic uplink.
+            await self.send({"type": "nova.llm_status", "status": "loading"})
+            asyncio.create_task(self._apply_llm_settings_bg(payload))
             return
 
         if mtype in {"input_audio_buffer.arm", "ptt.down", "session.arm"}:
@@ -289,6 +390,15 @@ class RealtimeSession:
             if not audio_b64:
                 return
             pcm = _b64_pcm16(audio_b64)
+            self._uplink_frames += 1
+            now_m = time.monotonic()
+            if now_m - self._uplink_log_at >= 5.0:
+                self._uplink_log_at = now_m
+                print(
+                    f"[uplink] frames={self._uplink_frames} bytes={len(pcm)} "
+                    f"fsm={self.fsm.state.value} speaking={self.pipeline.tts.is_speaking}",
+                    flush=True,
+                )
             self.fsm.maybe_expire_arm()
 
             if self.wake.enabled and self.wake.process(pcm):
@@ -308,7 +418,18 @@ class RealtimeSession:
             # enabled, drop VAD events while speaking and through a decay tail.
             tail = self.echo_tail_ms / 1000.0
             in_echo_window = time.monotonic() < (getattr(self, "_echo_until", 0.0) + tail)
-            if (speaking or in_echo_window) and not self.barge_in_while_speaking:
+            echo_cap = self.echo_max_ms / 1000.0
+            echo_held_s = max(0.0, time.monotonic() - float(getattr(self, "_echo_hold_started", 0.0) or 0.0))
+            if (speaking or in_echo_window) and not getattr(self, "_echo_hold_started", 0.0):
+                self._echo_hold_started = time.monotonic()
+            if not (speaking or in_echo_window):
+                self._echo_hold_started = 0.0
+            gated = (speaking or in_echo_window) and not self.barge_in_while_speaking
+            if gated and echo_held_s > echo_cap:
+                gated = False
+                self._echo_until = 0.0
+                self._echo_hold_started = 0.0
+            if gated:
                 self.vad.feed(pcm)  # keep VAD state coherent, discard events
                 if self.ns is not None and not self._ns_held:
                     self.ns.reset()
@@ -746,8 +867,19 @@ class RealtimeSession:
             self.pipeline.on_token = None
 
     def _start_turn(self, audio: np.ndarray, nemo_result: dict | None = None):
+        # Do not queue speech captured while a turn is in flight — that is the
+        # "answers a question I asked seconds ago / I did not speak" loop
+        # (echo of TTS + leftover VAD). Barge-in is explicit, not a backlog.
+        busy = self.fsm.state in {
+            SessionState.TRANSCRIBING,
+            SessionState.THINKING,
+            SessionState.SPEAKING,
+        } or self.pipeline.tts.is_speaking
         if not self._turn_lock.acquire(blocking=False):
-            self._pending.append((audio, nemo_result))
+            if busy:
+                print("[asr] drop overlapping utterance (turn in flight)", flush=True)
+                return
+            self._pending.append((audio, nemo_result, time.monotonic()))
             return
 
         def worker():
@@ -755,9 +887,16 @@ class RealtimeSession:
                 self._run_turn_blocking(audio, nemo_result=nemo_result)
             finally:
                 self._turn_lock.release()
-                if self._pending and not self._closed:
-                    nxt_audio, nxt_nemo = self._pending.popleft()
+                stale_s = 0.35
+                while self._pending and not self._closed:
+                    item = self._pending.popleft()
+                    nxt_audio, nxt_nemo = item[0], item[1]
+                    t0 = item[2] if len(item) > 2 else 0.0
+                    if t0 and (time.monotonic() - t0) > stale_s:
+                        print("[asr] drop stale queued utterance", flush=True)
+                        continue
                     self._start_turn(nxt_audio, nemo_result=nxt_nemo)
+                    break
 
         threading.Thread(target=worker, daemon=True, name="realtime-turn").start()
 
@@ -898,6 +1037,28 @@ class RealtimeSession:
             )
             return
 
+        last_speak = ""
+        hist = getattr(self.pipeline, "history", None)
+        if hist is not None and getattr(hist, "_turns", None):
+            try:
+                last_speak = str(hist._turns[-1].assistant or "")
+            except Exception:
+                last_speak = ""
+        if _transcript_is_echo(transcript, last_speak):
+            print(f"[asr] skip TTS-echo transcript: {transcript!r}", flush=True)
+            self.fsm.complete(generation_id, TurnTerminal.REJECTED, metadata={"echo": True})
+            self._schedule_send(
+                {
+                    "type": "response.done",
+                    "response": {
+                        "id": self._response_id,
+                        "status": "completed",
+                        "metadata": {"skipped": True, "reason": "tts_echo", "generation_id": generation_id},
+                    },
+                }
+            )
+            return
+
         self.fsm.set_thinking(generation_id)
 
         def on_pcm(chunk: np.ndarray, sample_rate: int):
@@ -1030,6 +1191,18 @@ class RealtimeSession:
             self.bench.add_turn(metrics)
             terminal = TurnTerminal.CANCELLED if cancelled else TurnTerminal.COMPLETED
             self.fsm.complete(generation_id, terminal, metadata=metrics)
+            slog = session_log_current()
+            if slog is not None:
+                llm = getattr(self.pipeline, "llm", None)
+                slog.log_turn(
+                    user=transcript,
+                    assistant=result.assistant_text or "",
+                    stt_engine=getattr(self.pipeline, "stt_engine", None),
+                    llm_backend=getattr(self.pipeline, "llm_backend", None),
+                    llm_model=getattr(llm, "hef_path", None) or getattr(llm, "model", None),
+                    tool_name=result.tool_name,
+                    metrics=metrics,
+                )
             self._schedule_send({"type": "nova.turn_metrics", **metrics})
             self._schedule_send(
                 {

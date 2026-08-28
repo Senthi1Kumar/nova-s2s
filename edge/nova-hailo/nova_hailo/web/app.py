@@ -21,6 +21,7 @@ from nova_hailo.google_oauth import (
     integration_status,
 )
 from nova_hailo.pipeline import NovaPipeline
+from nova_hailo.session_log import start_process_log, stop_process_log
 from nova_hailo.web.realtime_session import RealtimeSession
 from nova_hailo.backends.nemo_speech_sidecar import ensure_sidecar, shutdown_sidecar
 
@@ -91,6 +92,7 @@ def _build_pipeline() -> NovaPipeline:
 async def lifespan(app: FastAPI):
     global _pipeline
     print("Initializing Nova-Hailo web pipeline…", flush=True)
+    start_process_log()
     _pipeline = _build_pipeline()
     print(f"LLM: {_pipeline.llm.hef_path}", flush=True)
     if _pipeline.stt:
@@ -127,6 +129,7 @@ async def lifespan(app: FastAPI):
         if _pipeline:
             _pipeline.close()
             _pipeline = None
+        stop_process_log()
 
 
 app = FastAPI(title="Nova-Hailo Realtime", lifespan=lifespan)

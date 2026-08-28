@@ -10,8 +10,11 @@ from nova_hmi.protocol import (
     assistant_delta,
     assistant_done,
     is_user_transcript,
+    llm_status_label,
     map_fsm_to_phase,
+    settings_payload,
     tool_status_label,
+    turn_metrics_payload,
 )
 
 
@@ -97,3 +100,6 @@ def test_transcript_and_tool_extractors():
         == "web_search · running"
     )
     assert tool_status_label({"type": "nova.fsm"}) is None
+    assert settings_payload({"type": "nova.settings", "mode": "local"})["mode"] == "local"
+    assert llm_status_label({"type": "nova.llm_status", "status": "ready"}) == "ready"
+    assert turn_metrics_payload({"type": "nova.turn_metrics", "stt_ms": 12})["stt_ms"] == 12

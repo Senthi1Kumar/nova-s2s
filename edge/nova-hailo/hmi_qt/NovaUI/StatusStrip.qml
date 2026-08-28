@@ -54,6 +54,19 @@ Item {
                  : root.link === "demo"   ? Theme.yellow
                                           : Theme.textLo
         }
+
+        Text {
+            text: "⚙"
+            anchors.verticalCenter: parent.verticalCenter
+            font.pixelSize: 14
+            color: Theme.textMid
+            MouseArea {
+                anchors.fill: parent
+                anchors.margins: -8
+                cursorShape: Qt.PointingHandCursor
+                onClicked: nova.toggleSettings()
+            }
+        }
     }
 
     Rectangle {

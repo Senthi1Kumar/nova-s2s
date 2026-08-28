@@ -37,14 +37,17 @@ DEFAULT_REPO_DIRNAME = "Inflect-Nano-v2-ONNX"
 
 
 def _add_repo_to_path(repo: Path) -> Path:
-    onnx_dir = str(repo / "onnx")
-    if onnx_dir not in sys.path:
-        sys.path.insert(0, onnx_dir)
+    for extra in (repo / "onnx", repo):
+        s = str(extra)
+        if extra.is_dir() and s not in sys.path:
+            sys.path.insert(0, s)
     return repo
 
 
 def _looks_like_repo(p: Path) -> bool:
-    return (p / "onnx" / "inference_onnx.py").is_file()
+    return (p / "onnx" / "inference_onnx.py").is_file() or (
+        p / "inference_onnx.py"
+    ).is_file()
 
 
 def _discover_repo() -> Path | None:

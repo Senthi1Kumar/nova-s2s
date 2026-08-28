@@ -49,6 +49,30 @@ def assistant_done(msg: dict) -> str | None:
     return t or None
 
 
+def llm_status_label(msg: dict) -> str | None:
+    if msg.get("type") != "nova.llm_status":
+        return None
+    status = str(msg.get("status") or "").strip()
+    err = str(msg.get("error") or "").strip()
+    if status == "error" and err:
+        return err
+    return status or None
+
+
+def turn_metrics_payload(msg: dict) -> dict | None:
+    if msg.get("type") not in {"nova.turn_metrics", "nova.metrics"}:
+        return None
+    if msg.get("type") == "nova.metrics":
+        return msg.get("turn") if isinstance(msg.get("turn"), dict) else msg
+    return msg
+
+
+def settings_payload(msg: dict) -> dict | None:
+    if msg.get("type") != "nova.settings":
+        return None
+    return msg
+
+
 def tool_status_label(msg: dict) -> str | None:
     if msg.get("type") != "nova.tool_status":
         return None

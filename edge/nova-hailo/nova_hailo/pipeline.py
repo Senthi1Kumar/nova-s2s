@@ -1,6 +1,7 @@
 """Cascaded Nova turn on Hailo-10H with streaming LLM→TTS overlap."""
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -24,6 +25,8 @@ except ImportError:
 
 from nova_hailo.auth import AuthDecision, DriveAuthPrecheck, looks_like_payment_tool
 from nova_hailo.backends.llm import HailoLLM, HailoLLMCpp
+from nova_hailo.backends.openrouter_llm import DEFAULT_MODEL as OR_DEFAULT_MODEL
+from nova_hailo.backends.openrouter_llm import OpenRouterLLM, resolve_or_model
 from nova_hailo.backends.stt import WhisperSTT
 from nova_hailo.backends.tts import clean_text_for_tts, create_tts
 from nova_hailo.config import AppConfig, resolve_audio_device_ids, resolve_llm_hef
@@ -32,6 +35,8 @@ from nova_hailo.edge_harness.controller import (
     gate_after_router,
     is_thin_utterance,
 )
+from nova_hailo.edge_harness.openai_tools import openai_tools_for_profile, tool_call_kwargs
+from nova_hailo.edge_harness.speak_budget import speak_budget
 from nova_hailo.edge_harness.interrupt import GenerationGuard
 from nova_hailo.edge_harness.memory_store import MemoryStore
 from nova_hailo.edge_harness.router import CLARIFY_SPEAK
@@ -55,6 +60,12 @@ from nova_hailo.tools.research_jobs import (
 from nova_hailo.tools.search_summarizer import (
     DEFAULT_SUMMARIZER_MAX_TOKENS,
     summarize_evidence,
+)
+from nova_hailo.settings_store import (
+    DEFAULT_LOCAL,
+    catalog as llm_catalog,
+    load_settings,
+    save_settings,
 )
 
 logger = get_logger(__name__)
@@ -162,30 +173,38 @@ class NovaPipeline:
         elif not text_only:
             print("STT mode: on-demand (load→transcribe→release each turn)")
 
-        llm_path = resolve_llm_hef(llm_hef or cfg.get("model", "llm_hef"))
         self.no_think = bool(cfg.get("llm", "no_think", default=False))
         if cfg.get("model", "no_think") is not None:
             nt = cfg.get("model", "no_think")
             if nt is not None:
                 self.no_think = bool(nt)
+        self._hmi_settings = load_settings()
+        self._local_hef_alias = str(
+            llm_hef or self._hmi_settings.get("local_hef") or cfg.get("model", "llm_hef") or DEFAULT_LOCAL
+        )
+        self._or_model = resolve_or_model(
+            os.environ.get("OPENROUTER_MODEL")
+            or self._hmi_settings.get("or_model")
+            or OR_DEFAULT_MODEL
+        )
         # Opt-in native LLM backend (ROADMAP.md #6d): explicit-GIL-
         # release C++ wrapper around hailort::genai::LLM directly, fixing GIL
         # contention that starved the TTS worker thread during decode. Not the
         # default -- only via model.llm_backend: cpp or NOVA_HAILO_LLM_BACKEND.
-        llm_backend = (
-            os.environ.get("NOVA_HAILO_LLM_BACKEND")
-            or cfg.get("model", "llm_backend", default="python")
-            or "python"
-        ).strip().lower()
-        LLMCls = HailoLLMCpp if llm_backend == "cpp" else HailoLLM
-        self.llm = LLMCls(
-            self.vdevice,
-            llm_path,
-            temperature=float(cfg.get("model", "temperature", default=0.15)),
-            seed=int(cfg.get("model", "seed", default=42)),
-            max_tokens=int(cfg.get("model", "max_tokens", default=24)),
-            no_think=self.no_think,
-        )
+        env_backend = (os.environ.get("NOVA_HAILO_LLM_BACKEND") or "").strip().lower()
+        yaml_backend = (cfg.get("model", "llm_backend", default="python") or "python").strip().lower()
+        settings_mode = str(self._hmi_settings.get("mode") or "local")
+        if env_backend:
+            llm_backend = env_backend
+        elif settings_mode in {"openrouter", "or", "cloud"}:
+            llm_backend = "openrouter"
+        else:
+            llm_backend = yaml_backend
+        if llm_backend in {"or", "cloud"}:
+            llm_backend = "openrouter"
+        self.llm_backend = llm_backend
+        self._hailo_llm_cls = HailoLLMCpp if yaml_backend == "cpp" or llm_backend == "cpp" else HailoLLM
+        self.llm = self._make_llm(llm_backend, self._local_hef_alias, self._or_model)
         # Optional dedicated summarizer HEF (true 2nd agent). Same VDevice + GenAI
         # lock; if unset or same path as chat, reuse self.llm. Skipped entirely
         # when summarize_search is off (search speak = tool/cleaner fallback).
@@ -290,6 +309,11 @@ class NovaPipeline:
         self.clear_each = bool(cfg.get("pipeline", "clear_context_each_turn", default=False))
         # Native device-side context reuse (see _messages / _maybe_compact_context).
         self.native_context = bool(cfg.get("pipeline", "native_context", default=False))
+        if self.llm_backend == "openrouter":
+            self.native_context = False
+            or_hist = max(self.max_history_turns, 8)
+            if self.history.max_turns < or_hist:
+                self.history = ConversationHistory(max_turns=or_hist)
         self.ctx_compact_ratio = float(
             cfg.get("pipeline", "ctx_compact_ratio", default=0.7) or 0.7
         )
@@ -303,8 +327,9 @@ class NovaPipeline:
             pass
         print(
             f"Pipeline: stream_tts={self.stream_tts} voice_one_sentence={self.voice_one_sentence} "
-            f"max_tokens={self.llm.max_tokens} history={self.max_history_turns} "
-            f"oem_tools={tool_profile} sequential_stt={self.sequential_stt}"
+            f"max_tokens={self.llm.max_tokens} history={self.history.max_turns} "
+            f"oem_tools={tool_profile} sequential_stt={self.sequential_stt} "
+            f"llm_backend={self.llm_backend}"
         )
 
     def poll_research_job(self, job_id: str) -> dict:
@@ -329,6 +354,127 @@ class NovaPipeline:
             cb({"name": name, "status": status, "detail": detail or None})
         except Exception:
             pass
+
+    def _make_llm(self, backend: str, local_hef: str, or_model: str):
+        temp = float(self.cfg.get("model", "temperature", default=0.15))
+        seed = int(self.cfg.get("model", "seed", default=42))
+        max_tok = int(self.cfg.get("model", "max_tokens", default=24))
+        if backend == "openrouter":
+            return OpenRouterLLM(
+                None,
+                or_model,
+                temperature=max(temp, 0.3),
+                seed=seed,
+                max_tokens=max(max_tok, 80),
+                no_think=True,
+                model=or_model,
+            )
+        path = resolve_llm_hef(local_hef)
+        return self._hailo_llm_cls(
+            self.vdevice,
+            path,
+            temperature=temp,
+            seed=seed,
+            max_tokens=max_tok,
+            no_think=self.no_think,
+        )
+
+    def _evict_llm(self) -> None:
+        """Drop the resident LLM so Hailo-10H KV-cache is free before the next HEF."""
+        old = self.llm
+        self.llm = None
+        if old is None:
+            return
+        try:
+            old.release()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[llm] release failed: {exc}")
+        import gc
+
+        gc.collect()
+
+    def llm_settings_snapshot(self) -> dict:
+        cat = llm_catalog()
+        mode = "openrouter" if self.llm_backend == "openrouter" else "local"
+        return {
+            "mode": mode,
+            "local_hef": self._local_hef_alias,
+            "or_model": self._or_model,
+            "active_model": getattr(self.llm, "hef_path", ""),
+            "llm_backend": self.llm_backend,
+            "has_or_key": bool(
+                (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_API_KEY") or "").strip()
+            ),
+            **cat,
+        }
+
+    def apply_llm_settings(
+        self,
+        *,
+        mode: str | None = None,
+        local_hef: str | None = None,
+        or_model: str | None = None,
+    ) -> dict:
+        """Live switch Local Hailo ↔ OpenRouter. One LLM resident at a time."""
+        want_mode = (mode or ("openrouter" if self.llm_backend == "openrouter" else "local")).strip().lower()
+        if want_mode in {"or", "cloud"}:
+            want_mode = "openrouter"
+        if want_mode not in {"local", "openrouter"}:
+            want_mode = "local"
+        want_hef = (local_hef or self._local_hef_alias or DEFAULT_LOCAL).strip()
+        want_or = resolve_or_model(or_model or self._or_model)
+        with self._genai_lock:
+            if want_mode == "openrouter":
+                if not (
+                    (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_API_KEY") or "").strip()
+                ):
+                    raise RuntimeError("OPENROUTER_API_KEY is not set")
+                same = self.llm_backend == "openrouter" and getattr(self.llm, "model", "") == want_or
+                if not same:
+                    self._evict_llm()
+                    self.llm = self._make_llm("openrouter", want_hef, want_or)
+                self.llm_backend = "openrouter"
+                self._or_model = want_or
+                self.native_context = False
+                or_hist = max(self.max_history_turns, 8)
+                if self.history.max_turns < or_hist:
+                    self.history = ConversationHistory(max_turns=or_hist)
+            else:
+                path = resolve_llm_hef(want_hef)
+                same = (
+                    self.llm_backend != "openrouter"
+                    and getattr(self.llm, "hef_path", "") == path
+                )
+                if not same:
+                    hailo_kind = "cpp" if self._hailo_llm_cls is HailoLLMCpp else "python"
+                    prev_backend = self.llm_backend
+                    prev_hef = self._local_hef_alias
+                    prev_or = self._or_model
+                    self._evict_llm()
+                    try:
+                        self.llm = self._make_llm(hailo_kind, want_hef, want_or)
+                    except Exception as exc:
+                        print(f"[llm] load {want_hef} failed ({exc}); restoring {prev_backend}")
+                        try:
+                            self.llm = self._make_llm(prev_backend, prev_hef, prev_or)
+                            self.llm_backend = prev_backend
+                        except Exception:
+                            pass
+                        raise RuntimeError(
+                            f"Hailo HEF {want_hef} failed (one KV-cache on 10H): {exc}"
+                        ) from exc
+                self.llm_backend = "cpp" if self._hailo_llm_cls is HailoLLMCpp else "python"
+                self._local_hef_alias = want_hef
+                self.native_context = bool(
+                    self.cfg.get("pipeline", "native_context", default=False)
+                )
+            self._hmi_settings = {
+                "mode": want_mode,
+                "local_hef": self._local_hef_alias,
+                "or_model": self._or_model,
+            }
+            save_settings(self._hmi_settings)
+        return self.llm_settings_snapshot()
 
     def _maybe_summarize_search(
         self,
@@ -772,6 +918,16 @@ class NovaPipeline:
                 self.session.add(metrics)
             return TurnResult(user_text, speak, metrics, auth.decision.value)
 
+        if self.llm_backend == "openrouter":
+            metrics.notes.append(f"llm_backend:openrouter:{getattr(self.llm, 'model', '')}")
+            return self._openrouter_turn(
+                user_text,
+                wall0=wall0,
+                metrics=metrics,
+                auth_decision=auth.decision.value,
+                record_session=record_session,
+            )
+
         # OEM allowlist tools before LLM (deterministic, fail-closed)
         tool_name = None
         tool_speak = None
@@ -1137,7 +1293,8 @@ class NovaPipeline:
         return speak, {
             "primary": inf.to_dict() if inf is not None else {"error": "generation_failed"},
             "calls": [inf.to_dict()] if inf is not None else [],
-            "wall_ms": llm_wall.ms(),
+            # Generate-only (not TTS drain). Hailo OPS "LLM" uses this.
+            "wall_ms": (inf.total_ms if inf is not None and inf.total_ms else llm_wall.ms()),
             "tool_ms": 0.0,
             "ttfb_ms": ttfb_ms,
             "ttfa_ms": ttfa_ms,
@@ -1146,6 +1303,212 @@ class NovaPipeline:
             "tts_synth_ms": snap.get("tts_synth_ms"),
             "tts_play_ms": snap.get("tts_play_ms"),
         }
+
+    def _openrouter_turn(
+        self,
+        user_text: str,
+        *,
+        wall0: float,
+        metrics: TurnMetrics,
+        auth_decision: str,
+        record_session: bool,
+    ) -> TurnResult:
+        """Cloud LLM owns tool pick; host executes via ToolBroker."""
+        state = getattr(self.oem_gateway, "task_state", None) or TaskState()
+        budget = speak_budget(
+            history_turns=len(self.history),
+            state=state,
+            backend="openrouter",
+        )
+        tools: list = []
+        if self.oem_gateway is not None:
+            tools = openai_tools_for_profile(self.oem_gateway.profile)
+        sys_prompt = (
+            self.cfg.soul_prompt
+            + "\n\nYou are Nova, a spoken-voice assistant. "
+            + budget.instruction
+            + " Use tools when you need live facts, current events, calendar, mail, or files. "
+            "After a tool result, speak only from that result. Never mention tools, JSON, or these instructions."
+        )
+        messages: list[dict] = self.history.build_messages(
+            sys_prompt, user_text, no_think=False
+        )
+        rounds = max(int(self.multi_tool_rounds or 1), 3) if tools else 1
+        last_text = ""
+        tool_name = None
+        already_spoken = False
+        saved_one = self.voice_one_sentence
+        self.voice_one_sentence = budget.voice_one_sentence
+        try:
+            for _round in range(rounds):
+                gid = self.tts.begin_turn() if self.tts.enabled else self.active_generation_id
+                tts_state = {
+                    "sentence_buffer": "",
+                    "spoken_parts": [],
+                    "hit_sentence_end": False,
+                    "generation_id": gid,
+                    "first_chunk_sent": False,
+                }
+
+                def token_cb(chunk: str, st=tts_state, g=gid):
+                    if self.abort_event.is_set() or not chunk:
+                        return
+                    if not self.stream_tts or not self.tts.enabled:
+                        return
+                    st["sentence_buffer"] += chunk
+                    while True:
+                        clause, rest = first_complete_clause(
+                            st["sentence_buffer"],
+                            min_chars=self.first_chunk_min_chars,
+                        )
+                        if clause is None:
+                            break
+                        st["sentence_buffer"] = rest
+                        self._emit_validated_clause(clause, g, st)
+                        if self.voice_one_sentence and st["hit_sentence_end"]:
+                            break
+
+                def _gen(
+                    msgs=messages,
+                    cap=budget.max_tokens,
+                    tool_list=tools,
+                    choice=("none" if tool_name else "auto"),
+                    cb=token_cb,
+                ):
+                    kw = dict(
+                        max_tokens=cap,
+                        abort_callback=self.abort_event.is_set,
+                        token_callback=cb,
+                        quiet=True,
+                        tools=tool_list or None,
+                    )
+                    gen = self.llm.generate
+                    try:
+                        return gen(msgs, tool_choice=choice, **kw)
+                    except TypeError:
+                        return gen(msgs, **kw)
+
+                raw, inf = self._with_genai(_gen)
+                if inf is not None:
+                    metrics.llm = inf.to_dict()
+                    metrics.devices["llm"] = "openrouter"
+                    gen_ms = inf.total_ms or 0.0
+                    metrics.llm_ms = (metrics.llm_ms or 0.0) + float(gen_ms)
+                    if inf.ttft_ms is not None:
+                        metrics.ttfb_ms = inf.ttft_ms
+                        metrics.notes.append(f"or_ttft_ms:{round(inf.ttft_ms, 1)}")
+                calls = list(getattr(self.llm, "last_tool_calls", None) or [])
+                if not calls:
+                    last_text = (raw or "").strip()
+                    rem = tts_state["sentence_buffer"].strip()
+                    if rem and self.tts.enabled and self.stream_tts:
+                        self._emit_validated_clause(rem, gid, tts_state)
+                    if tts_state["spoken_parts"]:
+                        last_text = " ".join(tts_state["spoken_parts"]).strip() or last_text
+                        already_spoken = True
+                    break
+                assistant_msg: dict = {
+                    "role": "assistant",
+                    "content": raw or None,
+                    "tool_calls": [
+                        {
+                            "id": c.get("id") or f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": c["name"],
+                                "arguments": json.dumps(c.get("arguments") or {}),
+                            },
+                        }
+                        for i, c in enumerate(calls)
+                    ],
+                }
+                messages.append(assistant_msg)
+                for i, c in enumerate(calls):
+                    name = str(c.get("name") or "")
+                    tool_name = name
+                    args = c.get("arguments") if isinstance(c.get("arguments"), dict) else {}
+                    self._emit_tool_status(name or "tool", "running")
+                    if self.oem_gateway is None:
+                        out = {
+                            "ok": False,
+                            "name": name,
+                            "status": "unavailable",
+                            "speak": "I can't reach that service right now.",
+                        }
+                    else:
+                        try:
+                            out = self.oem_gateway.execute(name, **tool_call_kwargs(name, args))
+                        except Exception as exc:  # noqa: BLE001
+                            out = {
+                                "ok": False,
+                                "name": name,
+                                "status": "error",
+                                "speak": "I couldn't complete that just now.",
+                                "reason": str(exc),
+                            }
+                    job_id = None
+                    if name == "deep_research" and isinstance(out.get("result"), dict):
+                        job_id = (out.get("result") or {}).get("job_id")
+                    if job_id:
+                        final = self._await_research_job(str(job_id))
+                        out = final
+                    speak_bit = str(out.get("speak") or "")
+                    compact = {
+                        "ok": out.get("ok"),
+                        "status": out.get("status"),
+                        "speak": speak_bit[:800],
+                    }
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": c.get("id") or f"call_{i}",
+                            "content": json.dumps(compact, default=str),
+                        }
+                    )
+                    term = "done" if out.get("ok") else "failed"
+                    self._emit_tool_status(name or "tool", term)
+                    budget = speak_budget(
+                        history_turns=len(self.history),
+                        state=state,
+                        tool_name=name,
+                        backend="openrouter",
+                    )
+                    self.voice_one_sentence = budget.voice_one_sentence
+            if not last_text:
+                last_text = "I couldn't get that just now."
+        except Exception as exc:  # noqa: BLE001
+            print(f"[llm] openrouter failed ({type(exc).__name__}: {exc}); failing turn closed")
+            last_text = str(validate_spoken_unit("")["speak"])
+        finally:
+            self.voice_one_sentence = saved_one
+
+        last_text = str(validate_spoken_unit(last_text).get("speak") or last_text)
+        if already_spoken:
+            if self.tts.enabled and self.wait_tts_drain:
+                self.tts.wait_drain(timeout=60)
+            snap = self.tts.timing_snapshot() if self.tts.enabled else {}
+            if snap.get("ttfa_wall") is not None and metrics.ttfa_ms is None:
+                metrics.ttfa_ms = (snap["ttfa_wall"] - wall0) * 1000
+            metrics.tts_ms = snap.get("tts_ms")
+            metrics.tts_synth_ms = snap.get("tts_synth_ms")
+            metrics.tts_play_ms = snap.get("tts_play_ms")
+            metrics.total_latency_ms = (time.perf_counter() - wall0) * 1000
+            self.history.add(user_text, last_text, tool_summary=last_text[:160])
+            if record_session:
+                self.session.add(metrics)
+            return TurnResult(
+                user_text, last_text, metrics, auth_decision, tool_name
+            )
+        return self._speak_tool_line(
+            last_text,
+            wall0=wall0,
+            metrics=metrics,
+            user_text=user_text,
+            auth_decision=auth_decision,
+            tool_name=tool_name,
+            record_session=record_session,
+            add_history=True,
+        )
 
     def _agent_loop(
         self,

@@ -18,6 +18,8 @@ Client: browser UI **or** Qt HMI — **one voice session at a time** (`_MAX_SESS
 | type | payload | notes |
 | --- | --- | --- |
 | `session.update` | `session.arm` / `session.ptt` | arm for PTT profiles |
+| `nova.settings.get` | — | current Local/Cloud LLM catalog |
+| `nova.settings.set` | `mode`, `local_hef`, `or_model`, `ns`, `ns_strength`, `gate_min_rms` | LLM switch and/or voice (DTLN, energy gate) |
 | `input_audio_buffer.append` | `audio`: base64 **PCM16 LE mono 16 kHz** | ~20–40 ms chunks |
 | `response.cancel` | — | barge / stop |
 | `playback.started` | `generation_id`, `t_ms` | first audible chunk |
@@ -37,7 +39,9 @@ Client: browser UI **or** Qt HMI — **one voice session at a time** (`_MAX_SESS
 | `response.done` | turn end; stay SPEAKING until local play queue empty |
 | `playback.cancel` | flush play queue |
 | `nova.research_status` | optional status line |
-| `nova.turn_metrics` | ignore on driver HMI (ops dashboard) |
+| `nova.settings` | `mode`, `local_hef`, `or_model`, catalogs, `has_or_key` |
+| `nova.llm_status` | `loading` / `ready` / `error` |
+| `nova.turn_metrics` | OPS drawer: STT / LLM / TTS / TTFA |
 
 ## UI state mapping
 
@@ -46,6 +50,10 @@ Prefer `nova.fsm.state`. Override:
 - First `response.audio.delta` → show **SPEAKING** until playback queue drains after `response.done`.
 - `playback.cancel` / stop → **INTERRUPTING** then LISTENING.
 
+## Settings (LLM)
+
+Top bar: **NOVA** + Local Hailo / Cloud OpenRouter, FSM in the center, **OPS** / **Chat** / settings on the right. Centered orb like the WebUI. Live YOU/NOVA cards fade; full history is in Chat (user, tool pills, assistant). OPS shows last-turn latencies. Settings: runtime models, noise-gate RMS, DTLN on/off and mix.
+
 ## Non-goals (v1)
 
-Google OAuth UI, settings drawer, dual voice clients, pVAD enrollment, wake-word model.
+Google OAuth UI in the orb, dual voice clients, pVAD enrollment, wake-word model.

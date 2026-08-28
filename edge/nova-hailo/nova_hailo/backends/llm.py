@@ -372,9 +372,17 @@ class HailoLLMCpp:
 
     def clear(self):
         try:
-            self._llm.clear_context()
+            if self._llm is not None:
+                self._llm.clear_context()
         except Exception:
             pass
 
     def release(self):
         self.clear()
+        try:
+            rel = getattr(self._llm, "release", None)
+            if rel is not None:
+                rel()
+        except Exception:
+            pass
+        self._llm = None

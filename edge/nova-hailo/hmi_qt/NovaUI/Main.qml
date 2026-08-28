@@ -17,5 +17,13 @@ ApplicationWindow {
 
     Shell { anchors.fill: parent }
 
-    Shortcut { sequence: "Escape"; onActivated: Qt.quit() }
+    Shortcut {
+        sequence: "Escape"
+        onActivated: {
+            if (nova.settingsOpen || nova.chatOpen || nova.opsOpen)
+                nova.closeDrawers()
+            else
+                Qt.quit()
+        }
+    }
 }
