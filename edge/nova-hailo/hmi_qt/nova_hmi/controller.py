@@ -1,9 +1,10 @@
 """QML-facing controller. Same properties as the NovaController."""
 from __future__ import annotations
 
-from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 
-from nova_hmi.protocol import PHASES, map_fsm_to_phase
+from nova_hmi.protocol import PHASES, integrations_payload, map_fsm_to_phase
 
 DEMO_SCRIPT = [
     ("idle", 1400, None, None),
@@ -54,6 +55,10 @@ class NovaController(QObject):
     nsStrengthChanged = Signal(float)
     gateRmsChanged = Signal(float)
     nsOnChanged = Signal(bool)
+    googleConnectedChanged = Signal(bool)
+    googleNeedsReauthChanged = Signal(bool)
+    connectorsEnabledChanged = Signal(int)
+    connectorsToolsChanged = Signal(int)
 
     def __init__(self, audio, bridge=None, parent=None):
         super().__init__(parent)
@@ -99,6 +104,10 @@ class NovaController(QObject):
         self._ns_strength = 0.5
         self._gate_rms = 0.016
         self._ns_on = True
+        self._google_connected = False
+        self._google_needs_reauth = False
+        self._connectors_enabled = 0
+        self._connectors_tools = 0
         self._ns_timer = QTimer(self)
         self._ns_timer.setSingleShot(True)
         self._ns_timer.setInterval(350)
@@ -137,6 +146,8 @@ class NovaController(QObject):
                 bridge.llmStatus.connect(self._on_llm_status)
             if hasattr(bridge, "turnMetrics"):
                 bridge.turnMetrics.connect(self._on_metrics)
+            if hasattr(bridge, "googleAuthUrl"):
+                bridge.googleAuthUrl.connect(self._on_google_auth_url)
 
         self._speak_watch = QTimer(self)
         self._speak_watch.setSingleShot(True)
@@ -308,6 +319,22 @@ class NovaController(QObject):
     def nsOn(self) -> bool:
         return self._ns_on
 
+    @Property(bool, notify=googleConnectedChanged)
+    def googleConnected(self) -> bool:
+        return self._google_connected
+
+    @Property(bool, notify=googleNeedsReauthChanged)
+    def googleNeedsReauth(self) -> bool:
+        return self._google_needs_reauth
+
+    @Property(int, notify=connectorsEnabledChanged)
+    def connectorsEnabled(self) -> int:
+        return self._connectors_enabled
+
+    @Property(int, notify=connectorsToolsChanged)
+    def connectorsTools(self) -> int:
+        return self._connectors_tools
+
     @Slot()
     def closeDrawers(self) -> None:
         if self._settings_open:
@@ -352,6 +379,35 @@ class NovaController(QObject):
             return
         self._bridge.set_settings(mode, local_hef, or_model)
 
+    @Slot()
+    def connectGoogle(self) -> None:
+        if self._bridge is None or not hasattr(self._bridge, "connect_google"):
+            return
+        self._bridge.connect_google()
+
+    @Slot()
+    def disconnectGoogle(self) -> None:
+        if self._bridge is None or not hasattr(self._bridge, "disconnect_google"):
+            return
+        self._bridge.disconnect_google()
+
+    def _on_google_auth_url(self, url: str) -> None:
+        u = (url or "").strip()
+        if not u:
+            return
+        # A consent screen cannot render usefully on the driver display —
+        # always hand it to a real browser, never render it in-app.
+        QDesktopServices.openUrl(QUrl(u))
+        # The OAuth callback completes on a background thread on the
+        # backend; ask for a fresh snapshot shortly after so the badge can
+        # pick up "connected" without the driver reopening Settings. Mirrors
+        # the browser settings UI's own refreshGoogleStatus() retry.
+        QTimer.singleShot(2500, self._request_settings_refresh)
+
+    def _request_settings_refresh(self) -> None:
+        if self._bridge is not None and hasattr(self._bridge, "request_settings"):
+            self._bridge.request_settings()
+
     def _on_settings(self, payload: dict) -> None:
         mode = str(payload.get("mode") or "local")
         if mode != self._llm_mode:
@@ -392,6 +448,23 @@ class NovaController(QObject):
         if isinstance(orm_list, list) and orm_list:
             self._or_models = orm_list
             self.orModelsChanged.emit()
+        integ = integrations_payload(payload) or {}
+        gc = bool(integ.get("google_connected"))
+        if gc != self._google_connected:
+            self._google_connected = gc
+            self.googleConnectedChanged.emit(gc)
+        gr = bool(integ.get("google_needs_reauth"))
+        if gr != self._google_needs_reauth:
+            self._google_needs_reauth = gr
+            self.googleNeedsReauthChanged.emit(gr)
+        ce = int(integ.get("connectors_enabled") or 0)
+        if ce != self._connectors_enabled:
+            self._connectors_enabled = ce
+            self.connectorsEnabledChanged.emit(ce)
+        ct = int(integ.get("connectors_tools") or 0)
+        if ct != self._connectors_tools:
+            self._connectors_tools = ct
+            self.connectorsToolsChanged.emit(ct)
         tag = "Cloud" if mode == "openrouter" else "Local"
         model = orm if mode == "openrouter" else hef
         self._set_label(f"{tag} · {model}")

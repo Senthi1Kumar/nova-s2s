@@ -5,8 +5,44 @@ Schema: HistoryTurn{user,assistant,tool_summary}; messages list[{role,content}]
 """
 from __future__ import annotations
 
+import re
 from collections import deque
 from dataclasses import dataclass
+
+# Proper-noun-ish tokens. Sentence-initial function words are excluded so a
+# reply merely *starting* with "It" or "The" is not treated as naming an entity.
+_ENTITY_RE = re.compile(r"\b[A-Z][A-Za-z0-9&.\-]{2,}\b")
+_ENTITY_STOPWORDS = frozenset(
+    {
+        "The", "This", "That", "There", "These", "Those", "Then",
+        "It", "Its", "You", "Your", "Yes", "Yeah", "Hey", "Hello",
+        "We", "Our", "They", "Their", "She", "Her", "His", "Him",
+        "What", "When", "Where", "Why", "How", "Who", "Which",
+        "And", "But", "For", "Not", "Sure", "Okay", "Sorry", "Uh", "Um",
+        "Right", "Currently", "Here", "Now", "About", "All", "Let",
+    }
+)
+
+
+def _entities(text: str) -> set[str]:
+    return {m.group(0) for m in _ENTITY_RE.finditer(text or "")} - _ENTITY_STOPWORDS
+
+
+def _leads_with_possessive(reply: str, carried: set[str]) -> bool:
+    """True when the reply OPENS by claiming something about a carried entity.
+
+    The measured bleed was a wrong answer re-subjecting itself turn after turn:
+    "NVIDIA's stock price..." became "NVIDIA's vehicle status...", then
+    "...windows...", "...lights...". That shape -- entity in the possessive, at
+    the head of the sentence -- is the thing worth rejecting.
+
+    Merely mentioning a recurring proper noun is NOT bleed. An assistant named
+    Nova says "Nova" often, and a genuine follow-up ("tell me more" ->
+    "Mahindra also launched...") reuses the topic entity by design. Rejecting
+    those emptied the history and left the model with no context to advance on.
+    """
+    head = (reply or "").lstrip()[:60]
+    return any(head.startswith((f"{e}'s", f"{e}’s")) for e in carried)
 
 
 def _norm(s: str) -> str:
@@ -77,6 +113,16 @@ class ConversationHistory:
         # model refuse the next (unrelated) turn too.
         if _is_refusal(key):
             return
+        # Reject a reply that carries an entity forward from the previous reply
+        # when the current question never mentioned it. A wrong "NVIDIA's stock
+        # price..." answer otherwise mutated into "NVIDIA's vehicle status...",
+        # "...windows...", "...lights..." across later unrelated turns: none of
+        # those are refusals, so the filter above never caught them, and each
+        # bled reply seeded the next.
+        if self._turns:
+            carried = _entities(a) & _entities(self._turns[-1].assistant)
+            if _leads_with_possessive(a, carried - _entities(u)):
+                return
         self._turns.append(
             HistoryTurn(user=u[:240], assistant=a[:240], tool_summary=(tool_summary or None))
         )

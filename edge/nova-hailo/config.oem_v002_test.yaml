@@ -48,6 +48,12 @@ pipeline:
   session_idle_sec: 45
   validate_before_speak: true
   genai_serial: true
+  # Off by default: OpenRouter tool turns only. When on, a web_search tool
+  # pick has Exa itself stream the synthesized spoken answer (type=instant +
+  # outputSchema + stream) instead of a second OpenRouter LLM round composing
+  # it from raw hits -- see nova_hailo.pipeline._openrouter_turn and
+  # nova_hailo.tools.search_mcp.web_search_answer.
+  exa_direct_answer: false
 
 auth:
   enabled: false

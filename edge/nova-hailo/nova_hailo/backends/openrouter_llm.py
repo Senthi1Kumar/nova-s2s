@@ -26,10 +26,19 @@ def _estimate_prompt_tokens(messages: list[dict]) -> int:
     return max(1, total_chars // 4)
 
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
+# Sent as OpenRouter's native `models` array: if the primary is unavailable or
+# errors, OpenRouter falls through in order without costing a second round trip.
+FALLBACK_MODELS = ("thinkingmachines/inkling-small",)
 OR_ALIASES = {
-    "v4-flash": DEFAULT_MODEL,
-    "flash": DEFAULT_MODEL,
-    "deepseek-v4-flash": DEFAULT_MODEL,
+    # Bound to the literal id, not to DEFAULT_MODEL: these name that model, not
+    # "whatever the default happens to be".
+    "v4-flash": "deepseek/deepseek-v4-flash-0731",
+    "flash": "deepseek/deepseek-v4-flash-0731",
+    "deepseek-v4-flash": "deepseek/deepseek-v4-flash-0731",
+    # Fastest first-token of the candidates measured, but it does NOT emit tool
+    # calls under this pipeline's system prompt -- selectable, never the default.
+    "llama-3.3-70b": "meta-llama/llama-3.3-70b-instruct",
+    "llama": "meta-llama/llama-3.3-70b-instruct",
     "v32": "deepseek/deepseek-v3.2",
     "v3.2": "deepseek/deepseek-v3.2",
     "deepseek-v3.2": "deepseek/deepseek-v3.2",
@@ -50,6 +59,24 @@ def resolve_or_model(name: str | None) -> str:
     return OR_ALIASES.get(key, raw)
 
 
+def build_provider_block(
+    sort: str | None = "latency",
+    preferred_max_latency_p90: float | None = None,
+) -> dict[str, Any] | None:
+    """Provider routing hints for the OpenRouter payload.
+
+    ``preferred_max_latency`` is off by default: on this deployment it
+    reorders onto endpoints without warm capacity and raises TTFT rather
+    than bounding it. Kept as an opt-in so the trade-off stays measurable.
+    """
+    block: dict[str, Any] = {}
+    if sort:
+        block["sort"] = {"by": sort}
+    if preferred_max_latency_p90 is not None:
+        block["preferred_max_latency"] = {"p90": float(preferred_max_latency_p90)}
+    return block or None
+
+
 class OpenRouterLLM:
     """Same generate() surface as HailoLLM; last_tool_calls after each call."""
 
@@ -66,6 +93,9 @@ class OpenRouterLLM:
         model: str | None = None,
         client: httpx.Client | None = None,
         timeout_s: float = 45.0,
+        provider_sort: str | None = "latency",
+        preferred_max_latency_p90: float | None = None,
+        fallback_models: tuple[str, ...] | list[str] | None = None,
     ):
         del vdevice, seed
         self.api_key = (
@@ -81,6 +111,12 @@ class OpenRouterLLM:
         self.temperature = float(temperature)
         self.max_tokens = int(max_tokens)
         self.no_think = bool(no_think)
+        self.provider_block = build_provider_block(
+            provider_sort, preferred_max_latency_p90
+        )
+        picked = FALLBACK_MODELS if fallback_models is None else tuple(fallback_models)
+        # Never list the primary twice, and never fall back to itself.
+        self.fallback_models = tuple(m for m in picked if m and m != self.model)
         self.last_metrics: InferenceMetrics | None = None
         self.last_tool_calls: list[dict[str, Any]] = []
         self._owns_client = client is None
@@ -122,11 +158,13 @@ class OpenRouterLLM:
             "temperature": self.temperature,
             "reasoning": {"enabled": False},
             "session_id": sid,
-            "provider": {
-                "sort": {"by": "latency"},
-                "preferred_max_latency": {"p90": 1.5},
-            },
         }
+        if self.fallback_models:
+            # OpenRouter tries these in order if the primary errors or is
+            # unavailable, inside the same request — no extra round trip.
+            payload["models"] = [self.model, *self.fallback_models]
+        if self.provider_block is not None:
+            payload["provider"] = self.provider_block
         if tool_list:
             payload["tools"] = tool_list
             payload["tool_choice"] = tool_choice or "auto"

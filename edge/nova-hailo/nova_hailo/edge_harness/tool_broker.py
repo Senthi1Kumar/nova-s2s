@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 from nova_hailo.edge_harness.policy import CapabilityProfile
@@ -30,6 +31,7 @@ from nova_hailo.edge_harness.types import Intent, RoutedIntent, ToolResult
 from nova_hailo.tools.search_mcp import deep_research as mcp_deep_research
 from nova_hailo.tools.search_mcp import research_status as mcp_research_status
 from nova_hailo.tools.search_mcp import web_search as mcp_web_search
+from nova_hailo.tools.search_mcp import web_search_answer as mcp_web_search_answer
 
 
 # Leading ASR disfluencies stripped before list-all match (not from search needles).
@@ -175,6 +177,29 @@ class ToolBroker:
 
     def _web_search(self, query: str) -> dict[str, Any]:
         return mcp_web_search(query, timeout_sec=self.timeout_sec, serper_fallback=self.serper_fallback)
+
+    def web_search_answer(
+        self,
+        query: str,
+        *,
+        system_prompt: str,
+        on_token: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Exa-synthesized, streamed spoken answer (exa_direct_answer path).
+
+        Same allowlist gate as execute()/WEB_SEARCH, just a different
+        search_mcp entrypoint -- Exa composes the answer itself instead of
+        returning raw hits for a pipeline LLM round to compose from. See
+        nova_hailo.pipeline._openrouter_turn.
+        """
+        if not self.profile.allows(Intent.WEB_SEARCH):
+            return _unavailable("web_search", "tool_not_in_oem_allowlist")
+        return mcp_web_search_answer(
+            query,
+            system_prompt=system_prompt,
+            timeout_sec=self.timeout_sec,
+            on_token=on_token,
+        )
 
     def _ensure_workspace_auth(self) -> dict[str, Any] | None:
         """Require one-time UI/CLI OAuth tokens stored by nova_hailo.google_oauth."""

@@ -9,7 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hmi_qt"))
 
 import httpx
 
-from nova_hailo.backends.openrouter_llm import OpenRouterLLM, resolve_or_model
+from nova_hailo.backends.openrouter_llm import (
+    OpenRouterLLM,
+    build_provider_block,
+    resolve_or_model,
+)
 from nova_hailo.edge_harness.openai_tools import openai_tools_for_profile, tool_call_kwargs
 from nova_hailo.edge_harness.policy import CapabilityProfile
 from nova_hailo.edge_harness.speak_budget import speak_budget
@@ -24,6 +28,39 @@ def test_resolve_or_aliases():
     assert resolve_or_model("qwen3.8-flash") == "qwen/qwen3.8-flash"
     assert resolve_or_model("glm") == "z-ai/glm-4.7-flash"
     assert resolve_or_model("inkling") == "thinkingmachines/inkling-small"
+
+
+def test_provider_block_defaults_to_latency_sort_without_pml():
+    block = build_provider_block(sort="latency", preferred_max_latency_p90=None)
+    assert block == {"sort": {"by": "latency"}}
+
+
+def test_provider_block_opt_in_pml():
+    block = build_provider_block(sort="latency", preferred_max_latency_p90=1.5)
+    assert block["preferred_max_latency"] == {"p90": 1.5}
+
+
+def test_provider_block_omitted_when_unset():
+    assert build_provider_block(sort=None, preferred_max_latency_p90=None) is None
+
+
+def test_generate_payload_has_no_preferred_max_latency_by_default():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            text='data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    llm = OpenRouterLLM(api_key="sk-test", model="v4-flash", client=client)
+    llm.generate([{"role": "user", "content": "hi"}])
+    assert seen["body"]["provider"] == {"sort": {"by": "latency"}}
+    assert "preferred_max_latency" not in seen["body"]["provider"]
+    assert seen["body"]["session_id"]  # sticky routing stays on
 
 
 def test_openai_tools_allowlist_only():
@@ -78,7 +115,8 @@ def _sse_client(chunks: list[dict] | list[str]) -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
         assert b"reasoning" in request.content
         assert b'"enabled": false' in request.content or b'"enabled":false' in request.content
-        assert b"preferred_max_latency" in request.content
+        assert b"preferred_max_latency" not in request.content
+        assert b'"by": "latency"' in request.content or b'"by":"latency"' in request.content
         assert b"session_id" in request.content
         return httpx.Response(
             200, text=body, headers={"Content-Type": "text/event-stream"}

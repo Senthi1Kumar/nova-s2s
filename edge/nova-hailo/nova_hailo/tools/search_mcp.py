@@ -6,8 +6,10 @@ is optional when the `mcp` package is installed.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -34,10 +36,15 @@ from nova_hailo.tools.search_clean import (
 )
 
 TAVILY_URL = "https://api.tavily.com/search"
+EXA_SEARCH_URL = "https://api.exa.ai/search"
 RESEARCH_FILLER = "Looking that up."
 DEFAULT_SEARCH_TIMEOUT = 1.5
 # Exa contents.summary + highlights need more than the Brave snippet budget.
 EXA_TIMEOUT_SEC = 8.0
+# exa_search_answer() streams a synthesized answer rather than raw hits --
+# slower to fully complete than the plain search (it's a generation, not a
+# lookup), so it gets its own, larger floor than EXA_TIMEOUT_SEC.
+EXA_ANSWER_TIMEOUT_SEC = 12.0
 DEFAULT_TAVILY_TIMEOUT = 12.0
 
 
@@ -267,11 +274,16 @@ def _first_highlight(raw: Any) -> str:
 
 
 def _exa_body(result: dict[str, Any], query: str) -> str:
-    """Prefer Exa's query-aware summary, then highlights, then page text.
+    """Prefer Exa's query-aware highlights, then page text.
 
     Without this, news speak is the first 180 chars of raw extract — bylines,
     dates, 'min read' — the metadata-like line users hear when the Qwen
-    summarizer is off.
+    summarizer is off. Highlights are query-relevant excerpts, so they skip
+    that boilerplate.
+
+    ``summary`` is still read first when present, but ``exa_search`` no longer
+    requests it; the branch stays so any caller that does ask for one keeps
+    working.
     """
     summary = _strip_markdown(str(result.get("summary") or "")).strip()
     highlight = _strip_markdown(_first_highlight(result.get("highlights")))
@@ -281,24 +293,28 @@ def _exa_body(result: dict[str, Any], query: str) -> str:
     return summary or highlight or text
 
 
-def exa_search(
-    query: str, api_key: str, timeout_sec: float = DEFAULT_SEARCH_TIMEOUT, type_: str = "fast"
-) -> list[dict[str, str]]:
-    """Raw REST call (api.exa.ai), matching brave_search/serper_search's
-    style — REST only (httpx); no exa-py SDK. type="fast"
-    is the fastest reliable option of the real-time search types, with
-    richer per-result text than Brave/Serper (see CHANGELOG.md)."""
+def _exa_content_query_payload(query: str, type_: str) -> dict[str, Any]:
+    """Shared request body: contents/category/startPublishedDate/maxAgeHours.
+
+    Used by both ``exa_search`` (raw hits) and ``exa_search_answer`` (Exa-side
+    synthesized answer) so the two request shapes stay in lockstep -- tuning
+    one (e.g. highlight length, news freshness window) tunes the other.
+    """
     stockish = _is_stock_query(query)
-    # Longer excerpts for quotes/news so the top line isn't just a headline.
-    max_chars = 900 if stockish else 700
+    # Quotes need a wider excerpt so the number survives truncation.
+    max_chars = 700 if stockish else 500
     contents: dict[str, Any] = {
         "text": {"maxCharacters": max_chars},
         "highlights": {"query": query, "maxCharacters": 400},
     }
     if not stockish:
-        # Exa-side abstractive summary (Gemini Flash). Replaces the old Qwen
-        # second pass for news/general; skip on stocks so we keep the quote.
-        contents["summary"] = {"query": query}
+        # Cache-only (never livecrawl). Livecrawl is the largest remaining
+        # source of tail latency, and an article's body does not change after
+        # publication -- which results come back is governed by the index and
+        # startPublishedDate, not by re-fetching each page. Stock quotes are
+        # the exception (the number on the page moves), so they keep the
+        # default livecrawl-as-fallback behaviour.
+        contents["maxAgeHours"] = -1
     payload: dict[str, Any] = {
         "query": query,
         "type": type_,
@@ -310,8 +326,29 @@ def exa_search(
         # Last 7 days so "current news" is not a 1972 headline or a site about-page.
         start = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00.000Z")
         payload["startPublishedDate"] = start
+    return payload
+
+
+def exa_search(
+    query: str, api_key: str, timeout_sec: float = DEFAULT_SEARCH_TIMEOUT, type_: str = "instant"
+) -> list[dict[str, str]]:
+    """Raw REST call (api.exa.ai), matching brave_search/serper_search's
+    style — REST only (httpx); no exa-py SDK.
+
+    Tuned to Exa's voice-agent guidance: ``instant`` is the lowest-latency
+    search type, and query-relevant ``highlights`` carry the answer in far
+    fewer tokens than full page text.
+
+    ``contents.summary`` is deliberately NOT requested. It runs an abstractive
+    LLM per result on Exa's side, so its synthesis cost stacks on top of the
+    base search type. The spoken answer is composed by the pipeline's own LLM
+    round anyway, making the summary duplicated work — and it prefixed bodies
+    with literal "Summary:" / "Key points:" markers that reached the TTS.
+    """
+    stockish = _is_stock_query(query)
+    payload = _exa_content_query_payload(query, type_)
     resp = httpx.post(
-        "https://api.exa.ai/search",
+        EXA_SEARCH_URL,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         json=payload,
         timeout=timeout_sec,
@@ -329,6 +366,89 @@ def exa_search(
             c["snippet"] = re.sub(r"\s+", " ", body).strip()[: 480 if stockish else 400]
         out.append(c)
     return out
+
+
+def exa_search_answer(
+    query: str,
+    api_key: str,
+    *,
+    system_prompt: str,
+    timeout_sec: float = EXA_ANSWER_TIMEOUT_SEC,
+    type_: str = "instant",
+    on_token: Callable[[str], None] | None = None,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """Exa /search with outputSchema + systemPrompt + stream:true.
+
+    Exa synthesizes the spoken answer itself instead of returning raw hits
+    for a second LLM round to compose from. It streams back OpenAI-compatible
+    SSE -- ``choices[0].delta.content`` per piece -- the same shape
+    ``OpenRouterLLM.generate()`` already parses, so ``on_token`` can be the
+    pipeline's existing token_cb and feed straight into the same
+    first_complete_clause -> _emit_validated_clause -> TTS path.
+
+    Measured on this Pi: type=instant reaches the first synthesized token in
+    ~988ms, replacing an Exa search (~910ms) plus a second OpenRouter LLM
+    call's TTFT (~650ms) -- about 1560ms today, one whole round trip fewer.
+
+    Raises on any transport/HTTP failure -- no swallowing here. Same split as
+    exa_search()/web_search(): the low-level call raises, the wrapper
+    (web_search_answer) is what fails closed.
+    """
+    payload = _exa_content_query_payload(query, type_)
+    payload["stream"] = True
+    payload["systemPrompt"] = system_prompt
+    payload["outputSchema"] = {
+        "type": "text",
+        "description": "One short spoken sentence answering the question.",
+    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    text_parts: list[str] = []
+    grounding: Any = None
+
+    def _consume(resp: httpx.Response) -> None:
+        nonlocal grounding
+        if resp.status_code >= 400:
+            body = resp.read().decode("utf-8", "replace")[:400]
+            raise RuntimeError(f"Exa HTTP {resp.status_code}: {body}")
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            if isinstance(line, bytes):
+                line = line.decode("utf-8", "replace")
+            if line.startswith(":") or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choices = chunk.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    text_parts.append(piece)
+                    if on_token is not None:
+                        on_token(piece)
+            out_field = chunk.get("output")
+            if isinstance(out_field, dict) and out_field.get("grounding") is not None:
+                grounding = out_field.get("grounding")
+
+    if client is not None:
+        with client.stream(
+            "POST", EXA_SEARCH_URL, headers=headers, json=payload, timeout=timeout_sec
+        ) as resp:
+            _consume(resp)
+    else:
+        with httpx.stream(
+            "POST", EXA_SEARCH_URL, headers=headers, json=payload, timeout=timeout_sec
+        ) as resp:
+            _consume(resp)
+
+    return {"text": "".join(text_parts).strip(), "grounding": grounding}
 
 
 def answer_from_hits(query: str, hits: list, *, tool_name: str = "web_search") -> dict[str, Any]:
@@ -373,7 +493,7 @@ def web_search(
     timeout_sec: float = DEFAULT_SEARCH_TIMEOUT,
     serper_fallback: bool = False,
 ) -> dict[str, Any]:
-    """Exa only (type=fast + summary/highlights). No Brave/Serper.
+    """Exa only (type=instant + highlights/text). No Brave/Serper.
 
     ``serper_fallback`` is ignored — kept so ToolBroker's kwargs stay valid.
     Fail closed if EXA_API_KEY is missing or the Exa call fails/times out.
@@ -391,7 +511,7 @@ def web_search(
             search_q,
             exa,
             timeout_sec=max(float(timeout_sec), EXA_TIMEOUT_SEC),
-            type_="fast",
+            type_="instant",
         )
     except Exception as exc:  # noqa: BLE001
         return _unavailable("web_search", f"exa_failed:{exc}")
@@ -400,6 +520,52 @@ def web_search(
     out = answer_from_hits(q, hits)
     if isinstance(out.get("result"), dict):
         out["result"]["provider"] = "exa"
+    return out
+
+
+def web_search_answer(
+    query: str,
+    *,
+    system_prompt: str,
+    timeout_sec: float = DEFAULT_SEARCH_TIMEOUT,
+    on_token: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Exa-synthesized spoken answer, streamed via ``on_token`` as it arrives.
+
+    Config-gated alternate to web_search() + a second LLM round (see
+    pipeline._openrouter_turn's exa_direct_answer branch): Exa answers the
+    question itself (type=instant + outputSchema + stream) instead of Nova's
+    own LLM composing from raw hits, removing that second round trip. Same
+    fail-closed contract as web_search(): a missing EXA_API_KEY or a failed
+    Exa call returns ok=False/unavailable rather than raising into the
+    pipeline.
+    """
+    q = _normalize_query(query)
+    if not q:
+        return _unavailable("web_search", "empty_query")
+    search_q = _stock_search_query(q) or q
+    exa = (os.environ.get("EXA_API_KEY") or "").strip()
+    if not exa:
+        return _unavailable("web_search", "no_exa_api_key")
+    try:
+        result = exa_search_answer(
+            search_q,
+            exa,
+            system_prompt=system_prompt,
+            timeout_sec=max(float(timeout_sec), EXA_ANSWER_TIMEOUT_SEC),
+            type_="instant",
+            on_token=on_token,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable("web_search", f"exa_answer_failed:{exc}")
+    text = str(result.get("text") or "").strip()
+    if not text:
+        return _unavailable("web_search", "exa_answer_empty")
+    out = _ok(
+        "web_search",
+        text,
+        {"provider": "exa_direct", "grounding": result.get("grounding")},
+    )
     return out
 
 
@@ -602,6 +768,9 @@ __all__ = [
     "RESEARCH_FILLER",
     "POLL_INTERVAL_SEC",
     "web_search",
+    "web_search_answer",
+    "exa_search",
+    "exa_search_answer",
     "deep_research",
     "research_status",
     "build_fastmcp_app",

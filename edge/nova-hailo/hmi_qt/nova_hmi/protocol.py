@@ -73,6 +73,35 @@ def settings_payload(msg: dict) -> dict | None:
     return msg
 
 
+def integrations_payload(msg: dict) -> dict | None:
+    """Pull the read-only Google + connector status out of a nova.settings event.
+
+    Tolerant of an older backend that has not been upgraded to send the
+    "google"/"connectors" keys yet: a missing or malformed value for either
+    just degrades to a disconnected/empty snapshot instead of raising.
+    """
+    if msg.get("type") != "nova.settings":
+        return None
+    google = msg.get("google")
+    google = google if isinstance(google, dict) else {}
+    connectors = msg.get("connectors")
+    connectors = connectors if isinstance(connectors, dict) else {}
+    try:
+        enabled = int(connectors.get("enabled") or 0)
+    except (TypeError, ValueError):
+        enabled = 0
+    try:
+        tools = int(connectors.get("tools") or 0)
+    except (TypeError, ValueError):
+        tools = 0
+    return {
+        "google_connected": bool(google.get("connected")),
+        "google_needs_reauth": bool(google.get("needs_reauth")),
+        "connectors_enabled": enabled,
+        "connectors_tools": tools,
+    }
+
+
 def tool_status_label(msg: dict) -> str | None:
     if msg.get("type") != "nova.tool_status":
         return None

@@ -43,6 +43,7 @@ class RealtimeBridge(QObject):
     settingsChanged = Signal(dict)
     llmStatus = Signal(str)
     turnMetrics = Signal(dict)
+    googleAuthUrl = Signal(str)
 
     def __init__(self, url: str, parent=None):
         super().__init__(parent)
@@ -112,6 +113,12 @@ class RealtimeBridge(QObject):
                 "or_model": or_model,
             }
         )
+
+    def connect_google(self) -> None:
+        self.send({"type": "nova.google.connect"})
+
+    def disconnect_google(self) -> None:
+        self.send({"type": "nova.google.disconnect"})
 
     def set_voice_settings(self, *, gate_min_rms=None, ns=None, ns_strength=None) -> None:
         payload: dict = {"type": "nova.settings.set"}
@@ -191,6 +198,14 @@ class RealtimeBridge(QObject):
             if state:
                 self.fsmReceived.emit(state)
                 self.phaseReceived.emit(map_fsm_to_phase(state))
+            return
+        if kind == "nova.google.auth_url":
+            url = str(msg.get("auth_url") or "").strip()
+            if url:
+                self.googleAuthUrl.emit(url)
+            else:
+                err = msg.get("error") or "no auth_url returned"
+                print(f"[hmi] google oauth start failed: {err}", flush=True)
             return
         user = is_user_transcript(msg)
         if user:

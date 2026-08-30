@@ -21,6 +21,10 @@ _CONTROL_RE = re.compile(
     re.I,
 )
 _HEADER_LOOP_RE = re.compile(r"start\s*header|end\s*header|eot_id|im_end|im_start", re.I)
+# A list marker left stranded at the end of a truncated answer: " 2." or " 2)"
+# preceded by a real sentence end. The lookbehind is what keeps "costs $5." and
+# "back in 2024." safe -- those digits are not preceded by sentence punctuation.
+_ORPHAN_LIST_MARKER_RE = re.compile(r"(?<=[.?!])\s+\d{1,2}[.)]\s*$")
 _ROLE_LEAK_RE = re.compile(
     r"\b(system|assistant|user)\s*:\s|"
     r"^as an ai\b|"
@@ -85,13 +89,25 @@ def validate_spoken_unit(
     # the stump. Trim back to the last complete sentence; only keep an unpunctuated
     # tail if there is no complete sentence to fall back to.
     cleaned = re.sub(r"\s+", " ", t).strip()
+    # A numbered list truncated right after its marker ("... on a deal. 2.")
+    # already ends in "." so the fragment check below skips it -- but the
+    # dangling marker is not a sentence, and TTS reads it aloud as "two".
+    # Only a bare 1-2 digit marker following a real sentence end is stripped,
+    # so legitimate tails like "... costs $5." or "... back in 2024." survive.
+    if _ORPHAN_LIST_MARKER_RE.search(cleaned):
+        cleaned = _ORPHAN_LIST_MARKER_RE.sub("", cleaned).strip()
+        failures.append("trimmed_incomplete_sentence")
     if cleaned and cleaned[-1] not in ".?!":
         cut = max(cleaned.rfind(c) for c in ".?!")
         if cut >= 20:
             cleaned = cleaned[: cut + 1].strip()
             failures.append("trimmed_incomplete_sentence")
         elif not cleaned.endswith(("...", ",")):
-            cleaned = cleaned.rstrip(" ,;:-") + "."
+            # Em-dash and en-dash belong here beside the ASCII hyphen: the
+            # first-chunk splitter can cut a clause at one, and without them the
+            # trailing dash survives and gets a period bolted onto it, so TTS
+            # reads "You're all caught up --." with a dangling beat.
+            cleaned = cleaned.rstrip(" ,;:-—–") + "."
     ok = True
     hard = {
         "control_token",
@@ -114,13 +130,73 @@ def validate_spoken_unit(
     }
 
 
-def first_complete_clause(buffer: str, *, min_chars: int = 24) -> tuple[str | None, str]:
-    """Split first sentence-ending clause; return (clause_or_None, remainder)."""
+# Tokens whose trailing "." is not a sentence end. Case-insensitive match on
+# the word immediately before the period (internal periods kept, so "e.g"
+# and "i.e" match as written). A lone capital letter (an initial, as in
+# "J. R. Smith") is handled separately in _is_abbreviation_before_period.
+_ABBREVIATIONS = frozenset(
+    {
+        "dr", "mr", "mrs", "ms", "st", "jr", "sr", "prof",
+        "ave", "blvd", "rd", "ct",
+        "e.g", "i.e", "etc", "vs", "approx", "no",
+    }
+)
+
+
+def _preceding_token(buf: str, end: int) -> str:
+    """Run of non-whitespace characters ending just before index ``end``."""
+    start = end
+    while start > 0 and not buf[start - 1].isspace():
+        start -= 1
+    return buf[start:end]
+
+
+def _is_abbreviation_before_period(buf: str, period_index: int) -> bool:
+    token = _preceding_token(buf, period_index)
+    if not token:
+        return False
+    if token.lower() in _ABBREVIATIONS:
+        return True
+    return len(token) == 1 and token.isalpha() and token.isupper()
+
+
+def first_complete_clause(
+    buffer: str, *, min_chars: int = 24, extra_boundaries: str = ""
+) -> tuple[str | None, str]:
+    """Split first sentence-ending clause; return (clause_or_None, remainder).
+
+    ``extra_boundaries`` adds characters as valid split points alongside the
+    default ".?!" (e.g. ",;:—–" for a shorter first spoken unit). Empty by
+    default, so every existing caller keeps today's sentence-only behaviour.
+
+    A boundary character only counts if it ends the buffer or is followed by
+    whitespace. Without this, "3:30", "82.5 percent", and "16:9" get mistaken
+    for clause ends -- a ":"/"." glued to the next digit is mid-value, not a
+    sentence boundary, for both the default ".?!" set and extra_boundaries.
+
+    Two further carve-outs apply to "." specifically: a period preceded by a
+    known abbreviation ("Dr.", "St.", "e.g.", a lone initial like "J.") is
+    not a sentence end; and a period at the very end of the buffer preceded
+    by a digit ("...is 3.") is treated as mid-decimal, not yet resolved --
+    return (None, buffer) so the caller waits for more streamed input rather
+    than guessing that "3." is the whole number.
+    """
     buf = buffer or ""
+    boundaries = ".?!" + extra_boundaries
+    n = len(buf)
     for i, ch in enumerate(buf):
-        if ch in ".?!" and i + 1 >= min_chars:
-            clause = buf[: i + 1].strip()
-            rest = buf[i + 1 :]
-            if clause:
-                return clause, rest
+        if ch not in boundaries or i + 1 < min_chars:
+            continue
+        at_end = i + 1 >= n
+        if not at_end and not buf[i + 1].isspace():
+            continue
+        if ch == ".":
+            if _is_abbreviation_before_period(buf, i):
+                continue
+            if at_end and i > 0 and buf[i - 1].isdigit():
+                continue
+        clause = buf[: i + 1].strip()
+        rest = buf[i + 1 :]
+        if clause:
+            return clause, rest
     return None, buf

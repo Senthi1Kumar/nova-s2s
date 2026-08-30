@@ -316,6 +316,31 @@
   }
   #gcal-pill.ok { color: var(--teal); border-color: #1a4a44; background: #0f2a27; }
   #gcal-pill.bad { color: var(--amber); border-color: #4a3a1a; background: #2a2210; }
+  .connector-row {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+  }
+  .connector-row:last-child { border-bottom: none; }
+  .connector-main { min-width: 0; }
+  .connector-label { font-size: .88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .connector-meta { font-size: .72rem; color: var(--muted); margin-top: 2px; }
+  .connector-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .connector-toggle {
+    font-size: .7rem; letter-spacing: .04em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); cursor: pointer;
+    background: transparent; color: var(--muted);
+  }
+  .connector-toggle.on { color: var(--teal); border-color: #1a4a44; background: #0f2a27; }
+  .connector-remove {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 8px; width: 26px; height: 26px; cursor: pointer; font-size: .85rem; line-height: 1;
+  }
+  .connector-remove:hover { color: var(--amber); border-color: #4a3a1a; }
+  .connector-empty { font-size: .82rem; color: var(--muted); padding: 4px 0; }
+  #connector-add-row input {
+    width: 100%; background: #0a0d13; color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: .85rem; font-family: inherit; margin-top: 6px;
+  }
   #log { font-size: 0.72em; color: #55606f; margin-top: 12px; white-space: pre-wrap;
          word-break: break-word; max-height: 80px; overflow-y: auto; }
   a.dash-link {
@@ -399,6 +424,16 @@
       <div class="hint" id="gcal-hint">Tokens stay on this device under <code>runtime/google_oauth/</code>.</div>
     </div>
     <div class="field">
+      <label>Connectors</label>
+      <div id="connectors-list"></div>
+      <div id="connector-add-row">
+        <input type="text" id="connector-label" placeholder="Label (e.g. My Notes)">
+        <input type="text" id="connector-url" placeholder="https://example.com/mcp">
+        <button class="btn-secondary" id="connector-add" type="button">Add connector</button>
+      </div>
+      <div class="hint" id="connectors-hint">New connectors start OFF and change nothing until you enable them. Each enabled tool is added to every turn, so only turn on what you use. Up to 8 connectors, 32 tools total.</div>
+    </div>
+    <div class="field">
       <label>Instructions</label>
       <textarea id="instructions" placeholder="Loading persona…"></textarea>
     </div>
@@ -439,6 +474,11 @@
   const gcalPill = document.getElementById('gcal-pill');
   const gcalConnect = document.getElementById('gcal-connect');
   const gcalDisconnect = document.getElementById('gcal-disconnect');
+  const connectorsListEl = document.getElementById('connectors-list');
+  const connectorLabelInput = document.getElementById('connector-label');
+  const connectorUrlInput = document.getElementById('connector-url');
+  const connectorAddBtn = document.getElementById('connector-add');
+  const connectorsHint = document.getElementById('connectors-hint');
 
   const DEFAULT_PLAYBACK_RATE = 24000;
   const STATUS_TEXT = {
@@ -609,9 +649,12 @@
   function refreshGoogleStatus() {
     fetch('/integrations/google').then(r => r.json()).then(s => {
       const ok = !!(s.authenticated || s.connected);
-      gcalPill.textContent = ok ? 'Connected' : 'Disconnected';
-      gcalPill.className = ok ? 'ok' : 'bad';
-      gcalConnect.style.display = ok ? 'none' : 'block';
+      // A refresh token Google has revoked still reports authenticated, so the
+      // backend flags it separately. Offer Connect, not a misleading "Connected".
+      const stale = ok && !!s.needs_reauth;
+      gcalPill.textContent = stale ? 'Reconnect needed' : (ok ? 'Connected' : 'Disconnected');
+      gcalPill.className = (ok && !stale) ? 'ok' : 'bad';
+      gcalConnect.style.display = (ok && !stale) ? 'none' : 'block';
       gcalDisconnect.style.display = ok ? 'block' : 'none';
     }).catch(() => {});
   }
@@ -631,6 +674,101 @@
     fetch('/integrations/google/disconnect', { method: 'POST' })
       .then(() => refreshGoogleStatus()).catch(() => {});
   });
+
+  // —— Connectors (user-added MCP servers) ——
+  // Every enabled tool rides along on every turn, so this UI exists mainly to
+  // make that cost visible, not to make adding connectors frictionless.
+  function connectorHost(url) {
+    try { return new URL(url).host; } catch (e) { return url; }
+  }
+  function renderConnectors(data) {
+    if (!connectorsListEl) return;
+    const list = (data && data.connectors) || [];
+    connectorsListEl.innerHTML = '';
+    if (list.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'connector-empty';
+      empty.textContent = 'No connectors added yet.';
+      connectorsListEl.appendChild(empty);
+    }
+    list.forEach((c) => {
+      const row = document.createElement('div');
+      row.className = 'connector-row';
+      const main = document.createElement('div');
+      main.className = 'connector-main';
+      const label = document.createElement('div');
+      label.className = 'connector-label';
+      label.textContent = c.label || c.id;
+      const meta = document.createElement('div');
+      meta.className = 'connector-meta';
+      const toolCount = (c.tools || []).length;
+      meta.textContent = connectorHost(c.url) + ' · ' + toolCount + (toolCount === 1 ? ' tool' : ' tools');
+      main.appendChild(label);
+      main.appendChild(meta);
+
+      const actions = document.createElement('div');
+      actions.className = 'connector-actions';
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'connector-toggle' + (c.enabled ? ' on' : '');
+      toggle.textContent = c.enabled ? 'On' : 'Off';
+      toggle.title = c.enabled ? 'Disable this connector' : 'Enable this connector';
+      toggle.addEventListener('click', () => {
+        toggle.disabled = true;
+        const path = '/integrations/connectors/' + encodeURIComponent(c.id) + (c.enabled ? '/disable' : '/enable');
+        fetch(path, { method: 'POST' }).then((r) => r.json()).then((d) => {
+          if (d && d.error) { log('Connector: ' + d.error); refreshConnectors(); return; }
+          renderConnectors(d);
+        }).catch((e) => { log('Connector toggle failed: ' + e.message); refreshConnectors(); })
+          .finally(() => { toggle.disabled = false; });
+      });
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'connector-remove';
+      remove.title = 'Remove connector';
+      remove.textContent = '×';
+      remove.addEventListener('click', () => {
+        remove.disabled = true;
+        fetch('/integrations/connectors/' + encodeURIComponent(c.id), { method: 'DELETE' })
+          .then(() => refreshConnectors())
+          .catch((e) => log('Connector remove failed: ' + e.message))
+          .finally(() => { remove.disabled = false; });
+      });
+      actions.appendChild(toggle);
+      actions.appendChild(remove);
+
+      row.appendChild(main);
+      row.appendChild(actions);
+      connectorsListEl.appendChild(row);
+    });
+    if (connectorsHint && data) {
+      connectorsHint.textContent = 'Enabled tools: ' + (data.enabled_tool_total || 0) + ' / ' + data.max_total_tools +
+        ' · Connectors: ' + list.length + ' / ' + data.max_connectors +
+        '. New connectors start OFF and change nothing until you enable them.';
+    }
+  }
+  function refreshConnectors() {
+    fetch('/integrations/connectors').then((r) => r.json()).then(renderConnectors).catch(() => {});
+  }
+  refreshConnectors();
+  if (connectorAddBtn) {
+    connectorAddBtn.addEventListener('click', () => {
+      const label = (connectorLabelInput.value || '').trim();
+      const url = (connectorUrlInput.value || '').trim();
+      if (!label || !url) { log('Connector: label and url are required'); return; }
+      connectorAddBtn.disabled = true;
+      fetch('/integrations/connectors', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: label, url: url }),
+      }).then((r) => r.json()).then((d) => {
+        if (d && d.error) { log('Connector: ' + d.error); return; }
+        connectorLabelInput.value = '';
+        connectorUrlInput.value = '';
+        renderConnectors(d);
+      }).catch((e) => log('Add connector failed: ' + e.message))
+        .finally(() => { connectorAddBtn.disabled = false; });
+    });
+  }
 
   // —— config / gate ——
   function dbToThreshold(db) {

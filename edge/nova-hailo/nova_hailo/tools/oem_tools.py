@@ -127,6 +127,21 @@ class OemToolGateway:
     def poll_research(self, job_id: str) -> dict[str, Any]:
         return self._broker.poll_research(job_id)
 
+    def execute_web_search_answer(
+        self,
+        query: str,
+        *,
+        system_prompt: str,
+        on_token: Any = None,
+    ) -> dict[str, Any]:
+        """exa_direct_answer path (see nova_hailo.pipeline._openrouter_turn):
+        Exa streams its own synthesized spoken answer via ``on_token``
+        instead of returning raw hits for a second LLM round to compose
+        from. Routes through ToolBroker like every other tool call."""
+        return self._broker.web_search_answer(
+            query, system_prompt=system_prompt, on_token=on_token
+        )
+
     def _search_again_routed(self, query: str) -> RoutedIntent | None:
         """If query is search-again/pure-meta and last tool was search, re-run it."""
         if not is_search_again(query):

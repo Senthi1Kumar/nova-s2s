@@ -15,6 +15,8 @@ from pydantic import BaseModel
 
 from nova_hailo.bench import BenchTracker, PowerMonitor
 from nova_hailo.config import ROOT, AppConfig
+from nova_hailo.connectors import mcp_client
+from nova_hailo.connectors import registry as connector_registry
 from nova_hailo.google_oauth import (
     GoogleTokenProvider,
     begin_ui_oauth_flow,
@@ -239,6 +241,94 @@ async def google_disconnect():
     """Forget stored refresh tokens locally (does not revoke at Google)."""
     GoogleTokenProvider().store.clear()
     return {"status": "disconnected", "authenticated": False}
+
+
+class ConnectorCreateRequest(BaseModel):
+    label: str
+    url: str
+    kind: str = "mcp_http"
+
+
+def _connectors_payload() -> dict:
+    return {
+        "connectors": connector_registry.list_connectors(),
+        "max_connectors": connector_registry.MAX_CONNECTORS,
+        "max_total_tools": connector_registry.MAX_TOTAL_TOOLS,
+        "enabled_tool_total": connector_registry.total_enabled_tools(),
+    }
+
+
+def _refresh_tools_best_effort(cid: str, url: str) -> None:
+    """Fetch a connector's live tool list so the UI can show a real count.
+
+    Best-effort only: an offline or misconfigured MCP server must never
+    block adding/enabling a connector. Never raises.
+    """
+    try:
+        tools = mcp_client.list_tools(url)
+    except Exception:
+        return
+    try:
+        connector_registry.set_tools(cid, tools)
+    except connector_registry.ConnectorError:
+        pass
+
+
+@app.get("/integrations/connectors")
+async def connectors_list():
+    """Settings panel: the user's own MCP/connector list. Not yet wired into
+    the LLM tool schema -- see nova_hailo/connectors/registry.py."""
+    return _connectors_payload()
+
+
+@app.post("/integrations/connectors")
+async def connectors_create(req: ConnectorCreateRequest):
+    try:
+        connector = connector_registry.add_connector(req.label, req.url, req.kind)
+    except connector_registry.ConnectorError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    # uvicorn runs this app single-process/single-loop and the realtime
+    # websocket session shares that same loop -- mcp_client makes a
+    # synchronous httpx call, so it must run off-loop or a slow/unreachable
+    # connector server stalls a live voice turn for up to its timeout.
+    await asyncio.to_thread(_refresh_tools_best_effort, connector["id"], connector["url"])
+    return _connectors_payload()
+
+
+@app.post("/integrations/connectors/{cid}/enable")
+async def connectors_enable(cid: str):
+    connectors = connector_registry.list_connectors()
+    existing = next((c for c in connectors if c.get("id") == cid), None)
+    if existing is not None:
+        # Refresh right before enabling -- the cap check below must use a
+        # fresh tool count, not whatever was known when the connector was
+        # added. Offloaded to a thread for the same reason as above: this is
+        # a blocking network call on the same loop the voice session uses.
+        await asyncio.to_thread(_refresh_tools_best_effort, cid, existing["url"])
+    try:
+        connector_registry.enable_connector(cid)
+    except connector_registry.ConnectorNotFoundError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+    except connector_registry.ConnectorError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    return _connectors_payload()
+
+
+@app.post("/integrations/connectors/{cid}/disable")
+async def connectors_disable(cid: str):
+    try:
+        connector_registry.disable_connector(cid)
+    except connector_registry.ConnectorNotFoundError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+    return _connectors_payload()
+
+
+@app.delete("/integrations/connectors/{cid}")
+async def connectors_delete(cid: str):
+    ok = connector_registry.remove_connector(cid)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "connector not found"})
+    return _connectors_payload()
 
 
 @app.websocket("/v1/realtime")

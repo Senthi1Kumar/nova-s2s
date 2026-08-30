@@ -49,6 +49,15 @@ from nova_hailo.web.nemo_wait_budget import (
 
 from nova_hailo.web.vad import create_vad_segmenter
 
+# How often to check for a finished async research job. Short enough that a
+# result feels prompt, long enough to cost nothing when there is no job.
+RESEARCH_TICK_SEC = 2.0
+# Speaking a finished result is safe in either quiet state. ARMED matters most:
+# fsm.arm() parks the session there after every turn, and with a quiet user the
+# ARMED->IDLE transition -- evaluated only when something calls into the FSM --
+# may never happen at all.
+_RESEARCH_QUIET_STATES = frozenset({SessionState.IDLE, SessionState.ARMED})
+
 
 def _transcript_is_echo(user: str, last_assistant: str) -> bool:
     """True when ASR likely captured Nova's own last speak-back."""
@@ -73,6 +82,79 @@ def _pcm16_b64(audio: np.ndarray) -> str:
 
 def _b64_pcm16(data: str) -> bytes:
     return base64.b64decode(data.encode("ascii") if isinstance(data, str) else data)
+
+
+def _integrations_snapshot() -> dict[str, Any]:
+    """Read-only Google + connector status for the QML driver face.
+
+    The QML driver face only ever shows this, never configures it (that stays
+    in the browser settings UI), so a stale or missing value must never block
+    a turn. Each lookup is independently wrapped: a failure in one must not
+    take out the other, and any failure falls back to a disconnected/empty
+    state rather than raising.
+    """
+    google = {"connected": False, "needs_reauth": False}
+    try:
+        from nova_hailo.google_oauth import integration_status
+
+        status = integration_status() or {}
+        needs_reauth = bool(status.get("needs_reauth"))
+        google = {
+            "connected": bool(status.get("authenticated")) and not needs_reauth,
+            "needs_reauth": needs_reauth,
+        }
+    except Exception:
+        pass
+
+    connectors = {"enabled": 0, "tools": 0}
+    try:
+        from nova_hailo.connectors.registry import list_connectors, total_enabled_tools
+
+        enabled = sum(1 for c in (list_connectors() or []) if c.get("enabled"))
+        connectors = {"enabled": enabled, "tools": int(total_enabled_tools() or 0)}
+    except Exception:
+        pass
+
+    return {"google": google, "connectors": connectors}
+
+
+def _google_connect_payload() -> dict[str, Any]:
+    """Kick off (or resume) the Google OAuth flow for a websocket client.
+
+    Read-only from the QML driver face's perspective: it only ever receives
+    this reply and opens ``auth_url`` in a real browser -- an OAuth consent
+    screen cannot render usefully on the driver display. Mirrors the REST
+    ``/integrations/google/auth/start`` handler in web/app.py so both
+    surfaces share one behavior. Any failure to start the flow degrades to
+    an error reply instead of raising into the WS reader loop.
+    """
+    from nova_hailo.google_oauth import begin_ui_oauth_flow
+
+    try:
+        result = begin_ui_oauth_flow() or {}
+    except Exception as exc:  # noqa: BLE001
+        return {"type": "nova.google.auth_url", "auth_url": None, "error": str(exc)}
+    return {
+        "type": "nova.google.auth_url",
+        "auth_url": result.get("auth_url"),
+        "status": result.get("status"),
+    }
+
+
+def _google_disconnect_payload() -> dict[str, Any]:
+    """Forget stored refresh tokens locally (does not revoke at Google).
+
+    Mirrors the REST ``/integrations/google/disconnect`` handler. Never
+    raises: a corrupt or unreadable token store just means there was nothing
+    to forget.
+    """
+    from nova_hailo.google_oauth import GoogleTokenProvider
+
+    try:
+        GoogleTokenProvider().store.clear()
+    except Exception:
+        pass
+    return {"type": "nova.google.disconnected"}
 
 
 class RealtimeSession:
@@ -106,6 +188,7 @@ class RealtimeSession:
         self._pending: collections.deque[tuple[np.ndarray, dict | None]] = collections.deque(maxlen=2)
         self._nemo_ws = None
         self._nemo_ws_task: asyncio.Task | None = None
+        self._research_task: asyncio.Task | None = None
         self._nemo_stream_result: dict | None = None
         self._ptt_armed = False
         wake_mode = str(cfg.get("wake", "mode", default="ptt") or "ptt").lower()
@@ -203,6 +286,7 @@ class RealtimeSession:
             except Exception:
                 snap = {}
         snap.update(self._voice_snapshot())
+        snap.update(_integrations_snapshot())
         return snap
 
     def _apply_voice_settings(self, payload: dict[str, Any]) -> None:
@@ -239,7 +323,12 @@ class RealtimeSession:
                     or_model=payload.get("or_model"),
                 )
             )
-            await self.send({"type": "nova.settings", **{**snap, **self._voice_snapshot()}})
+            await self.send(
+                {
+                    "type": "nova.settings",
+                    **{**snap, **self._voice_snapshot(), **_integrations_snapshot()},
+                }
+            )
             await self.send({"type": "nova.llm_status", "status": "ready"})
         except Exception as exc:  # noqa: BLE001
             await self.send(
@@ -256,11 +345,179 @@ class RealtimeSession:
                 "stt_engine": getattr(self.pipeline, "stt_engine", None),
             }
         )
+        # Deliver any finished async research strictly on IDLE entry -- never
+        # while a real turn is anywhere in flight. This callback runs inside
+        # SessionFSM's own lock (see SessionFSM.complete/_emit), so it must
+        # only ever schedule work, never do it inline.
+        if snapshot.get("state") == SessionState.IDLE.value:
+            self._maybe_deliver_research()
+
+    def _maybe_deliver_research(self) -> None:
+        """On IDLE entry, speak any finished deep_research result via TTS.
+
+        Never speaks over a user: takes the same ``_turn_lock`` a real
+        incoming turn takes, then re-checks IDLE/abort right before draining
+        and again before each result is spoken. If any check fails -- lock
+        busy, a real turn started, abort_event set -- the delivery is simply
+        dropped; losing a result is better than talking over someone. Runs
+        on its own thread because speaking blocks on TTS synth/playback and
+        this is called from inside the FSM's lock.
+        """
+        if self._closed:
+            return
+        if not self.pipeline.pending_research():
+            return  # cheap peek; avoids a thread spawn on every idle tick
+
+        def worker() -> None:
+            if self._closed or self.pipeline.abort_event.is_set():
+                return
+            if not self._turn_lock.acquire(blocking=False):
+                return  # a real turn is starting/in flight -- never wait for it
+            try:
+                if self._closed or self.pipeline.abort_event.is_set():
+                    return
+                if self.fsm.state not in _RESEARCH_QUIET_STATES or self.pipeline.tts.is_speaking:
+                    return
+                for item in self.pipeline.drain_finished_research():
+                    if self._closed or self.pipeline.abort_event.is_set():
+                        break
+                    if self.fsm.state not in _RESEARCH_QUIET_STATES or self.pipeline.tts.is_speaking:
+                        break
+                    self._speak_research_result(item)
+            finally:
+                self._turn_lock.release()
+
+        threading.Thread(target=worker, daemon=True, name="research-deliver").start()
+
+    def _speak_research_result(self, item: dict[str, Any]) -> bool:
+        """Speak one finished deep_research result. Returns True if spoken.
+
+        Deliberately does not touch SessionFSM state (stays IDLE throughout):
+        every barge-in path in this file (``response.cancel``, pVAD, VAD
+        speech_started) already keys off ``self.pipeline.tts.is_speaking`` in
+        addition to FSM state, so a real utterance during this delivery still
+        interrupts it correctly. Gating instead uses ``pipeline.gen_guard``
+        directly, the same primitive ``on_abort()`` invalidates on barge-in.
+        """
+        speak = str(item.get("speak") or "").strip()
+        if not speak:
+            return False
+        prefixed = f"About that research you asked for — {speak}"
+        self.pipeline.begin_turn()  # clear abort/barge-in/gen_guard before speaking
+        my_gen = self.pipeline.gen_guard.generation_id
+
+        def on_pcm(chunk: np.ndarray, sample_rate: int) -> None:
+            if not self.pipeline.gen_guard.is_live(my_gen):
+                return
+            # Extend the echo window by the audio duration we just handed the
+            # browser -- same as _run_turn_blocking's on_pcm. Without this,
+            # the mic reopens before playback actually finishes and the tail
+            # of Nova's own answer looks like a fresh utterance.
+            dur = len(np.asarray(chunk).reshape(-1)) / float(max(sample_rate, 1))
+            now_m = time.monotonic()
+            self._echo_until = min(
+                max(self._echo_until, now_m) + dur, now_m + self.echo_max_ms / 1000.0
+            )
+            self._schedule_send(
+                {
+                    "type": "response.audio.delta",
+                    "delta": _pcm16_b64(chunk),
+                    "sample_rate": int(sample_rate),
+                    "generation_id": my_gen,
+                }
+            )
+
+        def on_clause(text: str) -> None:
+            if not self.pipeline.gen_guard.is_live(my_gen):
+                return
+            self._schedule_send(
+                {
+                    "type": "response.audio_transcript.delta",
+                    "delta": text,
+                    "generation_id": my_gen,
+                }
+            )
+
+        self.pipeline.on_audio_pcm = on_pcm
+        self.pipeline.on_validated_clause = on_clause
+        self.pipeline.on_research_status = None
+        self.pipeline.on_token = None
+        try:
+            if self.fsm.state != SessionState.IDLE or self.pipeline.abort_event.is_set():
+                return False
+            tm = TurnMetrics(generation_id=my_gen, notes=["research_delivery"])
+            result = self.pipeline._speak_tool_line(
+                prefixed,
+                wall0=time.perf_counter(),
+                metrics=tm,
+                user_text=str(item.get("user_text") or ""),
+                auth_decision="n/a",
+                tool_name="deep_research",
+                record_session=False,
+                add_history=True,
+                research_job_id=str(item.get("job_id") or ""),
+            )
+            if not self.pipeline.gen_guard.is_live(my_gen):
+                return False  # barged in mid-speech; browser already got playback.cancel
+            self._schedule_send(
+                {
+                    "type": "response.audio_transcript.done",
+                    "transcript": prefixed,
+                    "generation_id": my_gen,
+                }
+            )
+            out = result.metrics.to_dict()
+            self.bench.add_turn(out)
+            self._schedule_send({"type": "nova.turn_metrics", **out})
+            self._schedule_send(
+                {
+                    "type": "response.done",
+                    "response": {
+                        "id": "resp_" + uuid.uuid4().hex[:10],
+                        "status": "completed",
+                        "metadata": {
+                            "research_delivery": True,
+                            "job_id": item.get("job_id"),
+                            "generation_id": my_gen,
+                        },
+                    },
+                }
+            )
+            return True
+        finally:
+            self.pipeline.on_audio_pcm = None
+            self.pipeline.on_validated_clause = None
+            self.pipeline.on_research_status = None
+            self.pipeline.on_tool_status = None
+            self.pipeline.on_token = None
+
+    async def _research_tick(self) -> None:
+        """Poll for finished async research instead of waiting on an IDLE edge.
+
+        ``fsm.arm()`` parks the session in ARMED after every turn and the
+        ARMED->IDLE transition is evaluated lazily, only when something calls
+        into the FSM. A quiet user therefore produces no transition at all, so
+        hanging delivery off the IDLE edge alone meant a finished job was never
+        spoken. This ticks regardless; ``_maybe_deliver_research`` still does
+        all the never-talk-over-the-user gating.
+        """
+        try:
+            while not self._closed:
+                await asyncio.sleep(RESEARCH_TICK_SEC)
+                if self._closed:
+                    return
+                try:
+                    self._maybe_deliver_research()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[research] tick failed: {type(exc).__name__}: {exc}")
+        except asyncio.CancelledError:
+            pass
 
     async def run(self):
         await self.ws.accept()
         self.fsm.arm()
         self.fsm.begin_listen()
+        self._research_task = asyncio.create_task(self._research_tick())
         greeting = ""
         try:
             mem = getattr(self.pipeline, "memory", None)
@@ -286,7 +543,7 @@ class RealtimeSession:
         )
         snap = getattr(self.pipeline, "llm_settings_snapshot", None)
         if snap is not None:
-            await self.send({"type": "nova.settings", **snap()})
+            await self.send({"type": "nova.settings", **snap(), **_integrations_snapshot()})
         # Explicit first paint for clients that only listen for nova.fsm
         await self.send(
             {
@@ -308,6 +565,10 @@ class RealtimeSession:
             pass
         finally:
             self._closed = True
+            task = self._research_task
+            self._research_task = None
+            if task is not None:
+                task.cancel()
             self.pipeline.on_abort()
             await self._finish_nemo_stream()
 
@@ -342,6 +603,20 @@ class RealtimeSession:
             # Do not await HEF load on the WS reader — that froze the mic uplink.
             await self.send({"type": "nova.llm_status", "status": "loading"})
             asyncio.create_task(self._apply_llm_settings_bg(payload))
+            return
+
+        if mtype == "nova.google.connect":
+            # begin_ui_oauth_flow() binds a local callback socket -- off the
+            # WS reader thread so a busy port never stalls the mic uplink.
+            reply = await asyncio.to_thread(_google_connect_payload)
+            await self.send(reply)
+            await self.send({"type": "nova.settings", **self._settings_payload()})
+            return
+
+        if mtype == "nova.google.disconnect":
+            reply = _google_disconnect_payload()
+            await self.send(reply)
+            await self.send({"type": "nova.settings", **self._settings_payload()})
             return
 
         if mtype in {"input_audio_buffer.arm", "ptt.down", "session.arm"}:

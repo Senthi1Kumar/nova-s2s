@@ -180,6 +180,16 @@ class QueuedOnnxTTS:
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
         raise NotImplementedError
 
+    def synthesize_stream(self, text: str):
+        """Yield (audio, sample_rate) per chunk.
+
+        Default: one chunk, so backends that only implement synthesize()
+        keep their existing behaviour.
+        """
+        audio, sample_rate = self.synthesize(text)
+        if audio is not None and len(audio) > 0:
+            yield audio, sample_rate
+
     @property
     def is_speaking(self) -> bool:
         return self._speaking or (not self._idle.is_set())
@@ -440,15 +450,15 @@ class QueuedOnnxTTS:
             try:
                 self._speaking = True
                 t0 = time.perf_counter()
-                audio, sample_rate = self.synthesize(text)
-                synth_ms = (time.perf_counter() - t0) * 1000.0
+                synth_ms = 0.0
                 play_ms = 0.0
-                if (
-                    audio is not None
-                    and len(audio) > 0
-                    and not self._interrupt.is_set()
-                    and gen_id == self._active_gen
-                ):
+                emitted = False
+                for audio, sample_rate in self.synthesize_stream(text):
+                    if self._interrupt.is_set() or gen_id != self._active_gen:
+                        break
+                    if not emitted:
+                        synth_ms = (time.perf_counter() - t0) * 1000.0
+                        emitted = True
                     t1 = time.perf_counter()
                     if self.first_audio_time is None:
                         self.first_audio_time = t1
@@ -459,9 +469,9 @@ class QueuedOnnxTTS:
                             logger.error("TTS pcm_callback error: %s", e)
                     if self.local_play:
                         self._play_blocking(sd, audio, sample_rate)
-                        play_ms = (time.perf_counter() - t1) * 1000.0
-                    else:
-                        play_ms = max(0.0, (time.perf_counter() - t1) * 1000.0)
+                    play_ms += max(0.0, (time.perf_counter() - t1) * 1000.0)
+                if not emitted:
+                    synth_ms = (time.perf_counter() - t0) * 1000.0
                 self.total_synth_ms += synth_ms
                 self.total_play_ms += play_ms
                 if result is not None:
@@ -520,29 +530,40 @@ class PiperTTS(QueuedOnnxTTS):
             print(f"TTS disabled: {e}")
             self.enabled = False
 
-    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
-        chunks = []
+    @staticmethod
+    def _chunk_to_float32(audio_chunk, sample_rate: int):
+        if hasattr(audio_chunk, "audio_float_array"):
+            arr = np.asarray(audio_chunk.audio_float_array, dtype=np.float32)
+            sample_rate = getattr(audio_chunk, "sample_rate", sample_rate) or sample_rate
+        elif hasattr(audio_chunk, "audio_int16_bytes"):
+            arr = (
+                np.frombuffer(audio_chunk.audio_int16_bytes, dtype=np.int16).astype(np.float32)
+                / 32768.0
+            )
+            sample_rate = getattr(audio_chunk, "sample_rate", sample_rate) or sample_rate
+        else:
+            arr = np.asarray(audio_chunk, dtype=np.float32)
+        if arr.ndim > 1:
+            arr = arr.reshape(-1)
+        return arr, sample_rate
+
+    def synthesize_stream(self, text: str):
         sample_rate = 22050
         for audio_chunk in self._voice.synthesize(text):
             if self._interrupt.is_set():
                 break
-            if hasattr(audio_chunk, "audio_float_array"):
-                arr = np.asarray(audio_chunk.audio_float_array, dtype=np.float32)
-                sample_rate = getattr(audio_chunk, "sample_rate", sample_rate) or sample_rate
-            elif hasattr(audio_chunk, "audio_int16_bytes"):
-                arr = (
-                    np.frombuffer(audio_chunk.audio_int16_bytes, dtype=np.int16).astype(np.float32)
-                    / 32768.0
-                )
-                sample_rate = getattr(audio_chunk, "sample_rate", sample_rate) or sample_rate
-            else:
-                arr = np.asarray(audio_chunk, dtype=np.float32)
-            if arr.ndim > 1:
-                arr = arr.reshape(-1)
+            arr, sample_rate = self._chunk_to_float32(audio_chunk, sample_rate)
+            if arr.size:
+                yield arr, sample_rate
+
+    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+        chunks = []
+        sample_rate = 22050
+        for arr, sample_rate in self.synthesize_stream(text):
             chunks.append(arr)
         if not chunks:
             return np.zeros(0, dtype=np.float32), sample_rate
-        return np.concatenate(chunks), int(sample_rate)
+        return np.concatenate(chunks), sample_rate
 
 
 class KokoroTTS(QueuedOnnxTTS):

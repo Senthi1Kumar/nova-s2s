@@ -184,6 +184,87 @@ Rectangle {
                 font.family: Theme.mono
                 font.pixelSize: 11
             }
+
+            Rectangle { width: parent.width; height: 1; color: Theme.hairline }
+
+            Text {
+                text: "Integrations"
+                color: Theme.textMid
+                font.family: Theme.mono
+                font.pixelSize: 10
+                font.letterSpacing: 1.4
+            }
+
+            // Read-only status + a single tap to connect/reconnect/disconnect.
+            // Registering connectors stays in the browser settings UI —
+            // typing a URL on a driver display while moving is unsafe.
+            Row {
+                width: parent.width
+                spacing: Theme.u
+
+                Column {
+                    width: parent.width - 96
+                    spacing: 2
+                    Text {
+                        text: "Google Workspace"
+                        color: Theme.textHi
+                        font.pixelSize: 12
+                        font.family: Theme.text
+                    }
+                    Text {
+                        text: nova.googleNeedsReauth
+                              ? "Reconnect needed"
+                              : (nova.googleConnected ? "Connected" : "Disconnected")
+                        color: nova.googleNeedsReauth
+                               ? Theme.orange
+                               : (nova.googleConnected ? Theme.green : Theme.textLo)
+                        font.pixelSize: 11
+                    }
+                }
+
+                Rectangle {
+                    id: googleBtn
+                    readonly property bool healthy: nova.googleConnected && !nova.googleNeedsReauth
+                    width: 96
+                    height: 30
+                    radius: 8
+                    color: healthy ? Theme.surfaceHi : "transparent"
+                    border.color: healthy ? Theme.hairline : Theme.cyan
+                    Text {
+                        anchors.centerIn: parent
+                        text: googleBtn.healthy ? "Disconnect" : (nova.googleNeedsReauth ? "Reconnect" : "Connect")
+                        color: googleBtn.healthy ? Theme.textMid : Theme.cyan
+                        font.pixelSize: 11
+                        font.family: Theme.text
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: googleBtn.healthy ? nova.disconnectGoogle() : nova.connectGoogle()
+                    }
+                }
+            }
+
+            Text {
+                text: "Connectors"
+                color: Theme.textMid
+                font.family: Theme.mono
+                font.pixelSize: 10
+                font.letterSpacing: 1.4
+            }
+            Text {
+                text: nova.connectorsEnabled > 0
+                      ? (nova.connectorsEnabled + " enabled · " + nova.connectorsTools + " tools")
+                      : "None"
+                color: Theme.textHi
+                font.pixelSize: 12
+            }
+            Text {
+                text: "Add or remove connectors from the browser settings UI."
+                color: Theme.textLo
+                font.pixelSize: 11
+                wrapMode: Text.Wrap
+                width: parent.width
+            }
         }
     }
 }

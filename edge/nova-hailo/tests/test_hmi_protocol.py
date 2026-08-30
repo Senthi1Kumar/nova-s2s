@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hmi_qt"))
 from nova_hmi.protocol import (
     assistant_delta,
     assistant_done,
+    integrations_payload,
     is_user_transcript,
     llm_status_label,
     map_fsm_to_phase,
@@ -137,3 +138,68 @@ def test_transcript_and_tool_extractors():
     assert settings_payload({"type": "nova.settings", "mode": "local"})["mode"] == "local"
     assert llm_status_label({"type": "nova.llm_status", "status": "ready"}) == "ready"
     assert turn_metrics_payload({"type": "nova.turn_metrics", "stt_ms": 12})["stt_ms"] == 12
+
+
+def test_integrations_payload_reads_connected_and_healthy():
+    out = integrations_payload(
+        {
+            "type": "nova.settings",
+            "google": {"connected": True, "needs_reauth": False},
+            "connectors": {"enabled": 3, "tools": 11},
+        }
+    )
+    assert out == {
+        "google_connected": True,
+        "google_needs_reauth": False,
+        "connectors_enabled": 3,
+        "connectors_tools": 11,
+    }
+
+
+def test_integrations_payload_needs_reauth_does_not_read_as_connected():
+    # A revoked token still leaves google.connected true on the wire, so the
+    # HMI must key off needs_reauth, not just connected, before showing
+    # "Connected". This asserts the raw parse only -- controller.py is where
+    # the two are combined into "Connected"/"Reconnect needed"/"Disconnected".
+    out = integrations_payload(
+        {
+            "type": "nova.settings",
+            "google": {"connected": True, "needs_reauth": True},
+            "connectors": {"enabled": 0, "tools": 0},
+        }
+    )
+    assert out["google_connected"] is True
+    assert out["google_needs_reauth"] is True
+
+
+def test_integrations_payload_ignores_non_settings_messages():
+    assert integrations_payload({"type": "nova.fsm"}) is None
+
+
+def test_integrations_payload_tolerates_an_older_backend_missing_the_keys():
+    # An older backend that has not been upgraded to send "google"/
+    # "connectors" yet must not raise -- it degrades to a disconnected/
+    # empty snapshot instead.
+    out = integrations_payload({"type": "nova.settings", "mode": "local"})
+    assert out == {
+        "google_connected": False,
+        "google_needs_reauth": False,
+        "connectors_enabled": 0,
+        "connectors_tools": 0,
+    }
+
+
+def test_integrations_payload_tolerates_malformed_values():
+    out = integrations_payload(
+        {
+            "type": "nova.settings",
+            "google": "not-a-dict",
+            "connectors": {"enabled": "oops", "tools": None},
+        }
+    )
+    assert out == {
+        "google_connected": False,
+        "google_needs_reauth": False,
+        "connectors_enabled": 0,
+        "connectors_tools": 0,
+    }

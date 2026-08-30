@@ -154,6 +154,19 @@ class GoogleTokenProvider:
         data = self.store.load() or {}
         return str(data.get("project_id") or _env("GOOGLE_CLOUD_PROJECT") or "")
 
+    def _mark_refresh_failed(self, data: dict[str, Any]) -> None:
+        """Record that Google rejected our refresh token.
+
+        A stored refresh token that Google has revoked still looks valid to
+        ``authenticated()``, which only checks the field is present. Without
+        this marker the UI keeps showing "Connected" and the failure surfaces
+        as a tool error mid-conversation instead.
+        """
+        try:
+            self.store.save({**data, "refresh_failed_at": datetime.now(timezone.utc).isoformat()})
+        except Exception:
+            pass
+
     def _refresh(self, data: dict[str, Any]) -> dict[str, Any] | None:
         assert self.config is not None
         refresh = data.get("refresh_token")
@@ -173,9 +186,11 @@ class GoogleTokenProvider:
             resp.raise_for_status()
             payload = resp.json()
         except (httpx.HTTPError, ValueError, KeyError):
+            self._mark_refresh_failed(data)
             return None
         access = payload.get("access_token")
         if not access:
+            self._mark_refresh_failed(data)
             return None
         updated = {
             **data,
@@ -184,6 +199,8 @@ class GoogleTokenProvider:
             "expires_at": time.time() + int(payload.get("expires_in", 3600)),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        # Only a refresh that actually worked clears a previous failure.
+        updated.pop("refresh_failed_at", None)
         if payload.get("refresh_token"):
             updated["refresh_token"] = payload["refresh_token"]
         self.store.save(updated)
@@ -411,14 +428,19 @@ def ui_oauth_status() -> dict[str, Any]:
 def integration_status() -> dict[str, Any]:
     provider = GoogleTokenProvider()
     scopes: list[str] = []
+    needs_reauth = False
     if provider.authenticated():
         data = provider.store.load() or {}
         raw = data.get("scopes") or []
         if isinstance(raw, list):
             scopes = [str(s) for s in raw]
+        # authenticated() only checks a refresh_token is present. If Google has
+        # since revoked it, the last refresh attempt left this marker behind.
+        needs_reauth = bool(data.get("refresh_failed_at"))
     return {
         "configured": provider.configured(),
         "authenticated": provider.authenticated(),
+        "needs_reauth": needs_reauth,
         "project_id": provider.project_id() if provider.configured() else None,
         "redirect_uri": (provider.config.redirect_uri if provider.config else DEFAULT_REDIRECT_URI),
         "token_path": str(provider.store.path),
