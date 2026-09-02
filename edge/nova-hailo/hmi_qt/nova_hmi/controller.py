@@ -20,6 +20,13 @@ DEMO_SCRIPT = [
 ]
 
 
+_CLOUD_LABELS = {
+    "openrouter": "OpenRouter",
+    "groq": "Groq",
+    "cerebras": "Cerebras",
+}
+
+
 class NovaController(QObject):
     phaseChanged = Signal(str)
     levelChanged = Signal(float)
@@ -30,6 +37,7 @@ class NovaController(QObject):
     transcriptAdded = Signal(str, str)
     cleared = Signal()
     llmModeChanged = Signal(str)
+    cloudLabelChanged = Signal(str)
     localHefChanged = Signal(str)
     orModelChanged = Signal(str)
     llmStatusChanged = Signal(str)
@@ -69,6 +77,9 @@ class NovaController(QObject):
         self._latency = 0
         self._backend_label = "connecting…" if bridge is not None else "demo script"
         self._llm_mode = "local"
+        # Display name for the cloud provider. "openrouter" until the first
+        # settings snapshot says otherwise, so the label is never blank.
+        self._cloud_label = "OpenRouter"
         self._local_hef = "qwen2"
         self._or_model = "deepseek/deepseek-v4-flash-0731"
         self._llm_status = ""
@@ -188,6 +199,11 @@ class NovaController(QObject):
     @Property(str, notify=llmModeChanged)
     def llmMode(self) -> str:
         return self._llm_mode
+
+    @Property(str, notify=cloudLabelChanged)
+    def cloudLabel(self) -> str:
+        """"Groq" / "OpenRouter" / "Cerebras" -- llmMode only says cloud."""
+        return self._cloud_label
 
     @Property(str, notify=localHefChanged)
     def localHef(self) -> str:
@@ -413,6 +429,12 @@ class NovaController(QObject):
         if mode != self._llm_mode:
             self._llm_mode = mode
             self.llmModeChanged.emit(mode)
+        label = _CLOUD_LABELS.get(
+            str(payload.get("cloud_provider") or "").strip().lower(), "OpenRouter"
+        )
+        if label != self._cloud_label:
+            self._cloud_label = label
+            self.cloudLabelChanged.emit(label)
         hef = str(payload.get("local_hef") or self._local_hef)
         if hef != self._local_hef:
             self._local_hef = hef

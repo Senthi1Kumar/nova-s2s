@@ -149,15 +149,23 @@ class DtlnNs:
 
 
 def create_dtln(cfg=None):
-    """Return DtlnNs or None. Default on; NOVA_HAILO_NS=off disables."""
+    """Return DtlnNs or None. Default OFF; NOVA_HAILO_NS=dtln enables.
+
+    Enhancement currently runs always-on and *ahead* of VAD -- the inverse of
+    the target chain (AEC -> VAD -> pVAD gate -> gated enhancement -> ASR). It
+    therefore spends CPU on noise-only frames and distorts speech onsets, a
+    plausible contributor to clipped leading words and inflated WER. Off by
+    default until the gated ordering lands; set voice.ns: dtln (or
+    NOVA_HAILO_NS=dtln) to turn it back on for an A/B.
+    """
     env = (os.environ.get("NOVA_HAILO_NS") or "").strip().lower()
     name = env
     strength = DEFAULT_STRENGTH
     if cfg is not None and not name:
-        name = str(cfg.get("voice", "ns", default="dtln") or "dtln").lower()
+        name = str(cfg.get("voice", "ns", default="off") or "off").lower()
         strength = float(cfg.get("voice", "ns_strength", default=DEFAULT_STRENGTH) or DEFAULT_STRENGTH)
     if not name:
-        name = "dtln"
+        name = "off"
     if name in {"off", "none", "0", "false"}:
         print("[dtln] disabled", flush=True)
         return None

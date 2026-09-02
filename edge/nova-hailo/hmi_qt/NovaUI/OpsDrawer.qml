@@ -99,7 +99,7 @@ Rectangle {
                 MetricCard { lbl: "LLM decode"; val: fmt(nova.llmDecodeMs) }
                 MetricCard { lbl: "TTS synth"; val: fmt(nova.ttsMs) }
                 MetricCard { lbl: "STT path"; val: nova.sttPath || "—" }
-                MetricCard { lbl: "Runtime"; val: nova.llmMode === "openrouter" ? "OpenRouter" : "Hailo" }
+                MetricCard { lbl: "Runtime"; val: nova.llmMode === "openrouter" ? nova.cloudLabel : "Hailo" }
             }
 
             Text {

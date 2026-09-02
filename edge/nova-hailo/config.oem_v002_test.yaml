@@ -10,8 +10,9 @@ model:
   # Hailo 5.3 FC HEF (fetch_models downloads it): llm_hef: qwen2-fc
   # Host router still picks tools; FC is optional 1st-pass experiment, not ToolBroker.
   llm_backend: cpp
-  # Cloud alternative (HMI ⚙): llm_backend: openrouter + OPENROUTER_API_KEY
-  # Default OR model: deepseek/deepseek-v4-flash-0731 (low latency, tools).
+  # Cloud alternative (HMI ⚙ toggle, or llm_backend: groq): which provider the
+  # cloud side means is llm.cloud_provider below, and each reads its own key --
+  # GROQ_API_KEY / OPENROUTER_API_KEY / CEREBRAS_API_KEY.
   # stt_engine: nemo_speech
   # nemo_speech_model: models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf
   # nemo_rnnt_right_context: 1
@@ -20,7 +21,8 @@ model:
   parakeet_decoder: tdt
   parakeet_model: models/parakeet/tdt_ctc-110m-f16.gguf
   whisper_hef: base
-  tts_engine: inflect
+  # Piper: 311ms to first audio chunk vs Inflect's 467ms on the same replies.
+  tts_engine: piper
   inflect_speed: 1.0
   inflect_variation: 0.667
   inflect_seed: 7
@@ -33,8 +35,15 @@ model:
 
 llm:
   no_think: true
+  # Which provider the HMI's cloud toggle selects. gpt-oss-120b measured 3/3
+  # tool calls with 0/3 false fires under the production soul prompt.
+  cloud_provider: groq
+  groq_model: openai/gpt-oss-120b
 
 pipeline:
+  # Turns kept while a cloud backend is active (local HEFs stay on
+  # max_history_turns). Each extra turn is ~90 prompt tokens per request.
+  cloud_history_turns: 5
   tool_route_mode: allowlist
   multi_tool_rounds: 1
   clear_context_each_turn: false
@@ -65,7 +74,10 @@ voice:
   vad: true
   vad_aggressiveness: 1
   vad_energy_threshold: 0.2
-  ns: dtln
+  # Off: enhancement runs ahead of VAD rather than gated behind it, so it
+  # spends CPU on noise-only frames and distorts speech onsets. Set to dtln
+  # (or NOVA_HAILO_NS=dtln) to A/B it back on.
+  ns: off
   ns_strength: 0.5
   no_tts: false
   wait_tts: false

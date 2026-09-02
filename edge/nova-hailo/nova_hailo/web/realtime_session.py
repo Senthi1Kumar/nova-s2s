@@ -52,11 +52,17 @@ from nova_hailo.web.vad import create_vad_segmenter
 # How often to check for a finished async research job. Short enough that a
 # result feels prompt, long enough to cost nothing when there is no job.
 RESEARCH_TICK_SEC = 2.0
-# Speaking a finished result is safe in either quiet state. ARMED matters most:
-# fsm.arm() parks the session there after every turn, and with a quiet user the
-# ARMED->IDLE transition -- evaluated only when something calls into the FSM --
-# may never happen at all.
-_RESEARCH_QUIET_STATES = frozenset({SessionState.IDLE, SessionState.ARMED})
+# Speaking a finished result is safe in any of these. LISTENING matters most:
+# every turn ends with arm() *followed by*
+# begin_listen(), so LISTENING -- mic open, nothing captured yet -- is the
+# resting state, not ARMED. Omitting it made the guard below reject every tick,
+# so a finished result was never spoken at all. Talking over the user is still
+# prevented by tts.is_speaking, the turn lock and abort_event; the states left
+# out (TRANSCRIBING/THINKING/SPEAKING/INTERRUPTING) are the ones where a turn
+# is genuinely mid-flight.
+_RESEARCH_QUIET_STATES = frozenset(
+    {SessionState.IDLE, SessionState.ARMED, SessionState.LISTENING}
+)
 
 
 def _transcript_is_echo(user: str, last_assistant: str) -> bool:
@@ -183,6 +189,10 @@ class RealtimeSession:
         self.ns = create_dtln(cfg)
         self._ns_held = False
         self._turn_lock = threading.Lock()
+        # Results drained from the pipeline but not yet spoken. drain_* removes
+        # items, so anything left unspoken when the user starts talking would
+        # otherwise be lost; it waits here for the next quiet tick instead.
+        self._research_backlog: list[dict[str, Any]] = []
         self._closed = False
         self._response_id: str | None = None
         self._pending: collections.deque[tuple[np.ndarray, dict | None]] = collections.deque(maxlen=2)
@@ -365,25 +375,50 @@ class RealtimeSession:
         """
         if self._closed:
             return
-        if not self.pipeline.pending_research():
+        if not self._research_backlog and not self.pipeline.pending_research():
             return  # cheap peek; avoids a thread spawn on every idle tick
+
+        def blocked(why: str) -> None:
+            """Name the guard that withheld a ready result, once per reason.
+
+            A finished job that is never spoken looks exactly like one that
+            never finished, so the reason has to reach the log.
+            """
+            if why != getattr(self, "_research_block_last", None):
+                self._research_block_last = why
+                n = len(self.pipeline.pending_research()) + len(self._research_backlog)
+                print(f"[research] holding {n} result(s): {why}", flush=True)
 
         def worker() -> None:
             if self._closed or self.pipeline.abort_event.is_set():
-                return
+                return blocked("closed/abort")
             if not self._turn_lock.acquire(blocking=False):
-                return  # a real turn is starting/in flight -- never wait for it
+                return blocked("turn in flight")  # never wait for a real turn
             try:
                 if self._closed or self.pipeline.abort_event.is_set():
-                    return
-                if self.fsm.state not in _RESEARCH_QUIET_STATES or self.pipeline.tts.is_speaking:
-                    return
-                for item in self.pipeline.drain_finished_research():
+                    return blocked("closed/abort")
+                if self.fsm.state not in _RESEARCH_QUIET_STATES:
+                    return blocked(f"state={self.fsm.state.value}")
+                if self.pipeline.tts.is_speaking:
+                    return blocked("tts speaking")
+                self._research_block_last = None
+                # Backlog first, so an interrupted delivery resumes in order.
+                queue = self._research_backlog + self.pipeline.drain_finished_research()
+                self._research_backlog = []
+                while queue:
                     if self._closed or self.pipeline.abort_event.is_set():
                         break
                     if self.fsm.state not in _RESEARCH_QUIET_STATES or self.pipeline.tts.is_speaking:
                         break
-                    self._speak_research_result(item)
+                    item = queue.pop(0)
+                    ok = self._speak_research_result(item)
+                    print(
+                        f"[research] deliver job={str(item.get('job_id'))[:12]} spoken={ok}",
+                        flush=True,
+                    )
+                # Whatever we could not say now is kept, not dropped: the user
+                # asked for this research and a later quiet tick will deliver it.
+                self._research_backlog = queue
             finally:
                 self._turn_lock.release()
 
@@ -494,12 +529,11 @@ class RealtimeSession:
     async def _research_tick(self) -> None:
         """Poll for finished async research instead of waiting on an IDLE edge.
 
-        ``fsm.arm()`` parks the session in ARMED after every turn and the
-        ARMED->IDLE transition is evaluated lazily, only when something calls
-        into the FSM. A quiet user therefore produces no transition at all, so
-        hanging delivery off the IDLE edge alone meant a finished job was never
-        spoken. This ticks regardless; ``_maybe_deliver_research`` still does
-        all the never-talk-over-the-user gating.
+        Every turn ends parked in LISTENING, and a quiet user produces no
+        further FSM transition at all, so hanging delivery off an IDLE edge
+        meant a finished job was never spoken. This ticks regardless;
+        ``_maybe_deliver_research`` still does all the never-talk-over-the-user
+        gating and re-queues anything it could not say yet.
         """
         try:
             while not self._closed:

@@ -56,7 +56,7 @@ Rectangle {
                 Repeater {
                     model: [
                         { id: "local", label: "Local Hailo" },
-                        { id: "openrouter", label: "Cloud OR" }
+                        { id: "openrouter", label: "Cloud " + nova.cloudLabel }
                     ]
                     delegate: Rectangle {
                         width: 150
@@ -80,7 +80,7 @@ Rectangle {
             }
 
             Text {
-                text: nova.llmMode === "openrouter" ? "OpenRouter model" : "Hailo HEF"
+                text: nova.llmMode === "openrouter" ? nova.cloudLabel + " model" : "Hailo HEF"
                 color: Theme.textMid
                 font.pixelSize: 12
             }

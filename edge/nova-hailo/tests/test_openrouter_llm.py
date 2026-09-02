@@ -193,3 +193,108 @@ def test_protocol_settings_extractors():
         llm_status_label({"type": "nova.llm_status", "status": "error", "error": "no key"})
         == "no key"
     )
+
+
+def _capture_client(seen: dict) -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["headers"] = dict(request.headers)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            text='data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_groq_payload_omits_openrouter_routing_fields():
+    seen: dict = {}
+    llm = OpenRouterLLM(
+        api_key="gsk-test",
+        model="openai/gpt-oss-120b",
+        provider="groq",
+        client=_capture_client(seen),
+    )
+    text, metrics = llm.generate([{"role": "user", "content": "hi"}])
+    assert text == "ok"
+    assert metrics.device == "groq"
+    assert seen["url"] == "https://api.groq.com/openai/v1/chat/completions"
+    body = seen["body"]
+    assert body["model"] == "openai/gpt-oss-120b"
+    assert "provider" not in body
+    assert "session_id" not in body
+    assert "reasoning" not in body
+    assert "models" not in body
+    assert "service_tier" not in body
+    assert "x-title" not in seen["headers"]
+    assert "http-referer" not in seen["headers"]
+
+
+def test_groq_service_tier_is_opt_in():
+    seen: dict = {}
+    llm = OpenRouterLLM(
+        api_key="gsk-test",
+        provider="groq",
+        service_tier="auto",
+        client=_capture_client(seen),
+    )
+    llm.generate([{"role": "user", "content": "hi"}])
+    assert seen["body"]["service_tier"] == "auto"
+
+
+def test_groq_ignores_openrouter_model_env(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
+    llm = OpenRouterLLM(api_key="gsk-test", provider="groq", client=_capture_client({}))
+    assert llm.model == "openai/gpt-oss-120b"
+
+
+def test_cerebras_payload_omits_openrouter_routing_fields():
+    seen: dict = {}
+    llm = OpenRouterLLM(
+        api_key="csk-test",
+        provider="cerebras",
+        client=_capture_client(seen),
+    )
+    llm.generate([{"role": "user", "content": "hi"}])
+    assert seen["url"] == "https://api.cerebras.ai/v1/chat/completions"
+    body = seen["body"]
+    assert body["model"] == "gpt-oss-120b"
+    assert "provider" not in body
+    assert "session_id" not in body
+    assert "service_tier" not in body
+
+
+def test_unknown_provider_rejected():
+    try:
+        OpenRouterLLM(api_key="x", provider="nope")
+    except ValueError as exc:
+        assert "nope" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_cloud_turn_is_taken_for_every_provider():
+    """process_turn used to hard-code backend == 'openrouter', so groq
+    fell through into the Hailo path. Guard the dispatch sites."""
+    src = (
+        Path(__file__).resolve().parents[1] / "nova_hailo" / "pipeline.py"
+    ).read_text()
+    assert "if self.llm_backend in LLM_PROVIDERS:" in src
+    assert 'if self.llm_backend == "openrouter":' not in src
+
+
+def test_http_error_names_the_provider():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text='{"error":"plan"}')
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    llm = OpenRouterLLM(api_key="gsk-test", provider="groq", client=client)
+    try:
+        llm.generate([{"role": "user", "content": "hi"}])
+    except RuntimeError as exc:
+        assert str(exc).startswith("groq HTTP 400")
+        assert "OpenRouter" not in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")

@@ -50,7 +50,37 @@ OR_ALIASES = {
     "inkling": "thinkingmachines/inkling-small",
 }
 
+# Reaching the host is a local-network + DNS operation; on a healthy link it
+# is well under a second. Anything longer means the network is broken, and a
+# voice turn should degrade quickly rather than leave the cabin silent.
+CONNECT_TIMEOUT_S = 3.0
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Groq and Cerebras serve the same chat/completions wire format, so one client
+# covers all three; only the OpenRouter-specific body fields (provider block,
+# models[] fallback, session_id) have to be withheld from the others.
+#   name -> (url, env key names, default model)
+PROVIDERS: dict[str, tuple[str, tuple[str, ...], str]] = {
+    "openrouter": (
+        OPENROUTER_URL,
+        ("OPENROUTER_API_KEY", "OR_API_KEY"),
+        DEFAULT_MODEL,
+    ),
+    # gpt-oss-120b measured 3/3 tool calls with 0/3 false fires on chitchat
+    # under the production soul prompt with all six tools registered -- the
+    # exact check a naive time-to-first-token bench misses.
+    "groq": (
+        "https://api.groq.com/openai/v1/chat/completions",
+        ("GROQ_API_KEY",),
+        "openai/gpt-oss-120b",
+    ),
+    "cerebras": (
+        "https://api.cerebras.ai/v1/chat/completions",
+        ("CEREBRAS_API_KEY",),
+        "gpt-oss-120b",
+    ),
+}
 
 
 def resolve_or_model(name: str | None) -> str:
@@ -96,18 +126,39 @@ class OpenRouterLLM:
         provider_sort: str | None = "latency",
         preferred_max_latency_p90: float | None = None,
         fallback_models: tuple[str, ...] | list[str] | None = None,
+        provider: str | None = None,
+        service_tier: str | None = None,
+        reasoning_effort: str | None = "low",
     ):
+        self.service_tier = (service_tier or "").strip().lower() or None
+        # gpt-oss reasons before answering, and reasoning tokens are billed
+        # against max_tokens. At an 80-token voice cap the model spent the
+        # entire budget thinking and returned finish_reason=length with empty
+        # content -- a silent turn. "low" leaves room for the spoken answer.
+        self.reasoning_effort = (reasoning_effort or "").strip().lower() or None
         del vdevice, seed
+        name = (provider or os.environ.get("NOVA_LLM_PROVIDER") or "openrouter").strip().lower()
+        if name not in PROVIDERS:
+            raise ValueError(f"unknown LLM provider {name!r}; expected one of {sorted(PROVIDERS)}")
+        self.provider = name
+        self.url, key_names, prov_default = PROVIDERS[name]
         self.api_key = (
             api_key
-            or os.environ.get("OPENROUTER_API_KEY")
-            or os.environ.get("OR_API_KEY")
+            or next((v for k in key_names if (v := os.environ.get(k))), "")
             or ""
         ).strip()
-        self.model = resolve_or_model(
-            model or hef_path or os.environ.get("OPENROUTER_MODEL") or DEFAULT_MODEL
-        )
-        self.hef_path = f"openrouter:{self.model}"
+        raw_model = model or hef_path or ""
+        if not raw_model:
+            if name == "openrouter":
+                raw_model = os.environ.get("OPENROUTER_MODEL") or prov_default
+            else:
+                # Groq/Cerebras ids are not portable. OPENROUTER_MODEL must
+                # not leak onto another provider as a silent 404.
+                raw_model = prov_default
+        # resolve_or_model expands OpenRouter's short aliases; Groq/Cerebras ids
+        # are already fully qualified and must pass through untouched.
+        self.model = resolve_or_model(raw_model) if name == "openrouter" else raw_model
+        self.hef_path = f"{name}:{self.model}"
         self.temperature = float(temperature)
         self.max_tokens = int(max_tokens)
         self.no_think = bool(no_think)
@@ -120,8 +171,14 @@ class OpenRouterLLM:
         self.last_metrics: InferenceMetrics | None = None
         self.last_tool_calls: list[dict[str, Any]] = []
         self._owns_client = client is None
-        self._client = client or httpx.Client(timeout=timeout_s)
-        print(f"Loading LLM (OpenRouter): {self.model}")
+        # Split the budget: a stream legitimately takes tens of seconds, but
+        # *reaching* the host must not. One blanket timeout let a DNS failure
+        # burn the whole 45s -- measured 40.7s of dead air before the fallback
+        # line was spoken, which in a car is far worse than failing fast.
+        self._client = client or httpx.Client(
+            timeout=httpx.Timeout(timeout_s, connect=CONNECT_TIMEOUT_S)
+        )
+        print(f"Loading LLM ({self.provider}): {self.model}")
 
     def generate(
         self,
@@ -136,11 +193,11 @@ class OpenRouterLLM:
     ) -> tuple[str, InferenceMetrics]:
         del quiet
         if not self.api_key:
-            raise RuntimeError("OPENROUTER_API_KEY is not set")
+            raise RuntimeError(f"{PROVIDERS[self.provider][1][0]} is not set")
         prompt_est = _estimate_prompt_tokens(messages)
         metrics = InferenceMetrics()
         metrics.no_think = self.no_think
-        metrics.device = "openrouter"
+        metrics.device = self.provider
         metrics.start(prompt_tokens_est=prompt_est)
         cap = max_tokens if max_tokens is not None else self.max_tokens
         tool_list = _normalize_tools(tools)
@@ -156,15 +213,35 @@ class OpenRouterLLM:
             "stream": True,
             "max_tokens": cap,
             "temperature": self.temperature,
-            "reasoning": {"enabled": False},
-            "session_id": sid,
         }
-        if self.fallback_models:
-            # OpenRouter tries these in order if the primary errors or is
-            # unavailable, inside the same request — no extra round trip.
-            payload["models"] = [self.model, *self.fallback_models]
-        if self.provider_block is not None:
-            payload["provider"] = self.provider_block
+        # session_id, models[] and provider are OpenRouter routing extensions.
+        # Groq and Cerebras reject unknown body fields with a 400, so they are
+        # only sent on the provider that defines them.
+        if self.provider == "groq":
+            # Groq deprecated max_tokens in favour of max_completion_tokens.
+            payload["max_completion_tokens"] = payload.pop("max_tokens", cap)
+            if self.reasoning_effort:
+                # Measured on-device against the real prompt and tools: "low"
+                # is p50 1535ms vs Groq's "medium" default at 2542ms, both 5/5
+                # on tool calls. reasoning_format="hidden" changed nothing, and
+                # qwen3's effort="none" was slower *and* fired no tools at all.
+                payload["reasoning_effort"] = self.reasoning_effort
+        if self.provider == "groq" and self.service_tier:
+            # Opt-in only: "auto"/"flex" are rejected with a 400 on plans that
+            # do not include them, and on_demand (the default when the field is
+            # absent) is what a free org gets. Prompt caching needs no flag --
+            # it keys off the static prefix, and the soul prompt plus tool
+            # definitions already sit ahead of the per-turn user text.
+            payload["service_tier"] = self.service_tier
+        if self.provider == "openrouter":
+            payload["reasoning"] = {"enabled": False}
+            payload["session_id"] = sid
+            if self.fallback_models:
+                # OpenRouter tries these in order if the primary errors or is
+                # unavailable, inside the same request — no extra round trip.
+                payload["models"] = [self.model, *self.fallback_models]
+            if self.provider_block is not None:
+                payload["provider"] = self.provider_block
         if tool_list:
             payload["tools"] = tool_list
             payload["tool_choice"] = tool_choice or "auto"
@@ -172,19 +249,23 @@ class OpenRouterLLM:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/Senthi1Kumar/nova-s2s",
-            "X-Title": "Nova Hailo",
         }
+        if self.provider == "openrouter":
+            # Attribution headers for the OpenRouter dashboard only.
+            headers["HTTP-Referer"] = "https://github.com/Senthi1Kumar/nova-s2s"
+            headers["X-Title"] = "Nova Hailo"
         parts: list[str] = []
         tool_acc: dict[int, dict[str, Any]] = {}
         idx = 0
         try:
             with self._client.stream(
-                "POST", OPENROUTER_URL, headers=headers, json=payload
+                "POST", self.url, headers=headers, json=payload
             ) as resp:
                 if resp.status_code >= 400:
                     body = resp.read().decode("utf-8", "replace")[:400]
-                    raise RuntimeError(f"OpenRouter HTTP {resp.status_code}: {body}")
+                    raise RuntimeError(
+                        f"{self.provider} HTTP {resp.status_code}: {body}"
+                    )
                 for line in resp.iter_lines():
                     if abort_callback and abort_callback():
                         break

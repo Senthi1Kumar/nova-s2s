@@ -42,6 +42,50 @@ OR_MODELS = (
     },
 )
 
+# Hints are measured against the production soul prompt with all six tools
+# registered -- a model that tool-calls under a toy prompt can still fail here.
+GROQ_MODELS = (
+    {
+        "id": "openai/gpt-oss-120b",
+        "label": "GPT-OSS 120B",
+        "hint": "default · tools 3/3 · no false fires",
+    },
+    {
+        "id": "openai/gpt-oss-20b",
+        "label": "GPT-OSS 20B",
+        "hint": "tools 3/3 · lowest TTFT",
+    },
+    {
+        "id": "qwen/qwen3.8-27b",
+        "label": "Qwen3.8 27B",
+        "hint": "fast chat · does NOT tool-call here",
+    },
+    {
+        "id": "qwen/qwen3.6-27b",
+        "label": "Qwen3.6 27B",
+        "hint": "fast chat · does NOT tool-call here",
+    },
+)
+
+CEREBRAS_MODELS = (
+    {
+        "id": "gpt-oss-120b",
+        "label": "GPT-OSS 120B",
+        "hint": "needs a paid Cerebras plan",
+    },
+    {
+        "id": "gemma-4-31b",
+        "label": "Gemma 4 31B",
+        "hint": "needs a paid Cerebras plan",
+    },
+)
+
+CLOUD_MODELS = {
+    "openrouter": OR_MODELS,
+    "groq": GROQ_MODELS,
+    "cerebras": CEREBRAS_MODELS,
+}
+
 LOCAL_MODELS = (
     {"id": "qwen2", "label": "Qwen2 1.5B", "hint": "default Hailo HEF"},
     {"id": "qwen25", "label": "Qwen2.5 1.5B", "hint": "Hailo zoo"},
@@ -55,12 +99,18 @@ DEFAULT_OR = OR_MODELS[0]["id"]
 DEFAULT_LOCAL = "qwen2"
 
 
-def catalog() -> dict[str, Any]:
+def catalog(provider: str = "openrouter") -> dict[str, Any]:
+    """Model lists for the HMI. ``or_models`` carries the active cloud
+    provider's models -- the key name predates there being more than one
+    provider, and the HMI still keys off it, so it stays.
+    """
+    cloud = CLOUD_MODELS.get((provider or "").strip().lower(), OR_MODELS)
     return {
         "local_models": [dict(m) for m in LOCAL_MODELS],
-        "or_models": [dict(m) for m in OR_MODELS],
+        "or_models": [dict(m) for m in cloud],
         "default_local": DEFAULT_LOCAL,
-        "default_or": DEFAULT_OR,
+        "default_or": cloud[0]["id"],
+        "cloud_provider": (provider or "openrouter").strip().lower(),
     }
 
 

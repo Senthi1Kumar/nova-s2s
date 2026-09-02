@@ -26,6 +26,7 @@ except ImportError:
 from nova_hailo.auth import AuthDecision, DriveAuthPrecheck, looks_like_payment_tool
 from nova_hailo.backends.llm import HailoLLM, HailoLLMCpp
 from nova_hailo.backends.openrouter_llm import DEFAULT_MODEL as OR_DEFAULT_MODEL
+from nova_hailo.backends.openrouter_llm import PROVIDERS as LLM_PROVIDERS
 from nova_hailo.backends.openrouter_llm import OpenRouterLLM, resolve_or_model
 from nova_hailo.backends.stt import WhisperSTT
 from nova_hailo.backends.tts import clean_text_for_tts, create_tts
@@ -63,6 +64,7 @@ from nova_hailo.tools.search_summarizer import (
     summarize_evidence,
 )
 from nova_hailo.settings_store import (
+    CLOUD_MODELS,
     DEFAULT_LOCAL,
     catalog as llm_catalog,
     load_settings,
@@ -287,14 +289,19 @@ class NovaPipeline:
         env_backend = (os.environ.get("NOVA_HAILO_LLM_BACKEND") or "").strip().lower()
         yaml_backend = (cfg.get("model", "llm_backend", default="python") or "python").strip().lower()
         settings_mode = str(self._hmi_settings.get("mode") or "local")
+        # Which cloud provider "cloud mode" means. The HMI toggle and the saved
+        # hmi_settings only distinguish cloud from local -- they predate there
+        # being more than one cloud provider -- so the choice lives in config.
+        cloud = (cfg.get("llm", "cloud_provider", default="openrouter") or "openrouter").strip().lower()
+        self.cloud_provider = cloud if cloud in LLM_PROVIDERS else "openrouter"
         if env_backend:
             llm_backend = env_backend
         elif settings_mode in {"openrouter", "or", "cloud"}:
-            llm_backend = "openrouter"
+            llm_backend = self.cloud_provider
         else:
             llm_backend = yaml_backend
         if llm_backend in {"or", "cloud"}:
-            llm_backend = "openrouter"
+            llm_backend = self.cloud_provider
         self.llm_backend = llm_backend
         self._hailo_llm_cls = HailoLLMCpp if yaml_backend == "cpp" or llm_backend == "cpp" else HailoLLM
         self.llm = self._make_llm(llm_backend, self._local_hef_alias, self._or_model)
@@ -403,10 +410,17 @@ class NovaPipeline:
         self.multi_tool_rounds = int(cfg.get("pipeline", "multi_tool_rounds", default=1))
         self.clear_each = bool(cfg.get("pipeline", "clear_context_each_turn", default=False))
         # Native device-side context reuse (see _messages / _maybe_compact_context).
+        # A cloud model has room for far more history than the 1.5B local HEF,
+        # and a follow-up ("its GDP", "their CEO") only resolves while the turn
+        # that named the subject is still in the window. Tunable because the
+        # cost is prompt tokens on every turn -- a latency trade, not free.
+        self.cloud_history_turns = int(
+            cfg.get("pipeline", "cloud_history_turns", default=8) or 8
+        )
         self.native_context = bool(cfg.get("pipeline", "native_context", default=False))
-        if self.llm_backend == "openrouter":
+        if self.llm_backend in LLM_PROVIDERS:
             self.native_context = False
-            or_hist = max(self.max_history_turns, 8)
+            or_hist = max(self.max_history_turns, self.cloud_history_turns)
             if self.history.max_turns < or_hist:
                 self.history = ConversationHistory(max_turns=or_hist)
         self.ctx_compact_ratio = float(
@@ -462,21 +476,38 @@ class NovaPipeline:
         temp = float(self.cfg.get("model", "temperature", default=0.15))
         seed = int(self.cfg.get("model", "seed", default=42))
         max_tok = int(self.cfg.get("model", "max_tokens", default=24))
-        if backend == "openrouter":
+        # "openrouter", "groq" and "cerebras" all speak chat/completions and
+        # share one client; the routing extras are withheld from the two that
+        # do not define them (see openrouter_llm.PROVIDERS).
+        if backend in LLM_PROVIDERS:
             provider_sort = self.cfg.get("llm", "or_provider_sort", default="latency")
             preferred_max_latency_p90 = self.cfg.get(
                 "llm", "or_preferred_max_latency_p90", default=None
             )
+            # Model ids are not portable between providers, so an id is only
+            # honoured when it belongs to this provider's catalogue. That lets
+            # the HMI picker work on Groq while a stale OpenRouter id left in
+            # hmi_settings.json falls back to config instead of 404-ing.
+            if backend == "openrouter":
+                picked = or_model
+            else:
+                known = {m["id"] for m in CLOUD_MODELS.get(backend, ())}
+                picked = (
+                    or_model
+                    if or_model in known
+                    else (self.cfg.get("llm", f"{backend}_model", default=None) or None)
+                )
             return OpenRouterLLM(
                 None,
-                or_model,
+                picked or "",
                 temperature=max(temp, 0.3),
                 seed=seed,
                 max_tokens=max(max_tok, 80),
                 no_think=True,
-                model=or_model,
+                model=picked,
                 provider_sort=provider_sort,
                 preferred_max_latency_p90=preferred_max_latency_p90,
+                provider=backend,
             )
         path = resolve_llm_hef(local_hef)
         return self._hailo_llm_cls(
@@ -503,8 +534,11 @@ class NovaPipeline:
         gc.collect()
 
     def llm_settings_snapshot(self) -> dict:
-        cat = llm_catalog()
-        mode = "openrouter" if self.llm_backend == "openrouter" else "local"
+        cat = llm_catalog(self.cloud_provider)
+        # Any cloud provider reports as "openrouter" here: the HMI toggle only
+        # models cloud-vs-local, and llm_backend/active_model below already
+        # carry which cloud provider it actually is.
+        mode = "openrouter" if self.llm_backend in LLM_PROVIDERS else "local"
         return {
             "mode": mode,
             "local_hef": self._local_hef_alias,
@@ -512,7 +546,14 @@ class NovaPipeline:
             "active_model": getattr(self.llm, "hef_path", ""),
             "llm_backend": self.llm_backend,
             "has_or_key": bool(
-                (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_API_KEY") or "").strip()
+                next(
+                    (
+                        v
+                        for k in LLM_PROVIDERS[self.cloud_provider][1]
+                        if (v := os.environ.get(k))
+                    ),
+                    "",
+                ).strip()
             ),
             **cat,
         }
@@ -525,7 +566,10 @@ class NovaPipeline:
         or_model: str | None = None,
     ) -> dict:
         """Live switch Local Hailo ↔ OpenRouter. One LLM resident at a time."""
-        want_mode = (mode or ("openrouter" if self.llm_backend == "openrouter" else "local")).strip().lower()
+        want_mode = (
+            mode
+            or ("openrouter" if self.llm_backend in LLM_PROVIDERS else "local")
+        ).strip().lower()
         if want_mode in {"or", "cloud"}:
             want_mode = "openrouter"
         if want_mode not in {"local", "openrouter"}:
@@ -534,24 +578,28 @@ class NovaPipeline:
         want_or = resolve_or_model(or_model or self._or_model)
         with self._genai_lock:
             if want_mode == "openrouter":
-                if not (
-                    (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_API_KEY") or "").strip()
-                ):
-                    raise RuntimeError("OPENROUTER_API_KEY is not set")
-                same = self.llm_backend == "openrouter" and getattr(self.llm, "model", "") == want_or
+                # "openrouter" is the HMI's name for cloud; the actual provider
+                # is whichever llm.cloud_provider names, so check that one's key.
+                key_names = LLM_PROVIDERS[self.cloud_provider][1]
+                if not next((v for k in key_names if (v := os.environ.get(k))), "").strip():
+                    raise RuntimeError(f"{key_names[0]} is not set")
+                same = (
+                    self.llm_backend == self.cloud_provider
+                    and getattr(self.llm, "model", "") == want_or
+                )
                 if not same:
                     self._evict_llm()
-                    self.llm = self._make_llm("openrouter", want_hef, want_or)
-                self.llm_backend = "openrouter"
+                    self.llm = self._make_llm(self.cloud_provider, want_hef, want_or)
+                self.llm_backend = self.cloud_provider
                 self._or_model = want_or
                 self.native_context = False
-                or_hist = max(self.max_history_turns, 8)
+                or_hist = max(self.max_history_turns, self.cloud_history_turns)
                 if self.history.max_turns < or_hist:
                     self.history = ConversationHistory(max_turns=or_hist)
             else:
                 path = resolve_llm_hef(want_hef)
                 same = (
-                    self.llm_backend != "openrouter"
+                    self.llm_backend not in LLM_PROVIDERS
                     and getattr(self.llm, "hef_path", "") == path
                 )
                 if not same:
@@ -1027,8 +1075,10 @@ class NovaPipeline:
                 self.session.add(metrics)
             return TurnResult(user_text, speak, metrics, auth.decision.value)
 
-        if self.llm_backend == "openrouter":
-            metrics.notes.append(f"llm_backend:openrouter:{getattr(self.llm, 'model', '')}")
+        if self.llm_backend in LLM_PROVIDERS:
+            metrics.notes.append(
+                f"llm_backend:{self.llm_backend}:{getattr(self.llm, 'model', '')}"
+            )
             return self._openrouter_turn(
                 user_text,
                 wall0=wall0,
@@ -1491,7 +1541,7 @@ class NovaPipeline:
                 if inf is not None:
                     metrics.llm = inf.to_dict()
                     metrics.llm_calls.append(inf.to_dict())
-                    metrics.devices["llm"] = "openrouter"
+                    metrics.devices["llm"] = self.llm_backend
                     gen_ms = inf.total_ms or 0.0
                     metrics.llm_ms = (metrics.llm_ms or 0.0) + float(gen_ms)
                     if inf.ttft_ms is not None:
@@ -1691,7 +1741,10 @@ class NovaPipeline:
             if not last_text:
                 last_text = "I couldn't get that just now."
         except Exception as exc:  # noqa: BLE001
-            print(f"[llm] openrouter failed ({type(exc).__name__}: {exc}); failing turn closed")
+            print(
+                f"[llm] {self.llm_backend} failed ({type(exc).__name__}: {exc}); "
+                "failing turn closed"
+            )
             last_text = str(validate_spoken_unit("")["speak"])
         finally:
             self.voice_one_sentence = saved_one

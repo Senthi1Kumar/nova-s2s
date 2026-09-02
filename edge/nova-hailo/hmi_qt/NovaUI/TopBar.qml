@@ -28,7 +28,7 @@ Item {
         }
 
         Text {
-            text: nova.llmMode === "openrouter" ? "Cloud OpenRouter" : "Local Hailo"
+            text: nova.llmMode === "openrouter" ? "Cloud " + nova.cloudLabel : "Local Hailo"
             anchors.verticalCenter: parent.verticalCenter
             font.family: Theme.mono
             font.pixelSize: 11

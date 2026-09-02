@@ -1,8 +1,9 @@
 # Nova-Hailo — Raspberry Pi 5 + Hailo-10H voice cascade
 
 On-device voice stack. STT, tools, and TTS run **on the Pi**. Chat LLM is
-**Hailo-10H Qwen2 HEF** by default, or optional **OpenRouter** (Cloud) from
-the HMI. A client (Qt HMI or browser) only streams mic PCM in and TTS PCM out.
+**Hailo-10H Qwen2 HEF** by default, or optional **Cloud** from the HMI —
+**Groq** (default provider) or OpenRouter. A client (Qt HMI or browser) only
+streams mic PCM in and TTS PCM out.
 
 ```mermaid
 flowchart LR
@@ -15,13 +16,13 @@ flowchart LR
     GATE["Audio gate"]
     ASR["Nemo / Parakeet STT"]
     HOST["Host router + tools"]
-    TTS["Inflect TTS"]
+    TTS["Piper TTS"]
   end
   subgraph NPU["Hailo-10H Local"]
     LLM["Qwen2-1.5B HEF"]
   end
   subgraph CLOUD["Optional"]
-    OR["OpenRouter LLM"]
+    OR["Cloud LLM — Groq / OpenRouter"]
   end
   MIC -->|WS PCM| VAD --> GATE --> ASR --> HOST
   HOST -->|tool / canned speak| TTS
@@ -37,13 +38,14 @@ flowchart LR
 | App dir after clone | `nova-s2s/edge/nova-hailo` |
 | HailoRT | **5.3.0** (AI HAT+ 2). HEF + C++ GenAI API follow `hailortcli fw-control identify` |
 | Default profile | **tools enabled** (`config.oem_v002_test.yaml`) |
-| LLM | **Local** Hailo Qwen2 HEF, or **Cloud** OpenRouter (`OPENROUTER_API_KEY`) |
+| LLM | **Local** Hailo Qwen2 HEF, or **Cloud** via `llm.cloud_provider` — Groq (default, `GROQ_API_KEY`) or OpenRouter |
+| TTS | **Piper** (`en_US-amy-low`), ~311 ms to first audio chunk |
 | Search | **Exa only** (`EXA_API_KEY`). No Brave/Serper fallback |
 | Python env | **`uv`** with system Python + `--system-site-packages` (see below) |
 | HMI | PySide6 + QML (`hmi_qt/run.sh`). Live WS — not a mock / not C++ Qt |
 
 This device is **self-contained** for Local mode. Cloud LLM is optional and
-needs a network + OpenRouter key. No Tailscale / tunnel to another Pi.
+needs a network + the cloud provider's key. No Tailscale / tunnel to another Pi.
 Connect *this* Pi to the car (or HDMI + HAT audio) and run locally.
 
 ## Prerequisites
@@ -83,12 +85,14 @@ cp -n .env.example .env   # then edit — never commit .env
 | --- | --- | --- |
 | `EXA_API_KEY` | `web_search` (Exa only) | search fails closed |
 | `TAVILY_API_KEY` | `deep_research` | research fails closed |
-| `OPENROUTER_API_KEY` | HMI **Cloud** LLM | Local Hailo still works; Cloud switch errors |
-| `OPENROUTER_MODEL` | optional Cloud default | `deepseek/deepseek-v4-flash-0731` |
+| `GROQ_API_KEY` | HMI **Cloud** LLM (default provider) | Local Hailo still works; Cloud switch errors |
+| `OPENROUTER_API_KEY` | Cloud when `llm.cloud_provider: openrouter` | as above |
+| `OPENROUTER_MODEL` | optional OpenRouter default | `deepseek/deepseek-v4-flash-0731` |
 | `GOOGLE_OAUTH_*` | calendar / gmail / drive | those tools fail closed until Settings → Connect |
 
-`NOVA_HAILO_LLM_BACKEND=openrouter` boots Cloud without using the HMI switch.
-Leave it unset for Local Hailo (the demo default).
+`NOVA_HAILO_LLM_BACKEND=groq` (or `openrouter`) boots Cloud without using the
+HMI switch. Leave it unset for Local Hailo (the demo default).
+`NOVA_LLM_PROVIDER` overrides `llm.cloud_provider` for one run.
 
 ## Clone and run (on the Pi)
 
@@ -124,28 +128,41 @@ cd hmi_qt && ./run.sh
 
 Stack and model paths: [`docs/STACK.md`](docs/STACK.md). HMI: [`hmi_qt/README.md`](hmi_qt/README.md).
 
-## Local vs Cloud LLM (OpenRouter)
+## Local vs Cloud LLM (Groq by default)
 
 Default is **Local**: Qwen2-1.5B HEF on Hailo-10H. Host still owns tools
 (`ToolBroker`); the LLM is for chat. Hailo-10H holds **one** GenAI KV-cache —
 switching Local HEFs evicts the previous model first.
 
-**Cloud** is OpenRouter (`https://openrouter.ai/api/v1/chat/completions`).
+**Cloud** is whichever provider `llm.cloud_provider` names — **Groq** by
+default. Both speak the same `chat/completions` shape, so one client serves
+them; only the routing extras (OpenRouter's `provider` block, `models[]`
+fallback, `session_id`) are withheld from the other.
+
 STT / tools / TTS stay on the Pi. The cloud model may emit tool calls; the
 Pi executes them (not raw MCP URLs). Regex host-router is skipped on Cloud
 only. Switching to Cloud **releases** the Hailo LLM so the NPU is free.
 
-From the HMI (after `hmi_qt/run.sh`): top bar **Local / Cloud**, or ⚙ Settings
-→ model list. Needs `OPENROUTER_API_KEY` in `.env` (restart the backend after
-editing `.env`).
+From the HMI (after `hmi_qt/run.sh`): top bar **Local / Cloud <provider>**, or
+*Settings* -> *model* list, which shows the active provider's models. Needs that
+provider's key in `.env` (restart the backend after editing `.env`).
 
-| Cloud model (Settings) | OpenRouter id |
-| --- | --- |
-| DeepSeek V4 Flash (default) | `deepseek/deepseek-v4-flash-0731` |
-| DeepSeek V3.2 | `deepseek/deepseek-v3.2` |
-| Qwen3.8 Flash | `qwen/qwen3.8-flash` |
-| GLM 4.7 Flash | `z-ai/glm-4.7-flash` |
-| Inkling Small | `thinkingmachines/inkling-small` |
+| Cloud model (Settings, Groq) | id | notes |
+| --- | --- | --- |
+| GPT-OSS 120B (default) | `openai/gpt-oss-120b` | 3/3 tool calls, 0/3 false fires |
+| GPT-OSS 20B | `openai/gpt-oss-20b` | 3/3 tool calls, lowest TTFT |
+| Qwen3.8 / Qwen3.6 27B | `qwen/qwen3.8-27b`, `qwen/qwen3.6-27b` | fast chat, **do not tool-call here** |
+
+`reasoning_effort: low` is sent on Groq: gpt-oss reasons before answering and
+those tokens bill against the completion cap, so at Groq's `medium` default an
+80-token voice cap was consumed entirely by reasoning and returned **empty
+content** — a silent turn. Measured p50 TTFT 1535 ms at `low` vs 2542 ms at
+`medium`.
+
+Selecting `llm.cloud_provider: openrouter` swaps the Settings list to
+OpenRouter ids (`deepseek/deepseek-v4-flash-0731` and friends). Model ids are
+not portable between providers, so a stale id falls back to the provider's
+default rather than 404-ing.
 
 | Local HEF (Settings) | Alias |
 | --- | --- |
@@ -156,9 +173,11 @@ Boot Cloud from env (no HMI):
 
 ```bash
 # in .env
-OPENROUTER_API_KEY=sk-or-...
-# OPENROUTER_MODEL=deepseek/deepseek-v4-flash-0731
-NOVA_HAILO_LLM_BACKEND=openrouter
+GROQ_API_KEY=gsk_...
+NOVA_HAILO_LLM_BACKEND=groq
+# Or another provider (needs its own key + llm.cloud_provider in the profile):
+# OPENROUTER_API_KEY=sk-or-...
+# NOVA_HAILO_LLM_BACKEND=openrouter
 ```
 
 Choice is also persisted in `runtime/hmi_settings.json` (gitignored).
