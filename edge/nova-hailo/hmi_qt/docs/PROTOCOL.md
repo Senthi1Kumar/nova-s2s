@@ -23,6 +23,7 @@ Client: browser UI **or** Qt HMI — **one voice session at a time** (`_MAX_SESS
 | `input_audio_buffer.append` | `audio`: base64 **PCM16 LE mono 16 kHz** | ~20–40 ms chunks |
 | `response.cancel` | — | barge / stop |
 | `playback.started` | `generation_id`, `t_ms` | first audible chunk |
+| `playback.stopped` | `t_ms` | local play queue drained; server leaves SPEAKING |
 | `playback.interrupted` | `reason`, `t_ms` | local flush after cancel |
 
 ## Server → client (HMI must handle)
@@ -33,6 +34,7 @@ Client: browser UI **or** Qt HMI — **one voice session at a time** (`_MAX_SESS
 | `nova.fsm` | drive UI state (IDLE/LISTENING/…) |
 | `input_audio_buffer.speech_started` | listening cue |
 | `input_audio_buffer.speech_stopped` | thinking / STT |
+| `conversation.item.input_audio_transcription.delta` | growing YOU card (live; not a chat commit) |
 | `conversation.item.input_audio_transcription.completed` | user transcript |
 | `response.audio_transcript.delta` / `.done` | assistant text |
 | `response.audio.delta` | `delta` base64 PCM16, `sample_rate` (often 24000) |

@@ -141,6 +141,7 @@ class OpenRouterLLM:
         if name not in PROVIDERS:
             raise ValueError(f"unknown LLM provider {name!r}; expected one of {sorted(PROVIDERS)}")
         self.provider = name
+        self.last_closed_on_abort = False
         self.url, key_names, prov_default = PROVIDERS[name]
         self.api_key = (
             api_key
@@ -257,6 +258,7 @@ class OpenRouterLLM:
         parts: list[str] = []
         tool_acc: dict[int, dict[str, Any]] = {}
         idx = 0
+        self.last_closed_on_abort = False
         try:
             with self._client.stream(
                 "POST", self.url, headers=headers, json=payload
@@ -268,6 +270,11 @@ class OpenRouterLLM:
                     )
                 for line in resp.iter_lines():
                     if abort_callback and abort_callback():
+                        self.last_closed_on_abort = True
+                        try:
+                            resp.close()
+                        except Exception:
+                            pass
                         break
                     if should_stop and should_stop():
                         break

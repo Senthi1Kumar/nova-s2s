@@ -44,14 +44,20 @@ _UNSAFE_CLAIM_RE = re.compile(
 # on the search path where evidence was already fetched, and promoting them
 # here would replace oem_tools.py's honest declines (e.g. "I can't check the
 # weather yet.") with the generic fallback. See TODO.md P0.9.
+# "language model" only counts as drift when it is self-referential. Matching
+# it bare destroyed any answer that merely discussed one: a question about a new
+# model had "I'm here. Could you say that again?" spliced into the middle of an
+# otherwise correct sentence, because each streamed clause is validated on its
+# own and a failed clause is replaced by the fallback.
 _PERSONA_DRIFT_RE = re.compile(
     r"\b("
-    r"as an ai|"
-    r"language model|"
-    r"i('m| am) not nova|"
-    r"not nova anymore|"
-    r"i am now the vehicle"
-    r")\b",
+    r"as an ai\b|"
+    r"as a language model\b|"
+    r"i(?:'m| am) (?:just |only |simply )?(?:a |an )?(?:large |small )?language model\b|"
+    r"i(?:'m| am) not nova\b|"
+    r"not nova anymore\b|"
+    r"i am now the vehicle\b"
+    r")",
     re.I,
 )
 _FALLBACK = "I'm here. Could you say that again?"
@@ -80,9 +86,14 @@ def validate_spoken_unit(
         failures.append("persona_drift")
     if forbid_tools and _UNSAFE_CLAIM_RE.search(t):
         failures.append("unsafe_action_claim")
-    letters = sum(1 for c in t if c.isalpha())
+    # Count digits as content, not noise. Streaming splits a clause at any
+    # comma, so a price or date arrives as its own unit -- "199.", "2026.",
+    # "6, 2026." -- and a letters-only test called all of those garbage. The
+    # check is meant to catch control-token soup, which has no alphanumerics
+    # at all, so alnum is both safer and stricter about real junk.
+    content = sum(1 for c in t if c.isalnum())
     junk = sum(1 for c in t if c in "<>|~`")
-    if t and (letters < 3 or junk > letters):
+    if t and (content < 3 or junk > content):
         failures.append("malformed")
     # Never speak a fragment. When generation stops on the token cap it lands
     # mid-sentence ("...an example of what it might"), and TTS faithfully speaks

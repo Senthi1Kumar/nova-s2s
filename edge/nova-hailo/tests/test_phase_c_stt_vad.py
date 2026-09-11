@@ -39,15 +39,12 @@ def _load_v002() -> dict:
     return data
 
 
-def test_v002_stt_freeze_is_en_nemo():
+def test_v002_stt_is_parakeet_tdt():
     cfg = _load_v002()
     model = cfg["model"]
-    assert model["stt_engine"] == "nemo_speech"
-    assert model["nemo_speech_model"] == EN_NEMO_MODEL
-    assert int(model.get("nemo_rnnt_right_context", 1)) == 1
-    # Rollback keys retained
-    assert model.get("parakeet_model")
-    assert model.get("parakeet_decoder")
+    assert model["stt_engine"] == "parakeet"
+    assert model.get("parakeet_decoder") == "tdt"
+    assert "tdt_ctc-110m" in str(model.get("parakeet_model") or "")
 
 
 def test_v002_gate_and_wait_knobs_match_defaults():

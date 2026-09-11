@@ -71,6 +71,7 @@ voice:
   # or hardware AEC is proven; the UI stop button still interrupts.
   barge_in_while_speaking: false
   echo_tail_ms: 400
+  reopen_ms: 300
   input_device: wm8960
   output_device: wm8960
   # "both" plays every clause twice ~1s apart (once via ALSA, once via the

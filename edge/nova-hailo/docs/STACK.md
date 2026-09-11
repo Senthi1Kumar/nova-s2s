@@ -63,7 +63,8 @@ Under `voice:` in the active YAML:
 
 - Gate: `gate_min_rms`, `gate_min_peak`, `gate_min_sec`, `gate_min_speech_frac`
 - ASR wait after speech end: `nemo_wait_floor_s`, `nemo_wait_cap_s`, `nemo_wait_base_s`, `nemo_wait_scale`
-- Echo: `echo_tail_ms`, `barge_in_while_speaking`
+- Echo: `echo_tail_ms`, `barge_in_while_speaking` (YAML stays false; soak launcher sets `NOVA_HAILO_BARGE_IN_WHILE_SPEAKING=true` and keeps HMI uplink open during TTS — see `docs/pipewire-aec.md`)
+- STT reopen pause: `reopen_ms` (commit delay after `speech_stopped`; 0 = immediate)
 
 Under `model:`:
 

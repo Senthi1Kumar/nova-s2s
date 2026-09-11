@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 
 # Proper-noun-ish tokens. Sentence-initial function words are excluded so a
 # reply merely *starting* with "It" or "The" is not treated as naming an entity.
@@ -123,8 +124,16 @@ class ConversationHistory:
             carried = _entities(a) & _entities(self._turns[-1].assistant)
             if _leads_with_possessive(a, carried - _entities(u)):
                 return
+        # A "summary" that merely repeats the answer is not evidence -- it is
+        # the same sentence stored twice. build_messages replays it in the USER
+        # channel, where it reads as material supplied for the *next* question:
+        # a search about a new phone was followed by an unrelated election
+        # question, and the model answered about the phone.
+        ts = (tool_summary or "").strip()
+        if ts and _norm(ts)[:120] in _norm(a):
+            ts = ""
         self._turns.append(
-            HistoryTurn(user=u[:240], assistant=a[:240], tool_summary=(tool_summary or None))
+            HistoryTurn(user=u[:240], assistant=a[:240], tool_summary=(ts or None))
         )
 
     def build_messages(
@@ -134,6 +143,7 @@ class ConversationHistory:
         *,
         tool_result_speak: str | None = None,
         no_think: bool = False,
+        now: datetime | None = None,
     ) -> list[dict]:
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         for turn in self._turns:
@@ -147,6 +157,14 @@ class ConversationHistory:
                     }
                 )
         ut = (user_text or "").strip()
+        # Stable facts belong beside the question, not inferred from the
+        # transcript. Without the date, a calendar answer drifted a day between
+        # two turns and then contradicted itself. It rides on the *current* user
+        # turn rather than the system prompt on purpose: a changing value in the
+        # prefix would break the provider's prompt cache on every request, and
+        # recency also keeps it from being lost in the middle of a long context.
+        stamp = (now or datetime.now()).strftime("%A, %d %B %Y, %H:%M")
+        ut = f"(Right now it is {stamp}.)\n{ut}" if ut else ut
         if no_think and "/no_think" not in ut.lower():
             ut = ut + "\n/no_think"
         if tool_result_speak:

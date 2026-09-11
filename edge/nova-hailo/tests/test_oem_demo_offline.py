@@ -102,7 +102,9 @@ def test_history_bounded_to_two_turns():
     assert msgs[0]["role"] == "system"
     users = [m["content"] for m in msgs if m["role"] == "user"]
     assert "b" in users[0]
-    assert users[-1].startswith("now")
+    # Containment, not prefix: the current turn carries a dated state line so
+    # the model stops re-deriving today's date from the transcript.
+    assert "now" in users[-1]
 
 
 def test_history_rejects_entity_bleed_from_previous_reply():
@@ -155,6 +157,20 @@ def test_fsm_complete_only_current():
     ctx = fsm.begin_turn()
     assert fsm.complete(ctx.generation_id, TurnTerminal.COMPLETED)
     assert fsm.complete(ctx.generation_id, TurnTerminal.COMPLETED) is False
+
+
+def test_fsm_complete_while_speaking_stays_until_release():
+    fsm = SessionFSM()
+    fsm.arm()
+    ctx = fsm.begin_turn()
+    assert fsm.set_thinking(ctx.generation_id)
+    assert fsm.set_speaking(ctx.generation_id)
+    assert fsm.complete(ctx.generation_id, TurnTerminal.COMPLETED)
+    assert fsm.state == SessionState.SPEAKING
+    fsm.begin_listen()
+    assert fsm.state == SessionState.SPEAKING
+    assert fsm.release_speaking() is True
+    assert fsm.state == SessionState.LISTENING
 
 
 def test_websearch_profile_routes_search_and_research():

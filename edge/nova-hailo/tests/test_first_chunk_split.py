@@ -230,3 +230,25 @@ def test_validate_spoken_unit_accepts_comma_terminated_fragments():
         assert result["ok"] is True, f"{frag!r} was rejected: {result['failures']}"
         assert result["speak"], f"{frag!r} produced empty speak text"
         assert not result["fallback"], f"{frag!r} fell back instead of speaking the fragment"
+
+
+def test_numeric_clauses_are_not_malformed():
+    """Prices, dates and years arrive as their own clause and are real speech.
+
+    Streaming splits at any comma, so "...listed around $1," is emitted and the
+    remainder "199." follows on its own. A letters-only content test called
+    every such clause garbage and the whole-turn fallback was spoken mid
+    sentence: "listed around $1, I'm here. Could you say that again?" --
+    observed live on a price, a summit date, and a calendar date.
+    """
+    for frag in ["199.", "2026.", "6, 2026.", "11th of September,", "$1,199.", "13.4"]:
+        result = validate_spoken_unit(frag)
+        assert result["ok"] is True, f"{frag!r} rejected: {result['failures']}"
+        assert not result["fallback"], f"{frag!r} fell back mid-answer"
+
+
+def test_control_token_soup_is_still_malformed():
+    """Loosening the content test must not stop catching actual junk."""
+    for frag in ["<|>", "~~~", "<<||>>", "`"]:
+        result = validate_spoken_unit(frag)
+        assert result["ok"] is False, f"{frag!r} should not be speakable"

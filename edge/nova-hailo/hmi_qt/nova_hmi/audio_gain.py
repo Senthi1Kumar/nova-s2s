@@ -75,6 +75,41 @@ def should_send_uplink(*, rms: float, blocked: bool, muted: bool) -> bool:
     return not blocked and not muted
 
 
+def mic_open_during_tts() -> bool:
+    """Keep HMI uplink open while TTS plays (PipeWire AEC + barge-in soak)."""
+    barge = (os.environ.get("NOVA_HAILO_BARGE_IN_WHILE_SPEAKING") or "").strip().lower()
+    if barge in {"1", "true", "yes", "on"}:
+        return True
+    if (os.environ.get("PULSE_SOURCE") or "").strip():
+        return True
+    cap = (os.environ.get("NOVA_HAILO_CAPTURE_DEVICE") or "").strip().lower()
+    return cap in {"pulse", "echo-cancel-source"}
+
+
+def hold_speaking_phase(*, current: str, incoming: str, playing: bool) -> bool:
+    """Keep the UI on speaking while local TTS is still leaving the speaker."""
+    return current == "speaking" and incoming != "speaking" and bool(playing)
+
+
+def uplink_is_blocked(
+    *,
+    muted: bool,
+    started_play: bool,
+    play_queued: bool,
+    hold_until: float,
+    now: float,
+    open_during_tts: bool,
+) -> bool:
+    """Mute-during-playback is the old echo guard. AEC barge-in leaves the mic open."""
+    if muted:
+        return True
+    if open_during_tts:
+        return now < hold_until
+    if started_play or play_queued:
+        return True
+    return now < hold_until
+
+
 DEAD_CAPTURE_RMS = 1e-4
 
 
@@ -139,3 +174,38 @@ def pick_input_index(devices: list, default_channels: int) -> int | None:
     if best is None or best[0] <= 0:
         return None
     return best[1]
+
+
+PULSE_PA_DEVICE = "pulse"
+PULSE_AEC_SOURCE = "echo-cancel-source"
+PULSE_AEC_SINK = "echo-cancel-sink"
+
+
+def remap_pipewire_device(
+    requested: str | int | None, *, kind: str
+) -> str | int | None:
+    """Map PipeWire node names to the PortAudio Pulse device.
+
+    PortAudio on the Pi lists ``pulse`` / ALSA cards — not ``echo-cancel-source``.
+    Opening the PipeWire name raises ValueError and the HMI orb stays dead.
+    Pulse clients honor ``PULSE_SOURCE`` / ``PULSE_SINK``.
+    """
+    if requested is None or isinstance(requested, int):
+        return requested
+    name = str(requested).strip()
+    if not name:
+        return None
+    lowered = name.lower()
+    if lowered == PULSE_PA_DEVICE:
+        return PULSE_PA_DEVICE
+    if kind == "input" and (
+        lowered == PULSE_AEC_SOURCE or lowered.startswith("echo-cancel")
+    ):
+        os.environ.setdefault("PULSE_SOURCE", PULSE_AEC_SOURCE)
+        return PULSE_PA_DEVICE
+    if kind == "output" and (
+        lowered == PULSE_AEC_SINK or lowered.startswith("echo-cancel")
+    ):
+        os.environ.setdefault("PULSE_SINK", PULSE_AEC_SINK)
+        return PULSE_PA_DEVICE
+    return requested

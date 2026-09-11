@@ -94,6 +94,9 @@ class SessionFSM:
         self.current: TurnContext | None = None
         self.last_terminal: TurnTerminal | None = None
         self._on_change = on_change
+        # Set at the VAD speech_stopped event; begin_turn copies it so
+        # speech_end_to_* clocks do not start on the worker thread.
+        self._pending_speech_stopped_at: float | None = None
 
     def _emit(self) -> None:
         cb = self._on_change
@@ -129,22 +132,46 @@ class SessionFSM:
                     return True
             return False
 
-    def begin_listen(self) -> None:
+    def begin_listen(self, *, force: bool = False) -> None:
+        """Park in LISTENING. Do not steal SPEAKING — TTS is still audible."""
         with self._lock:
-            if self.state in {SessionState.IDLE, SessionState.ARMED, SessionState.SPEAKING}:
+            if self.state == SessionState.SPEAKING and not force:
+                return
+            if self.state in {
+                SessionState.IDLE,
+                SessionState.ARMED,
+                SessionState.SPEAKING,
+                SessionState.INTERRUPTING,
+            }:
                 self._transition(SessionState.LISTENING)
 
-    def begin_turn(self) -> TurnContext:
+    def note_speech_stopped(self, when: float | None = None) -> float:
+        """Stamp VAD end-of-speech. Call from the audio loop, not begin_turn."""
+        t = time.perf_counter() if when is None else float(when)
+        with self._lock:
+            self._pending_speech_stopped_at = t
+            ctx = self.current
+            if ctx is not None and ctx.speech_stopped_at is None:
+                ctx.speech_stopped_at = t
+        return t
+
+    def begin_turn(self, speech_stopped_at: float | None = None) -> TurnContext:
         with self._lock:
             self._generation += 1
             # Force TRANSCRIBING even if prior arm/listen skipped (PTT commit)
             if not self._transition(SessionState.TRANSCRIBING):
                 self.state = SessionState.TRANSCRIBING
                 self._emit()
+            stopped = (
+                speech_stopped_at
+                if speech_stopped_at is not None
+                else self._pending_speech_stopped_at
+            )
+            self._pending_speech_stopped_at = None
             ctx = TurnContext(
                 turn_id="turn_" + uuid.uuid4().hex[:10],
                 generation_id=self._generation,
-                speech_stopped_at=time.perf_counter(),
+                speech_stopped_at=stopped,
             )
             self.current = ctx
             return ctx
@@ -190,6 +217,22 @@ class SessionFSM:
             if metadata:
                 ctx.metadata.update(metadata)
             self.last_terminal = terminal
+            # Synthesis finished; the client is often still playing. Stay
+            # SPEAKING until release_speaking() or interrupt().
+            if self.state == SessionState.SPEAKING:
+                return True
+            if self._armed_until and time.perf_counter() < self._armed_until:
+                self.state = SessionState.LISTENING
+            else:
+                self.state = SessionState.IDLE
+            self._emit()
+            return True
+
+    def release_speaking(self) -> bool:
+        """Client playback drained with no barge-in — return to LISTENING/IDLE."""
+        with self._lock:
+            if self.state != SessionState.SPEAKING:
+                return False
             if self._armed_until and time.perf_counter() < self._armed_until:
                 self.state = SessionState.LISTENING
             else:

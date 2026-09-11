@@ -29,6 +29,14 @@ def is_user_transcript(msg: dict) -> str | None:
     return t or None
 
 
+def user_transcript_delta(msg: dict) -> str | None:
+    """Growing YOU text. Do not treat as a chat commit."""
+    if msg.get("type") != "conversation.item.input_audio_transcription.delta":
+        return None
+    t = str(msg.get("transcript") or msg.get("delta") or "").strip()
+    return t or None
+
+
 def assistant_delta(msg: dict) -> str | None:
     if msg.get("type") not in {
         "response.audio_transcript.delta",

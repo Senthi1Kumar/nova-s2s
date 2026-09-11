@@ -1,6 +1,7 @@
 """Nova HMI protocol mapper — no Qt, no Hailo."""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from nova_hmi.protocol import (
     settings_payload,
     tool_status_label,
     turn_metrics_payload,
+    user_transcript_delta,
 )
 
 
@@ -44,6 +46,74 @@ def test_pick_input_only_when_default_is_wide():
     ]
     assert pick_input_index(devices, default_channels=2) is None
     assert pick_input_index(devices, default_channels=128) == 1
+
+
+def test_remap_pipewire_aec_names_to_pulse(monkeypatch):
+    from nova_hmi.audio_gain import remap_pipewire_device
+
+    monkeypatch.delenv("PULSE_SOURCE", raising=False)
+    monkeypatch.delenv("PULSE_SINK", raising=False)
+    assert remap_pipewire_device("echo-cancel-source", kind="input") == "pulse"
+    assert os.environ["PULSE_SOURCE"] == "echo-cancel-source"
+    assert remap_pipewire_device("echo-cancel-sink", kind="output") == "pulse"
+    assert os.environ["PULSE_SINK"] == "echo-cancel-sink"
+    assert remap_pipewire_device("pulse", kind="input") == "pulse"
+    assert remap_pipewire_device(3, kind="input") == 3
+    assert remap_pipewire_device(None, kind="input") is None
+
+
+def test_hold_speaking_phase_while_local_tts_plays():
+    from nova_hmi.audio_gain import hold_speaking_phase
+
+    assert hold_speaking_phase(current="speaking", incoming="listening", playing=True)
+    assert hold_speaking_phase(current="speaking", incoming="thinking", playing=True)
+    assert not hold_speaking_phase(current="speaking", incoming="listening", playing=False)
+    assert not hold_speaking_phase(current="speaking", incoming="speaking", playing=True)
+    assert not hold_speaking_phase(current="listening", incoming="speaking", playing=True)
+
+
+def test_uplink_stays_open_during_tts_when_aec_barge(monkeypatch):
+    from nova_hmi.audio_gain import mic_open_during_tts, uplink_is_blocked
+
+    monkeypatch.delenv("NOVA_HAILO_BARGE_IN_WHILE_SPEAKING", raising=False)
+    monkeypatch.delenv("PULSE_SOURCE", raising=False)
+    monkeypatch.delenv("NOVA_HAILO_CAPTURE_DEVICE", raising=False)
+    assert mic_open_during_tts() is False
+    assert (
+        uplink_is_blocked(
+            muted=False,
+            started_play=True,
+            play_queued=True,
+            hold_until=0.0,
+            now=10.0,
+            open_during_tts=False,
+        )
+        is True
+    )
+    monkeypatch.setenv("NOVA_HAILO_BARGE_IN_WHILE_SPEAKING", "true")
+    assert mic_open_during_tts() is True
+    assert (
+        uplink_is_blocked(
+            muted=False,
+            started_play=True,
+            play_queued=True,
+            hold_until=0.0,
+            now=10.0,
+            open_during_tts=True,
+        )
+        is False
+    )
+    assert (
+        uplink_is_blocked(
+            muted=True,
+            started_play=False,
+            play_queued=False,
+            hold_until=0.0,
+            now=10.0,
+            open_during_tts=True,
+        )
+        is True
+    )
 
 
 def test_resample_16k_to_48k_is_exact_triple():
@@ -128,6 +198,25 @@ def test_transcript_and_tool_extractors():
         == "hello there"
     )
     assert is_user_transcript({"type": "nova.fsm"}) is None
+    assert (
+        user_transcript_delta(
+            {
+                "type": "conversation.item.input_audio_transcription.delta",
+                "delta": "hel",
+                "transcript": "hello",
+            }
+        )
+        == "hello"
+    )
+    assert (
+        is_user_transcript(
+            {
+                "type": "conversation.item.input_audio_transcription.delta",
+                "transcript": "hello",
+            }
+        )
+        is None
+    )
     assert assistant_delta({"type": "response.audio_transcript.delta", "delta": "Hi"}) == "Hi"
     assert assistant_done({"type": "response.audio_transcript.done", "transcript": "Hi."}) == "Hi."
     assert (

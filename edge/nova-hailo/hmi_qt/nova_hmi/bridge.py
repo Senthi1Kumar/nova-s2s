@@ -22,6 +22,7 @@ from nova_hmi.protocol import (
     settings_payload,
     tool_status_label,
     turn_metrics_payload,
+    user_transcript_delta,
 )
 
 
@@ -31,6 +32,7 @@ class RealtimeBridge(QObject):
     phaseReceived = Signal(str)
     fsmReceived = Signal(str)
     userTranscript = Signal(str)
+    userTranscriptDelta = Signal(str)
     assistantDelta = Signal(str)
     assistantDone = Signal(str)
     audioDelta = Signal(bytes, int)
@@ -159,6 +161,9 @@ class RealtimeBridge(QObject):
     def playback_interrupted(self) -> None:
         self.send({"type": "playback.interrupted", "reason": "client", "t_ms": 0})
 
+    def playback_stopped(self) -> None:
+        self.send({"type": "playback.stopped", "t_ms": 0})
+
     def _on_connected(self) -> None:
         self._retry.stop()
         print("[hmi] ws connected — arming session", flush=True)
@@ -206,6 +211,11 @@ class RealtimeBridge(QObject):
             else:
                 err = msg.get("error") or "no auth_url returned"
                 print(f"[hmi] google oauth start failed: {err}", flush=True)
+            return
+        live = user_transcript_delta(msg)
+        if live:
+            self.userTranscriptDelta.emit(live)
+            self.phaseReceived.emit("listening")
             return
         user = is_user_transcript(msg)
         if user:

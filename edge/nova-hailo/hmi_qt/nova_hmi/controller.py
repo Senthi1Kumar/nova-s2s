@@ -4,6 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 
+from nova_hmi.audio_gain import hold_speaking_phase
 from nova_hmi.protocol import PHASES, integrations_payload, map_fsm_to_phase
 
 DEMO_SCRIPT = [
@@ -141,6 +142,8 @@ class NovaController(QObject):
             bridge.disconnected.connect(self._on_link_down)
             bridge.phaseReceived.connect(self._set_phase_from_server)
             bridge.userTranscript.connect(self._on_user)
+            if hasattr(bridge, "userTranscriptDelta"):
+                bridge.userTranscriptDelta.connect(self._on_user_live)
             bridge.assistantDelta.connect(self._on_asst_delta)
             bridge.assistantDone.connect(self._on_asst_done)
             bridge.audioDelta.connect(self._on_audio)
@@ -505,16 +508,18 @@ class NovaController(QObject):
         self._phase = value
         self.phaseChanged.emit(value)
 
+    def _tts_playing(self) -> bool:
+        audio = self._audio
+        if hasattr(audio, "is_playing"):
+            return bool(audio.is_playing())
+        return hasattr(audio, "play_queue_depth") and audio.play_queue_depth() > 0
+
     def _set_phase_from_server(self, value: str) -> None:
         phase = value if value in PHASES else map_fsm_to_phase(value)
         if phase == self._phase:
             return
-        # Stay SPEAKING only while local TTS is actually queued.
-        if (
-            self._phase == "speaking"
-            and phase not in {"speaking", "idle"}
-            and hasattr(self._audio, "play_queue_depth")
-            and self._audio.play_queue_depth() > 0
+        if hold_speaking_phase(
+            current=self._phase, incoming=phase, playing=self._tts_playing()
         ):
             return
         self._phase = phase
@@ -548,6 +553,15 @@ class NovaController(QObject):
             self.toolCapsuleStatusChanged.emit(st)
             if st in {"running", "searching", "generating"}:
                 self.transcriptAdded.emit("tool", text)
+
+    def _on_user_live(self, text: str) -> None:
+        t = (text or "").strip()
+        if not t:
+            return
+        self._live_user = t
+        self._live_visible = True
+        self.liveUserChanged.emit(t)
+        self.liveVisibleChanged.emit(True)
 
     def _on_user(self, text: str) -> None:
         t = (text or "").strip()
@@ -662,20 +676,14 @@ class NovaController(QObject):
 
     def _force_listen(self) -> None:
         self._speak_watch.stop()
-        if hasattr(self._audio, "flush_playback"):
-            # Drop any stuck tail so the UI cannot freeze on SPEAKING.
-            if hasattr(self._audio, "play_queue_depth") and self._audio.play_queue_depth() == 0:
-                pass
+        if self._tts_playing():
+            return
         self._set_phase_from_server("listening")
 
     def _on_audio(self, pcm: bytes, rate: int) -> None:
         if hasattr(self._audio, "enqueue_playback"):
             self._audio.enqueue_playback(pcm, rate)
         self._set_phase_from_server("speaking")
-        extra_ms = 2200
-        if hasattr(self._audio, "remaining_playback_s"):
-            extra_ms = max(2200, int(self._audio.remaining_playback_s() * 1000) + 800)
-        self._speak_watch.start(extra_ms)
 
     def _on_cancel(self) -> None:
         if hasattr(self._audio, "flush_playback"):
@@ -689,11 +697,12 @@ class NovaController(QObject):
         self._speak_watch.start(1200)
 
     def _on_play_empty(self) -> None:
+        if self._bridge is not None and hasattr(self._bridge, "playback_stopped"):
+            self._bridge.playback_stopped()
         self._force_listen()
 
     def _on_turn_done(self) -> None:
-        if hasattr(self._audio, "play_queue_depth") and self._audio.play_queue_depth() > 0:
-            self._speak_watch.start(1500)
+        if self._tts_playing():
             return
         self._force_listen()
 

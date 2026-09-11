@@ -34,6 +34,29 @@ def test_persona_drift_strings_fail_contract(text: str):
     assert result["speak"] == _FALLBACK
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Live failure: asked about a new model, the answer was spliced apart
+        # and "I'm here. Could you say that again?" was spoken mid-sentence,
+        # because a bare "language model" matched the identity guard.
+        "It is a large language model built for deep research.",
+        "The language model uses parallel research branches.",
+        "OpenAI's newest language model scores higher on that benchmark.",
+        "Gemini is a multimodal language model from Google.",
+    ],
+)
+def test_third_party_model_talk_is_not_drift(text: str):
+    """Discussing someone else's LLM is a topic, not an identity slip.
+
+    The guard exists to catch Nova claiming to be a language model rather than
+    Nova. It must not fire when an LLM is simply what the driver asked about.
+    """
+    result = validate_spoken_unit(text)
+    assert result["ok"] is True, f"false positive: {result['failures']}"
+    assert result["speak"] == result["text"]
+
+
 def test_fallback_itself_passes_contract():
     """A fallback that fails its own contract would loop forever."""
     result = validate_spoken_unit(_FALLBACK)

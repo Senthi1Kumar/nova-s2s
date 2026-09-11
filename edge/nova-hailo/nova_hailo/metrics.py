@@ -168,6 +168,9 @@ class TurnMetrics:
     barge_in: bool = False
     barge_in_at_ms: float | None = None
     barge_in_stop_ms: float | None = None  # interrupt → playback stop ACK
+    barge_in_detect_ms: float | None = None
+    llm_abort_ms: float | None = None
+    tts_flush_ms: float | None = None
     generation_id: int | None = None
     auth_decision: str | None = None
     tool_name: str | None = None
@@ -216,6 +219,9 @@ class TurnMetrics:
             "barge_in": self.barge_in,
             "barge_in_at_ms": _r(self.barge_in_at_ms, 1),
             "barge_in_stop_ms": _r(self.barge_in_stop_ms, 1),
+            "barge_in_detect_ms": _r(self.barge_in_detect_ms, 1),
+            "llm_abort_ms": _r(self.llm_abort_ms, 1),
+            "tts_flush_ms": _r(self.tts_flush_ms, 1),
             "generation_id": self.generation_id,
             "auth_decision": self.auth_decision,
             "tool_name": self.tool_name,

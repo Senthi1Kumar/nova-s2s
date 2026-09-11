@@ -225,6 +225,11 @@ class SileroVadSegmenter:
         self._pre.clear()
         self._pre_samples = 0
         if active < self._min_speech or len(audio) < self._min_speech:
+            print(
+                f"[vad] drop short active_ms={active / 16.0:.0f} "
+                f"audio_ms={len(audio) / 16.0:.0f} min_ms={self._min_speech / 16.0:.0f}",
+                flush=True,
+            )
             return None
         if last_voiced > 0:
             keep = min(len(audio), last_voiced + self._pad)

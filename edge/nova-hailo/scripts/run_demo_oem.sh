@@ -45,6 +45,14 @@ export PYTHONPATH="${ROOT}/../..:${ROOT}:${PYTHONPATH:-}"
 # card is missing.
 "$ROOT/scripts/set_wm8960_mic_gain.sh" "${WM8960_GAIN_PCT:-100}" || true
 
+# PipeWire WebRTC AEC + HMI device names. Idempotent; skip with NOVA_HAILO_AEC=0.
+# HMI is a second process — hmi_qt/run.sh sources the same env file.
+if [[ "${NOVA_HAILO_AEC:-1}" != "0" ]]; then
+  NOVA_AEC_QUIET=1 "$ROOT/scripts/setup_pipewire_aec.sh" || true
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/hmi_aec_env.sh"
+fi
+
 echo "=========================================="
 echo " Nova-Hailo OEM Demo"
 echo "  Profile : ${NOVA_HAILO_PROFILE}"
@@ -55,7 +63,8 @@ echo "  LLM     : ${NOVA_HAILO_LLM:-$(cfgval llm_hef)}${NOVA_HAILO_LLM:+  (env o
 echo "  STT     : ${NOVA_HAILO_STT:-$(cfgval stt_engine)}${NOVA_HAILO_STT:+  (env override!)}  decoder=$(cfgval parakeet_decoder)"
 echo "  TTS     : ${NOVA_HAILO_TTS:-$(cfgval tts_engine)}${NOVA_HAILO_TTS:+  (env override!)}"
 echo "  Playback: ${NOVA_HAILO_PLAYBACK:-$(cfgval playback)}${NOVA_HAILO_PLAYBACK:+  (env override!)}"
-echo "  Tools   : $(cfgval profile)   Barge-in: $(cfgval barge_in_while_speaking)"
+echo "  Tools   : $(cfgval profile)   Barge-in: ${NOVA_HAILO_BARGE_IN_WHILE_SPEAKING:-$(cfgval barge_in_while_speaking)}"
+echo "  AEC     : pa=${NOVA_HAILO_CAPTURE_DEVICE:-default}/${NOVA_HAILO_PLAYBACK_DEVICE:-default}  pulse=${PULSE_SOURCE:-off}/${PULSE_SINK:-off}"
 echo "  Rollback: NOVA_HAILO_PROFILE=oem_rollback $0"
 echo "  Legacy  : NOVA_HAILO_PROFILE=conversation $0  (config.oem.yaml)"
 echo "=========================================="

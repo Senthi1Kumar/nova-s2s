@@ -9,9 +9,11 @@ import asyncio
 import base64
 import collections
 import json
+import os
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -52,6 +54,34 @@ from nova_hailo.web.vad import create_vad_segmenter
 # How often to check for a finished async research job. Short enough that a
 # result feels prompt, long enough to cost nothing when there is no job.
 RESEARCH_TICK_SEC = 2.0
+OVERLAP_STALE_S = 0.35
+BARGE_IN_WAIT_S = 2.0
+DEFAULT_REOPEN_MS = 300
+
+
+def should_interrupt_on_user_speech(
+    *,
+    fsm_state: SessionState,
+    tts_speaking: bool,
+    barge_in_while_speaking: bool,
+    client_playing: bool = False,
+) -> bool:
+    """True only when Nova is audibly speaking and barge-in is enabled.
+
+    Speech during TRANSCRIBING/THINKING is a repeat while the first turn is
+    still unanswered. Aborting that turn made the first utterance look dropped.
+    ``client_playing`` covers HMI/browser playback after server synthesis ends.
+    """
+    if fsm_state == SessionState.INTERRUPTING:
+        return False
+    audible = (
+        bool(tts_speaking)
+        or bool(client_playing)
+        or fsm_state == SessionState.SPEAKING
+    )
+    return bool(audible and barge_in_while_speaking)
+
+
 # Speaking a finished result is safe in any of these. LISTENING matters most:
 # every turn ends with arm() *followed by*
 # begin_listen(), so LISTENING -- mic open, nothing captured yet -- is the
@@ -88,6 +118,23 @@ def _pcm16_b64(audio: np.ndarray) -> str:
 
 def _b64_pcm16(data: str) -> bytes:
     return base64.b64decode(data.encode("ascii") if isinstance(data, str) else data)
+
+
+@dataclass
+class PendingUtterance:
+    audio: np.ndarray
+    nemo_result: dict | None
+    t0: float
+    kind: str = "overlap"  # barge_in | overlap
+    speech_stopped_at: float | None = None
+    turn_revision: int = 0
+
+
+def _concat_audio(left: np.ndarray | None, right: np.ndarray) -> np.ndarray:
+    right_a = np.asarray(right, dtype=np.float32).reshape(-1)
+    if left is None:
+        return right_a
+    return np.concatenate([np.asarray(left, dtype=np.float32).reshape(-1), right_a])
 
 
 def _integrations_snapshot() -> dict[str, Any]:
@@ -195,11 +242,14 @@ class RealtimeSession:
         self._research_backlog: list[dict[str, Any]] = []
         self._closed = False
         self._response_id: str | None = None
-        self._pending: collections.deque[tuple[np.ndarray, dict | None]] = collections.deque(maxlen=2)
+        self._pending: collections.deque[PendingUtterance] = collections.deque(maxlen=4)
         self._nemo_ws = None
         self._nemo_ws_task: asyncio.Task | None = None
         self._research_task: asyncio.Task | None = None
+        self._reopen_task: asyncio.Task | None = None
         self._nemo_stream_result: dict | None = None
+        self._utterance_audio: np.ndarray | None = None
+        self._turn_revision = 0
         self._ptt_armed = False
         wake_mode = str(cfg.get("wake", "mode", default="ptt") or "ptt").lower()
         self.wake = WakeWordDetector(
@@ -219,12 +269,23 @@ class RealtimeSession:
             required_frames=int(cfg.get("pvad", "barge_in_frames", default=2) or 2),
         )
         cfgv = pipeline.cfg
-        self.barge_in_while_speaking = bool(
-            cfgv.get("voice", "barge_in_while_speaking", default=False)
+        barge_env = (os.environ.get("NOVA_HAILO_BARGE_IN_WHILE_SPEAKING") or "").strip().lower()
+        if barge_env:
+            self.barge_in_while_speaking = barge_env in {"1", "true", "yes", "on"}
+        else:
+            self.barge_in_while_speaking = bool(
+                cfgv.get("voice", "barge_in_while_speaking", default=False)
+            )
+        print(
+            f"[voice] barge_in_while_speaking={self.barge_in_while_speaking} "
+            f"echo_tail_ms={cfgv.get('voice', 'echo_tail_ms', default=400)} "
+            f"stt={getattr(pipeline, 'stt_engine', None)}",
+            flush=True,
         )
         self.echo_tail_ms = int(cfgv.get("voice", "echo_tail_ms", default=400) or 400)
         self._echo_until = 0.0
         self._echo_logged = False
+        self._client_playing = False
         self.echo_max_ms = int(cfgv.get("voice", "echo_max_ms", default=12000) or 12000)
         # Energy gate knobs (audio_gate.accept_utterance); defaults match module constants.
         self.gate_min_rms = float(
@@ -256,6 +317,9 @@ class RealtimeSession:
         self.nemo_wait_scale = float(
             cfgv.get("voice", "nemo_wait_scale", default=DEFAULT_NEMO_WAIT_SCALE)
             or DEFAULT_NEMO_WAIT_SCALE
+        )
+        self.reopen_ms = int(
+            cfgv.get("voice", "reopen_ms", default=DEFAULT_REOPEN_MS) or DEFAULT_REOPEN_MS
         )
         self._playback_stop_ack_at: float | None = None
         self._first_audio_ack_at: float | None = None
@@ -416,6 +480,12 @@ class RealtimeSession:
                         f"[research] deliver job={str(item.get('job_id'))[:12]} spoken={ok}",
                         flush=True,
                     )
+                    if not ok:
+                        # Popped but not said: putting it back is the whole
+                        # point of the backlog. Dropping it here lost the
+                        # answer the user explicitly asked for.
+                        queue.insert(0, item)
+                        break
                 # Whatever we could not say now is kept, not dropped: the user
                 # asked for this research and a later quiet tick will deliver it.
                 self._research_backlog = queue
@@ -437,7 +507,15 @@ class RealtimeSession:
         speak = str(item.get("speak") or "").strip()
         if not speak:
             return False
-        prefixed = f"About that research you asked for — {speak}"
+        # Name the question being answered. A result can land several turns
+        # after it was asked, and "that research you asked for" is
+        # indistinguishable from a wrong answer to whatever was just said.
+        asked = " ".join(str(item.get("user_text") or "").split())[:80].rstrip(" ,.?!")
+        prefixed = (
+            f"About your question on {asked} — {speak}"
+            if asked
+            else f"About that research you asked for — {speak}"
+        )
         self.pipeline.begin_turn()  # clear abort/barge-in/gen_guard before speaking
         my_gen = self.pipeline.gen_guard.generation_id
 
@@ -478,7 +556,14 @@ class RealtimeSession:
         self.pipeline.on_research_status = None
         self.pipeline.on_token = None
         try:
-            if self.fsm.state != SessionState.IDLE or self.pipeline.abort_event.is_set():
+            # Same set the caller gates on. Demanding IDLE here contradicted
+            # that outer guard: every turn ends parked in LISTENING, so this
+            # rejected every delivery the caller had just approved, and the
+            # result was popped off the queue and silently destroyed.
+            if (
+                self.fsm.state not in _RESEARCH_QUIET_STATES
+                or self.pipeline.abort_event.is_set()
+            ):
                 return False
             tm = TurnMetrics(generation_id=my_gen, notes=["research_delivery"])
             result = self.pipeline._speak_tool_line(
@@ -604,6 +689,7 @@ class RealtimeSession:
             if task is not None:
                 task.cancel()
             self.pipeline.on_abort()
+            self._cancel_reopen()
             await self._finish_nemo_stream()
 
     async def _handle_client(self, msg: dict[str, Any]):
@@ -662,6 +748,7 @@ class RealtimeSession:
 
         if mtype == "playback.started":
             self._first_audio_ack_at = time.perf_counter()
+            self._client_playing = True
             ctx = self.fsm.current
             if ctx is not None and ctx.first_audio_played_at is None:
                 ctx.first_audio_played_at = self._first_audio_ack_at
@@ -669,7 +756,10 @@ class RealtimeSession:
 
         if mtype == "playback.interrupted" or mtype == "playback.stopped":
             self._playback_stop_ack_at = time.perf_counter()
+            self._client_playing = False
             self._echo_until = 0.0  # audible output is over; reopen the mic
+            if mtype == "playback.stopped":
+                self.fsm.release_speaking()
             ctx = self.fsm.current
             if ctx is not None and ctx.barge_in_at is not None:
                 stop_ms = (self._playback_stop_ack_at - ctx.barge_in_at) * 1000
@@ -686,11 +776,12 @@ class RealtimeSession:
                 < getattr(self, "_echo_until", 0.0) + self.echo_tail_ms / 1000.0
             ):
                 return
-            if self.fsm.state in {
-                SessionState.TRANSCRIBING,
-                SessionState.THINKING,
-                SessionState.SPEAKING,
-            } or self.pipeline.tts.is_speaking:
+            if should_interrupt_on_user_speech(
+                fsm_state=self.fsm.state,
+                tts_speaking=bool(self.pipeline.tts.is_speaking),
+                barge_in_while_speaking=self.barge_in_while_speaking,
+                client_playing=bool(self._client_playing),
+            ):
                 self._barge_in(reason="client_cancel")
             return
 
@@ -722,7 +813,18 @@ class RealtimeSession:
                 self.fsm.begin_listen()
                 self._schedule_send({"type": "wake.detected", "fsm": self.fsm.snapshot()})
 
-            speaking = self.fsm.state == SessionState.SPEAKING or self.pipeline.tts.is_speaking
+            if (
+                self.fsm.state == SessionState.SPEAKING
+                and not self.pipeline.tts.is_speaking
+                and not self._client_playing
+                and time.monotonic() >= float(getattr(self, "_echo_until", 0.0) or 0.0)
+            ):
+                self.fsm.release_speaking()
+            speaking = (
+                self.fsm.state == SessionState.SPEAKING
+                or self.pipeline.tts.is_speaking
+                or self._client_playing
+            )
             if speaking and self.pvad.available and self.pvad.feed_pcm16(pcm):
                 self._barge_in(reason="pvad_target_speech")
 
@@ -770,27 +872,50 @@ class RealtimeSession:
             vad_events = list(self.vad.feed(pcm))
             for ev, payload in vad_events:
                 if ev == "speech_started":
+                    print(
+                        f"[vad] speech_started fsm={self.fsm.state.value} "
+                        f"tts={self.pipeline.tts.is_speaking}",
+                        flush=True,
+                    )
                     await self.send({"type": "input_audio_buffer.speech_started"})
-                    await self._start_nemo_stream()
-                    if speaking or self.fsm.state in {
-                        SessionState.THINKING,
-                        SessionState.SPEAKING,
-                        SessionState.TRANSCRIBING,
-                    }:
-                        self._barge_in(reason="vad_speech_started")
+                    reopen_pending = self._reopen_task is not None
+                    if reopen_pending:
+                        print("[vad] reopen cancelled (speech again)", flush=True)
+                        self._cancel_reopen()
+                        self._turn_revision += 1
+                        await self._start_nemo_stream(reuse=True)
                     else:
-                        self.fsm.begin_listen()
+                        await self._start_nemo_stream(reuse=False)
+                        if should_interrupt_on_user_speech(
+                            fsm_state=self.fsm.state,
+                            tts_speaking=speaking,
+                            barge_in_while_speaking=self.barge_in_while_speaking,
+                            client_playing=bool(self._client_playing),
+                        ):
+                            self._barge_in(reason="vad_speech_started", abort_nemo=False)
+                            self._utterance_audio = None
+                            self._turn_revision = 0
+                        else:
+                            self.fsm.begin_listen()
 
             await self._nemo_send_pcm(pcm)
 
             for ev, payload in vad_events:
                 if ev == "speech_stopped" and payload is not None:
+                    print(
+                        f"[vad] speech_stopped sec={float(payload.size) / 16000.0:.2f} "
+                        f"fsm={self.fsm.state.value}",
+                        flush=True,
+                    )
+                    stopped_at = self.fsm.note_speech_stopped()
                     await self.send({"type": "input_audio_buffer.speech_stopped"})
-                    # Attach utterance duration so the wait budget scales with
-                    # speech length instead of a fixed 5s artificial floor.
-                    audio_sec = float(np.asarray(payload).reshape(-1).size) / 16000.0
-                    nemo_result = await self._finish_nemo_stream(audio_sec=audio_sec)
-                    self._start_turn(payload, nemo_result=nemo_result)
+                    self._utterance_audio = _concat_audio(self._utterance_audio, payload)
+                    audio_sec = float(self._utterance_audio.size) / 16000.0
+                    await self._schedule_utterance_commit(
+                        self._utterance_audio,
+                        audio_sec=audio_sec,
+                        speech_stopped_at=stopped_at,
+                    )
                     if self.ns is not None:
                         self.ns.reset()
             return
@@ -798,20 +923,31 @@ class RealtimeSession:
         if mtype == "input_audio_buffer.commit":
             return
 
-    def _barge_in(self, reason: str):
+    def _barge_in(self, reason: str, *, abort_nemo: bool = True):
+        t0 = time.perf_counter()
         ctx = self.fsm.interrupt(reason=reason)
+        t_llm0 = time.perf_counter()
         self.pipeline.on_abort()
-        if hasattr(self.pipeline, "gen_guard"):
-            self.pipeline.gen_guard.invalidate(reason)
+        llm_abort_ms = (time.perf_counter() - t_llm0) * 1000
+        # tts.interrupt lives inside on_abort; record the combined abort as
+        # llm_abort_ms and a second stamp for flush (same window, split for logs).
+        tts_flush_ms = llm_abort_ms
+        detect_ms = (t_llm0 - t0) * 1000
+        if ctx is not None:
+            ctx.metadata["barge_in_detect_ms"] = detect_ms
+            ctx.metadata["llm_abort_ms"] = llm_abort_ms
+            ctx.metadata["tts_flush_ms"] = tts_flush_ms
         # Playback is being dropped, so stop gating the mic immediately.
         self._echo_until = 0.0
-        # Drop any open sidecar stream so stale finals cannot land on the next turn.
-        try:
-            loop = self.loop
-            if loop is not None and loop.is_running():
-                asyncio.run_coroutine_threadsafe(self._abort_nemo_stream(), loop)
-        except Exception:
-            pass
+        self._client_playing = False
+        self._cancel_reopen()
+        if abort_nemo:
+            try:
+                loop = self.loop
+                if loop is not None and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(self._abort_nemo_stream(), loop)
+            except Exception:
+                pass
         self._schedule_send(
             {
                 "type": "response.done",
@@ -823,6 +959,9 @@ class RealtimeSession:
                         "reason": reason,
                         "generation_id": self.fsm.generation_id,
                         "barge_in_stop_ms": (ctx.metadata.get("barge_in_stop_ms") if ctx else None),
+                        "barge_in_detect_ms": detect_ms,
+                        "llm_abort_ms": llm_abort_ms,
+                        "tts_flush_ms": tts_flush_ms,
                     },
                 },
             }
@@ -834,6 +973,54 @@ class RealtimeSession:
                 "reason": reason,
             }
         )
+
+    def _cancel_reopen(self) -> None:
+        task = self._reopen_task
+        self._reopen_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _schedule_utterance_commit(
+        self,
+        audio: np.ndarray,
+        *,
+        audio_sec: float,
+        speech_stopped_at: float,
+    ) -> None:
+        """Hold STT commit across a short pause so mid-sentence cuts can reopen."""
+        self._cancel_reopen()
+        kind = (
+            "barge_in"
+            if self.fsm.state == SessionState.INTERRUPTING
+            else "overlap"
+        )
+        delay_s = max(0.0, self.reopen_ms / 1000.0)
+
+        async def _commit():
+            try:
+                if delay_s:
+                    await asyncio.sleep(delay_s)
+            except asyncio.CancelledError:
+                return
+            self._reopen_task = None
+            held = self._utterance_audio if self._utterance_audio is not None else audio
+            self._utterance_audio = None
+            revision = self._turn_revision
+            self._turn_revision = 0
+            sec = float(np.asarray(held).reshape(-1).size) / 16000.0
+            nemo_result = await self._finish_nemo_stream(audio_sec=sec or audio_sec)
+            self._start_turn(
+                held,
+                nemo_result=nemo_result,
+                speech_stopped_at=speech_stopped_at,
+                kind=kind,
+                turn_revision=revision,
+            )
+
+        if delay_s <= 0:
+            await _commit()
+            return
+        self._reopen_task = asyncio.create_task(_commit())
 
     def _nemo_wait_budget_s(self, audio_sec: float) -> float:
         """Post-speech wait for streaming finalization (config-driven knobs)."""
@@ -865,13 +1052,19 @@ class RealtimeSession:
                 self._nemo_send_err_logged = True
             self._nemo_ws = None
 
-    async def _start_nemo_stream(self):
+    async def _start_nemo_stream(self, reuse: bool = False):
         """Open a WebSocket to nemo-speech serve for the turn about to begin.
 
         C++ server does the decode (OpenAI-shaped /v1/realtime). Python only
         forwards PCM and waits for the final. No-op when stt_engine != nemo_speech
         or the sidecar is down (offline ctypes path in _run_turn_blocking).
+
+        reuse=True keeps an already-open sidecar socket (mid-pause reopen).
+        A new utterance must pass reuse=False so the *old* turn's stream is
+        aborted and this stream belongs to the interrupter.
         """
+        if reuse and self._nemo_ws is not None:
+            return
         await self._abort_nemo_stream()
         if self.pipeline.stt_engine != "nemo_speech":
             return
@@ -936,6 +1129,15 @@ class RealtimeSession:
                         result["partial"] = msg.get("transcript") or ""
                     elif delta:
                         result["partial"] = (result.get("partial") or "") + delta
+                    partial = (result.get("partial") or "").strip()
+                    if partial:
+                        self._schedule_send(
+                            {
+                                "type": "conversation.item.input_audio_transcription.delta",
+                                "delta": partial,
+                                "transcript": partial,
+                            }
+                        )
                 elif mtype == "conversation.item.input_audio_transcription.completed":
                     text = (msg.get("transcript") or "").strip()
                     if text:
@@ -1069,9 +1271,10 @@ class RealtimeSession:
         ctx = self.fsm.current
 
         def on_pcm(chunk: np.ndarray, sample_rate: int):
-            if not self.fsm.is_current(generation_id):
+            if not self._pcm_should_send(generation_id):
                 return
             self.fsm.set_speaking(generation_id)
+            self._client_playing = True
             if ctx is not None and ctx.first_pcm_sent_at is None:
                 ctx.first_pcm_sent_at = time.perf_counter()
             # Extend echo guard for the duration of PCM we hand the browser.
@@ -1182,45 +1385,100 @@ class RealtimeSession:
             self.pipeline.on_tool_status = None
             self.pipeline.on_token = None
 
-    def _start_turn(self, audio: np.ndarray, nemo_result: dict | None = None):
-        # Do not queue speech captured while a turn is in flight — that is the
-        # "answers a question I asked seconds ago / I did not speak" loop
-        # (echo of TTS + leftover VAD). Barge-in is explicit, not a backlog.
+    def _pop_fresh_pending(self) -> PendingUtterance | None:
+        """Next queued utterance that is still within its stale cap."""
+        while self._pending and not self._closed:
+            nxt = self._pending.popleft()
+            age = time.monotonic() - nxt.t0
+            cap = BARGE_IN_WAIT_S if nxt.kind == "barge_in" else OVERLAP_STALE_S
+            if age > cap:
+                label = "barge-in" if nxt.kind == "barge_in" else "stale queued"
+                print(f"[asr] drop {label} utterance", flush=True)
+                continue
+            return nxt
+        return None
+
+    def _pcm_should_send(self, generation_id: int) -> bool:
+        if not self.fsm.is_current(generation_id):
+            return False
+        gg = getattr(self.pipeline, "gen_guard", None)
+        if gg is not None and not gg.should_enqueue_pcm(gg.generation_id):
+            return False
+        return True
+
+    def _start_turn(
+        self,
+        audio: np.ndarray,
+        nemo_result: dict | None = None,
+        *,
+        speech_stopped_at: float | None = None,
+        kind: str = "overlap",
+        turn_revision: int = 0,
+    ):
+        # Overlap (echo/backlog while a turn is in flight without interrupt)
+        # is dropped. Barge-in audio captured during INTERRUPTING must wait
+        # for the lock (capped at BARGE_IN_WAIT_S) instead of the 0.35s expiry.
+        item = PendingUtterance(
+            audio=np.asarray(audio, dtype=np.float32).reshape(-1),
+            nemo_result=nemo_result,
+            t0=time.monotonic(),
+            kind=kind,
+            speech_stopped_at=speech_stopped_at,
+            turn_revision=turn_revision,
+        )
+        interrupting = self.fsm.state == SessionState.INTERRUPTING or kind == "barge_in"
         busy = self.fsm.state in {
             SessionState.TRANSCRIBING,
             SessionState.THINKING,
             SessionState.SPEAKING,
-        } or self.pipeline.tts.is_speaking
+        } or bool(getattr(getattr(self.pipeline, "tts", None), "is_speaking", False))
         if not self._turn_lock.acquire(blocking=False):
+            if interrupting:
+                self._pending.append(item)
+                return
             if busy:
                 print("[asr] drop overlapping utterance (turn in flight)", flush=True)
                 return
-            self._pending.append((audio, nemo_result, time.monotonic()))
+            self._pending.append(item)
             return
 
         def worker():
             try:
-                self._run_turn_blocking(audio, nemo_result=nemo_result)
+                self._run_turn_blocking(
+                    item.audio,
+                    nemo_result=item.nemo_result,
+                    speech_stopped_at=item.speech_stopped_at,
+                    turn_revision=item.turn_revision,
+                )
             finally:
                 self._turn_lock.release()
-                stale_s = 0.35
-                while self._pending and not self._closed:
-                    item = self._pending.popleft()
-                    nxt_audio, nxt_nemo = item[0], item[1]
-                    t0 = item[2] if len(item) > 2 else 0.0
-                    if t0 and (time.monotonic() - t0) > stale_s:
-                        print("[asr] drop stale queued utterance", flush=True)
-                        continue
-                    self._start_turn(nxt_audio, nemo_result=nxt_nemo)
-                    break
+            if self._closed:
+                return
+            nxt = self._pop_fresh_pending()
+            if nxt is None:
+                return
+            self._start_turn(
+                nxt.audio,
+                nemo_result=nxt.nemo_result,
+                speech_stopped_at=nxt.speech_stopped_at,
+                kind=nxt.kind,
+                turn_revision=nxt.turn_revision,
+            )
 
         threading.Thread(target=worker, daemon=True, name="realtime-turn").start()
 
-    def _run_turn_blocking(self, audio: np.ndarray, nemo_result: dict | None = None):
+    def _run_turn_blocking(
+        self,
+        audio: np.ndarray,
+        nemo_result: dict | None = None,
+        *,
+        speech_stopped_at: float | None = None,
+        turn_revision: int = 0,
+    ):
         self.pipeline.begin_turn()
         self._first_audio_ack_at = None
         self._playback_stop_ack_at = None
-        ctx = self.fsm.begin_turn()
+        ctx = self.fsm.begin_turn(speech_stopped_at=speech_stopped_at)
         generation_id = ctx.generation_id
         self.pipeline.active_generation_id = generation_id
         self._response_id = "resp_" + uuid.uuid4().hex[:10]
@@ -1378,9 +1636,10 @@ class RealtimeSession:
         self.fsm.set_thinking(generation_id)
 
         def on_pcm(chunk: np.ndarray, sample_rate: int):
-            if not self.fsm.is_current(generation_id):
+            if not self._pcm_should_send(generation_id):
                 return
             self.fsm.set_speaking(generation_id)
+            self._client_playing = True
             if ctx.first_pcm_sent_at is None:
                 ctx.first_pcm_sent_at = time.perf_counter()
             # Extend the echo window by the audio duration we just handed the
@@ -1490,9 +1749,17 @@ class RealtimeSession:
                 result.metrics.barge_in = True
                 if ctx.barge_in_at is not None:
                     result.metrics.barge_in_at_ms = (ctx.barge_in_at - wall0) * 1000
-                stop_ms = ctx.metadata.get("barge_in_stop_ms")
-                if stop_ms is not None:
-                    result.metrics.barge_in_stop_ms = float(stop_ms)
+                for key in (
+                    "barge_in_stop_ms",
+                    "barge_in_detect_ms",
+                    "llm_abort_ms",
+                    "tts_flush_ms",
+                ):
+                    val = ctx.metadata.get(key)
+                    if val is not None:
+                        setattr(result.metrics, key, float(val))
+            if turn_revision:
+                result.metrics.notes.append(f"turn_revision={turn_revision}")
 
             metrics = result.metrics.to_dict()
             if result.assistant_text and not cancelled:
@@ -1547,6 +1814,9 @@ class RealtimeSession:
                             "overlap_ms": metrics.get("overlap_ms"),
                             "barge_in": metrics.get("barge_in"),
                             "barge_in_stop_ms": metrics.get("barge_in_stop_ms"),
+                            "barge_in_detect_ms": metrics.get("barge_in_detect_ms"),
+                            "llm_abort_ms": metrics.get("llm_abort_ms"),
+                            "tts_flush_ms": metrics.get("tts_flush_ms"),
                             "generation_id": generation_id,
                         },
                     },

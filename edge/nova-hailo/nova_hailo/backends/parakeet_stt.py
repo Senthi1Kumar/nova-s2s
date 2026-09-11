@@ -19,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 
+from nova_hailo import stt_vocab
+
 DECODER_DEFAULT = 0
 DECODER_CTC = 1
 DECODER_TDT = 2
@@ -117,7 +119,10 @@ class ParakeetSTT:
                 self._ctx, ptr, x.size, 16000, self.decoder
             )
         text = _CONTROL_RE.sub(" ", self._take_string(raw))
-        return re.sub(r"\s+", " ", text).strip()
+        # Repair proper nouns before the transcript becomes a search query: a
+        # misheard name does not degrade gracefully, it retrieves the wrong
+        # subject entirely and anchors every turn that follows.
+        return stt_vocab.correct(re.sub(r"\s+", " ", text).strip())
 
     def release(self) -> None:
         if getattr(self, "_ctx", None):

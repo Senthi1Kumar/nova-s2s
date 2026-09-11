@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 import queue
 import threading
 import time
@@ -14,11 +15,17 @@ from nova_hmi.audio_gain import (
     HOT_RMS,
     MANUAL_GAIN,
     NOISE_FLOOR,
+    PULSE_AEC_SINK,
+    PULSE_AEC_SOURCE,
+    PULSE_PA_DEVICE,
     capture_looks_dead,
     level_from_rms,
+    mic_open_during_tts,
     pick_input_index,
     playback_done_debounce_s,
+    remap_pipewire_device,
     should_send_uplink,
+    uplink_is_blocked,
     uplink_multiplier,
 )
 
@@ -38,6 +45,27 @@ try:
     import sounddevice as sd
 except Exception:  # pragma: no cover
     sd = None
+
+
+def _env_sd_device(name: str):
+    """sounddevice index (int) or name/substring from env. None = default."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+def _echo_tail_s(default: float) -> float:
+    raw = (os.environ.get("NOVA_HAILO_ECHO_TAIL_S") or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
 
 
 def _input_device_index() -> int | None:
@@ -86,7 +114,7 @@ class AudioDuplex(QObject):
         self._agc = 1.0
         self._rms_log_n = 0
         self._hold_until = 0.0
-        self._echo_tail_s = 0.55
+        self._echo_tail_s = _echo_tail_s(0.55)
         self._last_play_activity = 0.0
         self._last_in_rms = 0.0
         self._silent_s = 0.0
@@ -96,20 +124,47 @@ class AudioDuplex(QObject):
         self._in_kw: dict = {}
         self._in_ch = 1
         self._restarting_in = False
+        self._open_during_tts = mic_open_during_tts()
+        if capture and self._open_during_tts:
+            print("[hmi] uplink open during TTS (AEC barge-in)", flush=True)
 
         if capture and sd is not None and np is not None:
             try:
-                dev_idx = _input_device_index()
-                dev = sd.query_devices(dev_idx if dev_idx is not None else None, kind="input")
+                cap_dev = remap_pipewire_device(
+                    _env_sd_device("NOVA_HAILO_CAPTURE_DEVICE"), kind="input"
+                )
+                if cap_dev is not None:
+                    try:
+                        dev = sd.query_devices(cap_dev)
+                    except ValueError as exc:
+                        print(
+                            f"[hmi] device {cap_dev!r} not in PortAudio ({exc}) — {PULSE_PA_DEVICE}",
+                            flush=True,
+                        )
+                        os.environ.setdefault("PULSE_SOURCE", PULSE_AEC_SOURCE)
+                        cap_dev = PULSE_PA_DEVICE
+                        dev = sd.query_devices(cap_dev)
+                    dev_idx = cap_dev
+                else:
+                    dev_idx = _input_device_index()
+                    dev = sd.query_devices(dev_idx if dev_idx is not None else None, kind="input")
                 ch = int(dev.get("max_input_channels") or 1)
-                use_ch = 1 if "wm8960" in str(dev.get("name") or "").lower() else max(1, min(ch, 2))
+                name_l = str(dev.get("name") or "").lower()
+                # AEC source is mono; ALSA WM8960 is duplex stereo. Pulse lists 32 ch.
+                use_ch = 1 if (
+                    "wm8960" in name_l or cap_dev == PULSE_PA_DEVICE
+                ) else max(1, min(ch, 2))
+                pulse_src = os.environ.get("PULSE_SOURCE") or ""
                 print(
                     f"[hmi] mic device: {dev.get('name')!r} idx={dev_idx} "
-                    f"in_ch={ch} use_ch={use_ch} default_sr={dev.get('default_samplerate')}",
+                    f"in_ch={ch} use_ch={use_ch} default_sr={dev.get('default_samplerate')}"
+                    f"{f' PULSE_SOURCE={pulse_src}' if pulse_src else ''}",
                     flush=True,
                 )
                 in_kw = {}
-                if dev_idx is not None:
+                if cap_dev is not None:
+                    in_kw["device"] = cap_dev
+                elif dev_idx is not None:
                     in_kw["device"] = dev_idx
                 self._in_kw = in_kw
                 self._in_ch = use_ch
@@ -136,18 +191,39 @@ class AudioDuplex(QObject):
 
         if playback and sd is not None and np is not None:
             try:
-                # Keep Pulse/PipeWire default. Pinning ALSA wm8960 at 16 kHz
-                # opens a silent stream (card wants 48 kHz); TTS then queues,
-                # mic stays blocked, and the user only hears/gets mid-words.
+                # Keep Pulse/PipeWire default unless AEC virtual sink is set.
+                # Pinning ALSA wm8960 at 16 kHz opens a silent stream.
+                play_dev = remap_pipewire_device(
+                    _env_sd_device("NOVA_HAILO_PLAYBACK_DEVICE"), kind="output"
+                )
+                if play_dev is not None:
+                    try:
+                        sd.query_devices(play_dev)
+                    except ValueError as exc:
+                        print(
+                            f"[hmi] playback {play_dev!r} not in PortAudio ({exc}) — {PULSE_PA_DEVICE}",
+                            flush=True,
+                        )
+                        os.environ.setdefault("PULSE_SINK", PULSE_AEC_SINK)
+                        play_dev = PULSE_PA_DEVICE
+                out_kw = {}
+                if play_dev is not None:
+                    out_kw["device"] = play_dev
                 self._out = sd.OutputStream(
                     samplerate=self._play_rate,
                     blocksize=1024,
                     channels=1,
                     dtype="int16",
                     callback=self._on_out,
+                    **out_kw,
                 )
                 self._out.start()
-                print(f"[hmi] speaker: playback {self._play_rate} Hz", flush=True)
+                pulse_sink = os.environ.get("PULSE_SINK") or ""
+                print(
+                    f"[hmi] speaker: playback {self._play_rate} Hz"
+                    f"{f' PULSE_SINK={pulse_sink}' if pulse_sink else ''}",
+                    flush=True,
+                )
             except Exception as exc:
                 self._out = None
                 print(f"[hmi] speaker FAILED ({exc})", flush=True)
@@ -176,15 +252,14 @@ class AudioDuplex(QObject):
         self._batch.clear()
 
     def uplink_blocked(self) -> bool:
-        if self._muted:
-            return True
-        # Sticky while TTS is in the device — gaps between streamed clauses
-        # used to reopen the mic and let the speaker feed Silero.
-        if self._started_play:
-            return True
-        if self._out is not None and self.play_queue_depth() > 0:
-            return True
-        return time.monotonic() < self._hold_until
+        return uplink_is_blocked(
+            muted=self._muted,
+            started_play=self._started_play,
+            play_queued=self._out is not None and self.play_queue_depth() > 0,
+            hold_until=self._hold_until,
+            now=time.monotonic(),
+            open_during_tts=self._open_during_tts,
+        )
 
     def remaining_playback_s(self) -> float:
         with self._play_lock:
@@ -197,6 +272,9 @@ class AudioDuplex(QObject):
     def play_queue_depth(self) -> int:
         with self._play_lock:
             return len(self._play_q)
+
+    def is_playing(self) -> bool:
+        return bool(self._started_play or self.play_queue_depth() > 0)
 
     def enqueue_playback(self, pcm16: bytes, sample_rate: int = 24000) -> None:
         if not pcm16:
@@ -211,7 +289,8 @@ class AudioDuplex(QObject):
             empty = not self._play_q
             self._play_q.append(chunk)
         self._last_play_activity = time.monotonic()
-        self.hold_uplink(dur + self._echo_tail_s)
+        if not self._open_during_tts:
+            self.hold_uplink(dur + self._echo_tail_s)
         if empty or not self._started_play:
             self._started_play = True
             self._play_was_active = True
@@ -224,7 +303,8 @@ class AudioDuplex(QObject):
         with self._play_lock:
             self._play_q.clear()
         self._started_play = False
-        self.hold_uplink(self._echo_tail_s)
+        if not self._open_during_tts:
+            self.hold_uplink(self._echo_tail_s)
 
     def _on_in(self, indata, frames, time_info, status):  # PortAudio thread
         # Keep this cheap. FFT on this thread xruns the WM8960 under Piper/OR load,
@@ -367,8 +447,11 @@ class AudioDuplex(QObject):
         ):
             self._started_play = False
             self._play_was_active = False
-            self.hold_uplink(self._echo_tail_s)
-            print(f"[hmi] playback done — mute uplink {self._echo_tail_s:.2f}s", flush=True)
+            if not self._open_during_tts:
+                self.hold_uplink(self._echo_tail_s)
+                print(f"[hmi] playback done — mute uplink {self._echo_tail_s:.2f}s", flush=True)
+            else:
+                print("[hmi] playback done — mic stayed open", flush=True)
             self.playbackQueueEmpty.emit()
         elif self._started_play:
             self._play_was_active = True

@@ -14,8 +14,11 @@ from nova_hailo.edge_harness.types import Intent
 _CLOUD_TOOLS: dict[str, dict[str, Any]] = {
     "web_search": {
         "description": (
-            "Search the live web for current facts, news, places, prices, or people. "
-            "Use when the answer is not already in the conversation."
+            "Search the live web for current facts, news, places, prices, people, "
+            "or public events such as product launches, summits and conferences. "
+            "Use whenever the answer depends on something current. Do not skip it "
+            "because an earlier turn discussed a related topic -- that answer was "
+            "about the earlier question, not this one."
         ),
         "properties": {
             "query": {
@@ -39,7 +42,12 @@ _CLOUD_TOOLS: dict[str, dict[str, Any]] = {
         "required": ["query"],
     },
     "check_calendar": {
-        "description": "Read the user's calendar (today, tomorrow, or this week).",
+        "description": (
+            "Read the driver's own calendar -- their personal appointments and "
+            "meetings (today, tomorrow, or this week). Only for the driver's own "
+            "schedule. A public event in the news, such as a product launch or a "
+            "summit, is web_search, not this."
+        ),
         "properties": {
             "query": {
                 "type": "string",
