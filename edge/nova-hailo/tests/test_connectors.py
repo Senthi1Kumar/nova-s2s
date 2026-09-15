@@ -11,9 +11,10 @@ import ipaddress
 import json
 import socket
 
+import httpx
 import pytest
 
-from nova_hailo.connectors import mcp_client, registry, url_safety
+from nova_hailo.connectors import mcp_client, mcp_transport, registry, url_safety
 from nova_hailo.settings_store import load_settings, save_settings
 
 _REAL_GETADDRINFO = socket.getaddrinfo
@@ -46,6 +47,18 @@ def _offline_dns(monkeypatch):
     list_tools/call_tool, and this repo's test policy is no real network
     calls from the suite."""
     monkeypatch.setattr(url_safety.socket, "getaddrinfo", _offline_getaddrinfo)
+
+
+@pytest.fixture(autouse=True)
+def _reset_mcp_transport():
+    """`mcp_transport` caches one httpx.Client per URL at module scope, and
+    several tests below reuse "https://example.com/mcp" -- without this, a
+    session (and the mock transport baked into its client at construction
+    time) cached by an earlier test would leak into the next one instead of
+    each test getting its own fake server."""
+    mcp_transport.reset()
+    yield
+    mcp_transport.reset()
 
 
 @pytest.fixture()
@@ -253,8 +266,9 @@ def test_fetch_time_recheck_blocks_dns_rebinding(settings_path, monkeypatch):
     """Registration-time validation alone is bypassable by DNS rebinding: a
     hostname resolves to a public address when the connector is added and to
     a loopback address by the time a tool call actually goes out. The fetch-
-    time re-check inside mcp_client._rpc_call must catch this and the
-    outbound httpx call must never happen."""
+    time re-check inside mcp_client._guarded_url must catch this before
+    mcp_transport ever builds a client -- the outbound httpx call must never
+    happen."""
 
     def resolve_public(host, *a, **kw):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))]
@@ -269,11 +283,11 @@ def test_fetch_time_recheck_blocks_dns_rebinding(settings_path, monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_post(*a, **kw):
+    def fake_client(*a, **kw):
         calls["n"] += 1
         raise AssertionError("must never reach the network after rebinding")
 
-    monkeypatch.setattr(mcp_client.httpx, "post", fake_post)
+    monkeypatch.setattr(mcp_transport.httpx, "Client", fake_client)
 
     with pytest.raises(mcp_client.MCPClientError):
         mcp_client.list_tools(c["url"])
@@ -444,36 +458,53 @@ def test_is_valid_id():
     assert not registry.is_valid_id(None)
 
 
-# —— mcp_client: minimal HTTP transport ——
+# —— mcp_client: HTTP transport (delegated to mcp_transport) ——
+#
+# mcp_client no longer calls httpx.post itself -- it delegates to
+# mcp_transport, which caches one httpx.Client per URL and posts through
+# the *instance* method Client.post(), never the module-level httpx.post
+# function. So the seam these tests fake is mcp_transport.httpx.Client
+# (exactly what tests/test_mcp_transport.py's own install_transport fixture
+# fakes), routed through httpx.MockTransport, which intercepts inside
+# httpx's transport layer and never opens a real socket.
+
+_REAL_HTTPX_CLIENT = httpx.Client  # captured before any test monkeypatches it
 
 
-class _FakeResponse:
-    def __init__(self, body, status_code=200):
-        self._body = body
-        self.status_code = status_code
+def _rpc_body(request: httpx.Request) -> dict:
+    return json.loads(request.content or b"{}")
 
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            import httpx
 
-            raise httpx.HTTPStatusError("bad status", request=None, response=self)
+def _mcp_ok(body: dict, result: object = None) -> httpx.Response:
+    return httpx.Response(
+        200, json={"jsonrpc": "2.0", "id": body.get("id"), "result": {} if result is None else result}
+    )
 
-    def json(self):
-        return self._body
+
+def _install_mcp_transport(monkeypatch, handler) -> None:
+    """Route every httpx.Client() mcp_transport builds through `handler`."""
+    mock_transport = httpx.MockTransport(handler)
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = mock_transport
+        return _REAL_HTTPX_CLIENT(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_transport.httpx, "Client", fake_client)
 
 
 def test_mcp_client_list_tools_happy_path(monkeypatch):
     seen = {}
 
-    def fake_post(url, json=None, timeout=None):
-        seen["url"] = url
-        seen["json"] = json
-        seen["timeout"] = timeout
-        return _FakeResponse(
-            {"jsonrpc": "2.0", "id": json["id"], "result": {"tools": [{"name": "search"}, {"name": "lookup"}]}}
-        )
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _rpc_body(request)
+        if body.get("method") in ("initialize", "notifications/initialized"):
+            return _mcp_ok(body)
+        seen["url"] = str(request.url)
+        seen["json"] = body
+        seen["timeout"] = request.extensions["timeout"]["connect"]
+        return _mcp_ok(body, result={"tools": [{"name": "search"}, {"name": "lookup"}]})
 
-    monkeypatch.setattr(mcp_client.httpx, "post", fake_post)
+    _install_mcp_transport(monkeypatch, handler)
     tools = mcp_client.list_tools("https://example.com/mcp")
     assert [t["name"] for t in tools] == ["search", "lookup"]
     assert seen["url"] == "https://example.com/mcp"
@@ -482,32 +513,40 @@ def test_mcp_client_list_tools_happy_path(monkeypatch):
 
 
 def test_mcp_client_list_tools_ignores_malformed_entries(monkeypatch):
-    def fake_post(url, json=None, timeout=None):
-        return _FakeResponse(
-            {"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "ok"}, {"no_name": True}, "not-a-dict"]}}
-        )
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _rpc_body(request)
+        if body.get("method") in ("initialize", "notifications/initialized"):
+            return _mcp_ok(body)
+        return _mcp_ok(body, result={"tools": [{"name": "ok"}, {"no_name": True}, "not-a-dict"]})
 
-    monkeypatch.setattr(mcp_client.httpx, "post", fake_post)
+    _install_mcp_transport(monkeypatch, handler)
     tools = mcp_client.list_tools("https://example.com/mcp")
     assert [t["name"] for t in tools] == ["ok"]
 
 
 def test_mcp_client_raises_on_jsonrpc_error(monkeypatch):
-    def fake_post(url, json=None, timeout=None):
-        return _FakeResponse({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "no such method"}})
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _rpc_body(request)
+        if body.get("method") in ("initialize", "notifications/initialized"):
+            return _mcp_ok(body)
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32601, "message": "no such method"}},
+        )
 
-    monkeypatch.setattr(mcp_client.httpx, "post", fake_post)
+    _install_mcp_transport(monkeypatch, handler)
     with pytest.raises(mcp_client.MCPClientError):
         mcp_client.list_tools("https://example.com/mcp")
 
 
 def test_mcp_client_raises_on_transport_error(monkeypatch):
-    import httpx
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _rpc_body(request)
+        if body.get("method") in ("initialize", "notifications/initialized"):
+            return _mcp_ok(body)
+        raise httpx.ConnectError("connection refused", request=request)
 
-    def fake_post(url, json=None, timeout=None):
-        raise httpx.ConnectError("connection refused", request=None)
-
-    monkeypatch.setattr(mcp_client.httpx, "post", fake_post)
+    _install_mcp_transport(monkeypatch, handler)
     with pytest.raises(mcp_client.MCPClientError):
         mcp_client.list_tools("https://example.com/mcp")
 
@@ -515,12 +554,15 @@ def test_mcp_client_raises_on_transport_error(monkeypatch):
 def test_mcp_client_call_tool_sends_name_and_arguments(monkeypatch):
     seen = {}
 
-    def fake_post(url, json=None, timeout=None):
-        seen["json"] = json
-        seen["timeout"] = timeout
-        return _FakeResponse({"jsonrpc": "2.0", "id": json["id"], "result": {"ok": True}})
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _rpc_body(request)
+        if body.get("method") in ("initialize", "notifications/initialized"):
+            return _mcp_ok(body)
+        seen["json"] = body
+        seen["timeout"] = request.extensions["timeout"]["connect"]
+        return _mcp_ok(body, result={"ok": True})
 
-    monkeypatch.setattr(mcp_client.httpx, "post", fake_post)
+    _install_mcp_transport(monkeypatch, handler)
     result = mcp_client.call_tool("https://example.com/mcp", "search", {"query": "cats"})
     assert result == {"ok": True}
     assert seen["json"]["method"] == "tools/call"

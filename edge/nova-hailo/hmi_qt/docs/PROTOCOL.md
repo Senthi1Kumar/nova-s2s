@@ -17,7 +17,7 @@ Client: browser UI **or** Qt HMI — **one voice session at a time** (`_MAX_SESS
 
 | type | payload | notes |
 | --- | --- | --- |
-| `session.update` | `session.arm` / `session.ptt` | arm for PTT profiles |
+| `session.update` | `session.arm` / `session.ptt` | arm for PTT profiles; **ignored when `wake.mode=kws`** (log once). Explicit `input_audio_buffer.arm` / `ptt.down` / `session.arm` still arm (PTT fallback) |
 | `nova.settings.get` | — | current Local/Cloud LLM catalog |
 | `nova.settings.set` | `mode`, `local_hef`, `or_model`, `ns`, `ns_strength`, `gate_min_rms` | LLM switch and/or voice (DTLN, energy gate) |
 | `input_audio_buffer.append` | `audio`: base64 **PCM16 LE mono 16 kHz** | ~20–40 ms chunks |
@@ -30,8 +30,9 @@ Client: browser UI **or** Qt HMI — **one voice session at a time** (`_MAX_SESS
 
 | type | use |
 | --- | --- |
-| `session.created` | `session.fsm`, `session.stt_engine` |
+| `session.created` | `session.fsm`, `session.stt_engine`, `session.wake` |
 | `nova.fsm` | drive UI state (IDLE/LISTENING/…) |
+| `wake.detected` | `{score, fsm}` — play local `wake.mp3` (do **not** send `playback.started`), show LISTENING |
 | `input_audio_buffer.speech_started` | listening cue |
 | `input_audio_buffer.speech_stopped` | thinking / STT |
 | `conversation.item.input_audio_transcription.delta` | growing YOU card (live; not a chat commit) |
@@ -58,4 +59,4 @@ Top bar: **NOVA** + Local Hailo / Cloud OpenRouter, FSM in the center, **OPS** /
 
 ## Non-goals (v1)
 
-Google OAuth UI in the orb, dual voice clients, pVAD enrollment, wake-word model.
+Google OAuth UI in the orb, dual voice clients, pVAD enrollment.

@@ -1,0 +1,543 @@
+"""Personal Google Calendar via OAuth + Workspace Calendar MCP, on the shared transport.
+
+Caller: nova_hailo.edge_harness.tool_broker.ToolBroker._mcp_calendar.
+Ported from nova/tools/mcp/calendar.py: every call used to rebuild an MCP
+client and redo the `initialize` handshake, which was the single largest
+cost in this tool's latency. `_call` now goes through
+nova_hailo.connectors.mcp_transport, which caches one handshake per URL and
+reuses it for every later call. The parsing, filtering, and speech helpers
+below are copied unchanged -- they are voice-shaped already and are not what
+was slow.
+
+CreateCalendarEventTool and DeleteCalendarEventTool are ported for parity
+with the source module but are write tools: they stay unreachable while
+tools.write_enabled is false and policy.OEM_READONLY lists only read tools.
+"""
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any, Protocol
+
+from nova_hailo.connectors import mcp_transport
+from nova_hailo.connectors.workspace.runtime import (
+    oauth_ready_or_error,
+    unpack_mcp_result,
+    unwrap_call_tool_result,
+)
+from nova_hailo.google_oauth import GoogleTokenProvider
+
+CALENDAR_MCP_URL = "https://calendarmcp.googleapis.com/mcp/v1"
+
+_UNSET: Any = object()
+
+
+class _McpCaller(Protocol):
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any: ...
+
+
+class CheckCalendarTool:
+    """Upcoming personal calendar events (Google Calendar MCP)."""
+
+    name = "check_calendar"
+    description = (
+        "Check the user's personal Google Calendar for upcoming events "
+        "(meetings, schedule). Prefer this over query_calendar for personal/work meetings. "
+        "Pass day=today|tomorrow|day_after_tomorrow, or on_date=YYYY-MM-DD for a specific date; "
+        "otherwise day=week. Speak the returned speak field verbatim — do not invent dates."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "day": {
+                "type": "string",
+                "enum": ["today", "tomorrow", "day_after_tomorrow", "week"],
+                "description": "Relative day window. Default week.",
+            },
+            "on_date": {
+                "type": "string",
+                "description": "Optional calendar day YYYY-MM-DD (e.g. 2026-07-16). Overrides day.",
+            },
+        },
+        "required": [],
+    }
+
+    def __init__(
+        self,
+        tokens: GoogleTokenProvider | None = _UNSET,
+        timeout: float = 8.0,
+        mcp: _McpCaller | None = None,
+    ):
+        if tokens is _UNSET:
+            self._tokens = GoogleTokenProvider()
+        else:
+            self._tokens = tokens
+        self._timeout = timeout
+        # Test seam: an injected caller bypasses mcp_transport (and its
+        # process-wide session cache) entirely -- see _call() below.
+        self._mcp = mcp
+
+    def _auth_headers(self) -> dict[str, str]:
+        # Built fresh per request (never cached) so a token refreshed mid-turn
+        # is never masked by a header captured before it rotated.
+        token = self._tokens.get_access_token() or ""
+        return {"Authorization": f"Bearer {token}"}
+
+    def _call(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        if self._mcp is not None:
+            return self._mcp.call_tool(name, arguments)
+        envelope = mcp_transport.call_tool(
+            CALENDAR_MCP_URL,
+            name,
+            arguments,
+            headers_fn=self._auth_headers,
+            timeout=self._timeout,
+        )
+        return unwrap_call_tool_result(envelope)
+
+    def execute(self, day: str = "week", on_date: str = "") -> dict[str, Any]:
+        err = oauth_ready_or_error(self._tokens)
+        if err is not None:
+            return err
+
+        day_key = (day or "week").strip().lower()
+        if day_key not in {"today", "tomorrow", "day_after_tomorrow", "week"}:
+            day_key = "week"
+        on_date_s = (on_date or "").strip()
+        if on_date_s and len(on_date_s) >= 10:
+            on_date_s = on_date_s[:10]
+
+        now = datetime.now(timezone.utc)
+        later = now + timedelta(days=10)
+        args: dict[str, Any] = {
+            "startTime": now.isoformat().replace("+00:00", "Z"),
+            "endTime": later.isoformat().replace("+00:00", "Z"),
+        }
+        try:
+            raw = self._call("list_events", args)
+            payload = unpack_mcp_result(raw)
+        except Exception as exc:  # noqa: BLE001 — voice loop must not crash
+            return {
+                "status": "unavailable",
+                "reason": "calendar_mcp_error",
+                "error": str(exc)[:300],
+            }
+
+        events = _normalize_events(payload)
+        events = _filter_events_by_day(events, day_key, now, on_date=on_date_s)
+        label = on_date_s or day_key
+        speak = _speak_events(events, label)
+        return {
+            "status": "success",
+            "day": day_key if not on_date_s else "on_date",
+            "on_date": on_date_s or None,
+            "event_count": len(events),
+            "events": events[:10],
+            "speak": speak,
+            "source": "google_calendar_mcp",
+            "window": {"from": now.isoformat(), "to": later.isoformat()},
+        }
+
+
+class CreateCalendarEventTool:
+    """Create an event on the primary Google Calendar (irreversible — ConfirmationGate)."""
+
+    name = "create_calendar_event"
+    description = (
+        "Create a meeting or event on the user's personal Google Calendar. "
+        "Irreversible: confirm title and start time with the driver before calling "
+        "with confirmed=true. Use ISO-8601 datetimes with timezone offset "
+        "(e.g. 2026-07-15T15:00:00+05:30)."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "Event title / meeting name."},
+            "start": {
+                "type": "string",
+                "description": "Start datetime ISO-8601 with offset, e.g. 2026-07-15T15:00:00+05:30.",
+            },
+            "end": {
+                "type": "string",
+                "description": "Optional end datetime ISO-8601. Defaults to start + 1 hour.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional event description / notes.",
+            },
+        },
+        "required": ["title", "start"],
+    }
+
+    def __init__(
+        self,
+        tokens: GoogleTokenProvider | None = _UNSET,
+        timeout: float = 8.0,
+        mcp: _McpCaller | None = None,
+    ):
+        if tokens is _UNSET:
+            self._tokens = GoogleTokenProvider()
+        else:
+            self._tokens = tokens
+        self._timeout = timeout
+        self._mcp = mcp
+
+    def _auth_headers(self) -> dict[str, str]:
+        token = self._tokens.get_access_token() or ""
+        return {"Authorization": f"Bearer {token}"}
+
+    def _call(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        if self._mcp is not None:
+            return self._mcp.call_tool(name, arguments)
+        envelope = mcp_transport.call_tool(
+            CALENDAR_MCP_URL,
+            name,
+            arguments,
+            headers_fn=self._auth_headers,
+            timeout=self._timeout,
+        )
+        return unwrap_call_tool_result(envelope)
+
+    def execute(
+        self,
+        title: str,
+        start: str,
+        end: str = "",
+        description: str = "",
+    ) -> dict[str, Any]:
+        err = oauth_ready_or_error(self._tokens)
+        if err is not None:
+            return err
+
+        title = (title or "").strip()
+        start = (start or "").strip()
+        if not title or not start:
+            return {
+                "status": "error",
+                "reason": "missing_fields",
+                "hint": "Need title and start (ISO-8601 with timezone).",
+            }
+
+        end_s = (end or "").strip() or _default_end(start)
+        args: dict[str, Any] = {
+            "summary": title,
+            "startTime": start,
+            "endTime": end_s,
+        }
+        if description and description.strip():
+            args["description"] = description.strip()
+
+        try:
+            raw = self._call("create_event", args)
+            payload = unpack_mcp_result(raw)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "unavailable",
+                "reason": "calendar_mcp_error",
+                "error": str(exc)[:300],
+                "hint": (
+                    "If this is a scope/permission error, Disconnect then Connect "
+                    "Google again so write scope calendar.events is granted."
+                ),
+            }
+
+        eid = str(payload.get("id") or payload.get("eventId") or "")
+        return {
+            "status": "success",
+            "action": "created",
+            "event": {
+                "id": eid,
+                "title": str(payload.get("summary") or title),
+                "start": start,
+                "end": end_s,
+            },
+            "source": "google_calendar_mcp",
+        }
+
+
+class DeleteCalendarEventTool:
+    """Delete an event from the primary Google Calendar (irreversible — ConfirmationGate)."""
+
+    name = "delete_calendar_event"
+    description = (
+        "Delete a meeting or event from the user's personal Google Calendar. "
+        "Pass event_id from check_calendar when known, or title to match an upcoming "
+        "event. Irreversible: confirm which event with the driver, then call with "
+        "confirmed=true."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "event_id": {
+                "type": "string",
+                "description": "Google Calendar event id from check_calendar.",
+            },
+            "title": {
+                "type": "string",
+                "description": "Match an upcoming event by title substring if event_id unknown.",
+            },
+        },
+        "required": [],
+    }
+
+    def __init__(
+        self,
+        tokens: GoogleTokenProvider | None = _UNSET,
+        timeout: float = 8.0,
+        mcp: _McpCaller | None = None,
+    ):
+        if tokens is _UNSET:
+            self._tokens = GoogleTokenProvider()
+        else:
+            self._tokens = tokens
+        self._timeout = timeout
+        self._mcp = mcp
+
+    def _auth_headers(self) -> dict[str, str]:
+        token = self._tokens.get_access_token() or ""
+        return {"Authorization": f"Bearer {token}"}
+
+    def _call(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        if self._mcp is not None:
+            return self._mcp.call_tool(name, arguments)
+        envelope = mcp_transport.call_tool(
+            CALENDAR_MCP_URL,
+            name,
+            arguments,
+            headers_fn=self._auth_headers,
+            timeout=self._timeout,
+        )
+        return unwrap_call_tool_result(envelope)
+
+    def execute(self, event_id: str = "", title: str = "") -> dict[str, Any]:
+        err = oauth_ready_or_error(self._tokens)
+        if err is not None:
+            return err
+
+        event_id = (event_id or "").strip()
+        title = (title or "").strip()
+        matched_title = title
+
+        if not event_id:
+            if not title:
+                return {
+                    "status": "error",
+                    "reason": "missing_event",
+                    "hint": "Pass event_id from check_calendar, or title to match.",
+                }
+            found = self._find_by_title(title)
+            if found is None:
+                return {
+                    "status": "error",
+                    "reason": "event_not_found",
+                    "hint": f"No upcoming event matching title '{title}'.",
+                }
+            if isinstance(found, dict) and found.get("status") == "unavailable":
+                return found
+            event_id = found["id"]
+            matched_title = found["title"]
+
+        try:
+            self._call("delete_event", {"eventId": event_id})
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "unavailable",
+                "reason": "calendar_mcp_error",
+                "error": str(exc)[:300],
+                "hint": (
+                    "If this is a scope/permission error, Disconnect then Connect "
+                    "Google again so write scope calendar.events is granted."
+                ),
+            }
+
+        return {
+            "status": "success",
+            "action": "deleted",
+            "event": {"id": event_id, "title": matched_title},
+            "source": "google_calendar_mcp",
+        }
+
+    def _find_by_title(self, title: str) -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc)
+        later = now + timedelta(days=14)
+        try:
+            raw = self._call(
+                "list_events",
+                {
+                    "startTime": now.isoformat().replace("+00:00", "Z"),
+                    "endTime": later.isoformat().replace("+00:00", "Z"),
+                },
+            )
+            payload = unpack_mcp_result(raw)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "unavailable",
+                "reason": "calendar_mcp_error",
+                "error": str(exc)[:300],
+            }
+
+        needle = title.casefold()
+        for item in _normalize_events(payload):
+            summary = item.get("title") or ""
+            if needle in summary.casefold():
+                return {"id": item.get("id") or "", "title": summary or title}
+        return None
+
+
+def _default_end(start: str) -> str:
+    try:
+        s = start.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return (dt + timedelta(hours=1)).isoformat()
+    except ValueError:
+        return start
+
+
+def _parse_event_start(start_s: str) -> datetime | None:
+    if not start_s:
+        return None
+    try:
+        if len(start_s) == 10 and start_s[4] == "-":
+            return datetime.fromisoformat(start_s).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(start_s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _filter_events_by_day(
+    events: list[dict[str, str]],
+    day_key: str,
+    now_utc: datetime,
+    on_date: str = "",
+) -> list[dict[str, str]]:
+    local_now = now_utc.astimezone()
+    if on_date:
+        try:
+            target = datetime.fromisoformat(on_date).date()
+        except ValueError:
+            return []
+    elif day_key == "week":
+        return events
+    else:
+        target = local_now.date()
+        if day_key == "tomorrow":
+            target = target + timedelta(days=1)
+        elif day_key == "day_after_tomorrow":
+            target = target + timedelta(days=2)
+    out: list[dict[str, str]] = []
+    for ev in events:
+        dt = _parse_event_start(ev.get("start") or "")
+        if dt is None:
+            continue
+        if dt.astimezone().date() == target:
+            out.append(ev)
+    return out
+
+
+_HOUR_WORDS = {
+    0: "twelve", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven",
+    12: "twelve",
+}
+
+
+def _speak_clock(dt: datetime) -> str:
+    local = dt.astimezone()
+    h24 = local.hour
+    minute = local.minute
+    ampm = "AM" if h24 < 12 else "PM"
+    h12 = h24 % 12
+    hour_w = _HOUR_WORDS[h12]
+    if minute == 0:
+        return f"{hour_w} {ampm}"
+    if minute == 15:
+        return f"{hour_w} fifteen {ampm}"
+    if minute == 30:
+        return f"{hour_w} thirty {ampm}"
+    if minute == 45:
+        return f"{hour_w} forty five {ampm}"
+    return f"{hour_w} {minute} {ampm}"
+
+
+def _speak_events(events: list[dict[str, str]], day_key: str) -> str:
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_key or ""):
+        label = day_key
+        empty = f"You have no events on {day_key}."
+        week_mode = False
+    else:
+        label = {
+            "today": "today",
+            "tomorrow": "tomorrow",
+            "day_after_tomorrow": "the day after tomorrow",
+            "week": "coming up",
+        }.get(day_key, "coming up")
+        empty = {
+            "tomorrow": "You have no events tomorrow.",
+            "today": "You have no events left today.",
+            "day_after_tomorrow": "You have no events the day after tomorrow.",
+        }.get(day_key, "You have no upcoming events this week.")
+        week_mode = day_key == "week"
+
+    if not events:
+        return empty
+
+    parts: list[str] = []
+    for ev in events[:6]:
+        title = ev.get("title") or "untitled"
+        dt = _parse_event_start(ev.get("start") or "")
+        if dt is None:
+            parts.append(title)
+            continue
+        when = _speak_clock(dt)
+        if week_mode:
+            day_name = dt.astimezone().strftime("%A")
+            parts.append(f"{title} on {day_name} at {when}")
+        else:
+            parts.append(f"{title} at {when}")
+
+    joined = "; ".join(parts)
+    n = len(events)
+    more = f" And {n - 6} more." if n > 6 else ""
+    if week_mode:
+        return f"You have {n} upcoming events. {joined}.{more}".strip()
+    return f"You have {n} events {label}. {joined}.{more}".strip()
+
+
+def _normalize_events(result: Any) -> list[dict[str, str]]:
+    """Flatten Calendar MCP result into speakable {id, title, start} rows."""
+    raw_items: list[Any] = []
+    if isinstance(result, dict):
+        structured = result.get("structuredContent") or result.get("structured_content")
+        if isinstance(structured, dict):
+            raw_items = structured.get("events") or structured.get("items") or []
+        elif isinstance(structured, list):
+            raw_items = structured
+        raw_items = raw_items or result.get("events") or result.get("items") or []
+        if not raw_items and "title" in result:
+            raw_items = [result]
+    elif isinstance(result, list):
+        raw_items = result
+
+    out: list[dict[str, str]] = []
+    for item in raw_items[:25]:
+        if not isinstance(item, dict):
+            continue
+        title = str(
+            item.get("summary")
+            or item.get("title")
+            or item.get("name")
+            or "untitled"
+        )
+        start = item.get("start") or item.get("startTime") or item.get("start_time")
+        if isinstance(start, dict):
+            start_s = str(
+                start.get("dateTime") or start.get("date") or start.get("date_time") or ""
+            )
+        else:
+            start_s = str(item.get("when") or start or "")
+        row = {"title": title, "start": start_s}
+        eid = item.get("id") or item.get("event_id")
+        if eid:
+            row["id"] = str(eid)
+        out.append(row)
+    return out

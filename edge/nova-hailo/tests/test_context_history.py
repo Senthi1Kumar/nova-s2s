@@ -105,3 +105,6 @@ def test_state_line_is_not_in_the_cacheable_prefix() -> None:
     messages = h.build_messages("You are Nova.", "hi", now=datetime(2026, 9, 11, 10, 6))
     assert messages[0]["role"] == "system"
     assert "September" not in messages[0]["content"]
+    user = " ".join(m["content"] for m in messages if m["role"] == "user")
+    assert "IST" in user
+    assert "10:06" in user

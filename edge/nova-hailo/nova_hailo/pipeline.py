@@ -32,6 +32,10 @@ from nova_hailo.backends.stt import WhisperSTT
 from nova_hailo.backends.tts import clean_text_for_tts, create_tts
 from nova_hailo.config import AppConfig, resolve_audio_device_ids, resolve_llm_hef
 from nova_hailo.context_history import ConversationHistory
+from nova_hailo.edge_harness.cloud_tool_speak import (
+    resolve_cloud_followup_speak,
+    tool_result_is_final,
+)
 from nova_hailo.edge_harness.controller import (
     gate_after_router,
     is_thin_utterance,
@@ -442,6 +446,9 @@ class NovaPipeline:
         self.cloud_history_turns = int(
             cfg.get("pipeline", "cloud_history_turns", default=8) or 8
         )
+        tz_name = str(cfg.get("pipeline", "timezone", default="Asia/Kolkata") or "Asia/Kolkata").strip()
+        if tz_name:
+            os.environ.setdefault("NOVA_HAILO_TZ", tz_name)
         self.native_context = bool(cfg.get("pipeline", "native_context", default=False))
         if self.llm_backend in LLM_PROVIDERS:
             self.native_context = False
@@ -1491,7 +1498,30 @@ class NovaPipeline:
         auth_decision: str,
         record_session: bool,
     ) -> TurnResult:
-        """Cloud LLM owns tool pick; host executes via ToolBroker."""
+        """Cloud LLM owns tool pick; host executes via ToolBroker.
+
+        Clock is still host-routed (get_datetime). Stocks stay in the Groq
+        toolbox as web_search. After the tool returns, a numeric/stock speak
+        line is voiced by the host (no second Groq round). An empty Groq
+        rewrite falls back to the tool speak instead of a generic miss.
+        """
+        if self.oem_gateway is not None:
+            routed_name = self.oem_gateway.route(user_text)
+            if routed_name == "get_datetime":
+                host_out = self.oem_gateway.execute("get_datetime", query=user_text)
+                speak = str((host_out or {}).get("speak") or "").strip()
+                if speak:
+                    metrics.tool_name = "get_datetime"
+                    metrics.notes.append("host_clock:get_datetime")
+                    return self._speak_tool_line(
+                        speak,
+                        wall0=wall0,
+                        metrics=metrics,
+                        user_text=user_text,
+                        auth_decision=auth_decision,
+                        tool_name="get_datetime",
+                        record_session=record_session,
+                    )
         state = getattr(self.oem_gateway, "task_state", None) or TaskState()
         budget = speak_budget(
             history_turns=len(self.history),
@@ -1517,6 +1547,8 @@ class NovaPipeline:
         last_text = ""
         tool_name = None
         already_spoken = False
+        last_tool_speak = ""
+        last_tool_is_final = False
         saved_one = self.voice_one_sentence
         self.voice_one_sentence = budget.voice_one_sentence
         # One generation id for the whole turn. begin_turn() bumps _active_gen,
@@ -1601,6 +1633,25 @@ class NovaPipeline:
                     if tts_state["spoken_parts"]:
                         last_text = " ".join(tts_state["spoken_parts"]).strip() or last_text
                         already_spoken = True
+                    if not last_text:
+                        last_text = resolve_cloud_followup_speak(
+                            llm_rewrite="",
+                            tool_speak=last_tool_speak,
+                            tool_is_final=last_tool_is_final,
+                        )
+                        if last_text:
+                            self._emit_validated_clause(last_text, gid, tts_state)
+                            rem = tts_state["sentence_buffer"].strip()
+                            if rem and self.tts.enabled and self.stream_tts:
+                                self._emit_validated_clause(rem, gid, tts_state)
+                            if tts_state["spoken_parts"]:
+                                last_text = (
+                                    " ".join(tts_state["spoken_parts"]).strip()
+                                    or last_text
+                                )
+                                already_spoken = True
+                            if last_tool_speak.strip():
+                                metrics.notes.append("host_speak:empty_rewrite")
                     break
                 # exa_direct_answer: fast path only for a lone web_search call.
                 # A mixed round (web_search + another tool) falls back to the
@@ -1654,6 +1705,7 @@ class NovaPipeline:
                 }
                 messages.append(assistant_msg)
                 async_research_this_round = False
+                pre_answer = len(tts_state["spoken_parts"])
                 for i, c in enumerate(calls):
                     if self._turn_cancelled():
                         break
@@ -1726,6 +1778,8 @@ class NovaPipeline:
                         time.perf_counter() - tool_t0
                     ) * 1000.0
                     speak_bit = str(out.get("speak") or "")
+                    last_tool_speak = speak_bit
+                    last_tool_is_final = tool_result_is_final(out)
                     compact = {
                         "ok": out.get("ok"),
                         "status": out.get("status"),
@@ -1785,8 +1839,25 @@ class NovaPipeline:
                         already_spoken = True
                     metrics.notes.append("exa_direct_answer")
                     break
+                if last_tool_is_final and last_tool_speak.strip():
+                    # Groq picked web_search; ToolBroker already has the quote.
+                    # Skip round 2 so gpt-oss cannot return 0 tokens and drop it.
+                    self._emit_validated_clause(last_tool_speak, gid, tts_state)
+                    rem = tts_state["sentence_buffer"].strip()
+                    if rem and self.tts.enabled and self.stream_tts:
+                        self._emit_validated_clause(rem, gid, tts_state)
+                    answer_parts = tts_state["spoken_parts"][pre_answer:]
+                    last_text = " ".join(answer_parts).strip() or last_tool_speak.strip()
+                    if answer_parts:
+                        already_spoken = True
+                    metrics.notes.append("host_speak:numeric")
+                    break
             if not last_text:
-                last_text = "I couldn't get that just now."
+                last_text = resolve_cloud_followup_speak(
+                    llm_rewrite="",
+                    tool_speak=last_tool_speak,
+                    tool_is_final=last_tool_is_final,
+                )
         except Exception as exc:  # noqa: BLE001
             print(
                 f"[llm] {self.llm_backend} failed ({type(exc).__name__}: {exc}); "

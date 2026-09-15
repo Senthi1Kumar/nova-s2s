@@ -152,6 +152,51 @@ def playback_done_debounce_s(
     return bool(started_play and queue_empty and idle_s >= hold_s)
 
 
+# Streamed Piper chunks often pause >0.35 s; 1.8 s keeps playing=1 for wake barge.
+PLAYBACK_DONE_HOLD_S = 1.8
+
+
+def capture_source_for_uplink(*, raw_open: bool, playing: bool) -> str:
+    """Which InputStream feeds the server. Raw WM8960 whenever it opened."""
+    del playing
+    return "raw" if raw_open else "aec"
+
+
+def raw_kws_device_index(devices: list, aec_name: str | None) -> int | None:
+    """ALSA WM8960 (or array) for KWS while TTS plays — AEC zeroes the word."""
+    forced = (os.environ.get("NOVA_HAILO_RAW_KWS_DEVICE") or "").strip()
+    if forced:
+        idx: int | None = None
+        try:
+            idx = int(forced)
+        except ValueError:
+            needle = forced.lower()
+            for i, d in enumerate(devices):
+                if needle in str(d.get("name") or "").lower():
+                    idx = i
+                    break
+        if idx is not None and 0 <= idx < len(devices):
+            if int(devices[idx].get("max_input_channels") or 0) > 0:
+                return idx
+    aec_l = str(aec_name or "").lower()
+    if "wm8960" in aec_l:
+        return None
+    wm = None
+    array = None
+    for i, d in enumerate(devices):
+        name = str(d.get("name") or "").lower()
+        n_in = int(d.get("max_input_channels") or 0)
+        if n_in <= 0:
+            continue
+        if "wm8960" in name:
+            wm = i
+        elif name.strip() == "array":
+            array = i
+    if wm is not None:
+        return wm
+    return array
+
+
 def pick_input_index(devices: list, default_channels: int) -> int | None:
     """Pin WM8960 only when the default input is a wide Pulse device."""
     if int(default_channels or 0) <= WIDE_DEFAULT_CH:

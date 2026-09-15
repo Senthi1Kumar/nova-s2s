@@ -9,6 +9,9 @@ models/*.hef.hailort-zoo
 models/.hailo_llm_fetch.env
 models/dtln/
 !models/piper/
+# Custom Nova wake-word head. Repo-root *.onnx ignores every ONNX; last match
+# here re-includes this graph. The .onnx.data sidecar is not matched by *.onnx.
+!models/wakeword/nova_pro_v3.onnx
 hailort.log
 *.wav
 .python-version
@@ -37,3 +40,8 @@ hmi_qt/build/
 hmi_qt/nova-animation/
 hmi_qt/**/__pycache__/
 hmi_qt/*.zip
+
+# LVGL HMI: CMake build trees (each pulls in a FetchContent copy of LVGL's
+# source plus every compiled object) and editor/clangd caches
+hmi_lvgl/build*/
+hmi_lvgl/.cache/

@@ -21,6 +21,16 @@ export NOVA_HAILO_PROFILE="${NOVA_HAILO_PROFILE:-oem}"
 export NOVA_HAILO_PORT="${NOVA_HAILO_PORT:-8766}"
 export NOVA_HAILO_HOST="${NOVA_HAILO_HOST:-0.0.0.0}"
 
+# Thread caps are deliberately NOT set here. The theory was that Parakeet and
+# Piper, sharing one process and both defaulting to every core, collide at turn
+# boundaries. Measured with scripts/observe_cpu_contention.py across a 34-turn
+# live session, the server peaked at 260% of 400% and never saturated the box,
+# so capping threads would cost median latency to relieve contention that is
+# not happening.
+#
+# Re-open this only with evidence from that observer, not from first principles:
+# export OMP_NUM_THREADS=2 ORT_INTRA_OP_NUM_THREADS=2
+
 if [[ -z "${NOVA_HAILO_CONFIG:-}" ]]; then
   case "$NOVA_HAILO_PROFILE" in
     oem_rollback)
@@ -64,6 +74,12 @@ echo "  STT     : ${NOVA_HAILO_STT:-$(cfgval stt_engine)}${NOVA_HAILO_STT:+  (en
 echo "  TTS     : ${NOVA_HAILO_TTS:-$(cfgval tts_engine)}${NOVA_HAILO_TTS:+  (env override!)}"
 echo "  Playback: ${NOVA_HAILO_PLAYBACK:-$(cfgval playback)}${NOVA_HAILO_PLAYBACK:+  (env override!)}"
 echo "  Tools   : $(cfgval profile)   Barge-in: ${NOVA_HAILO_BARGE_IN_WHILE_SPEAKING:-$(cfgval barge_in_while_speaking)}"
+WAKE_MODE="${NOVA_HAILO_WAKE_MODE:-$(cfgval mode)}"
+if [[ "$WAKE_MODE" == "kws" ]]; then
+  echo "  Wake    : kws model=$(cfgval kws_model) thr=$(cfgval kws_threshold)${NOVA_HAILO_WAKE_MODE:+  (env override!)}"
+else
+  echo "  Wake    : ptt${NOVA_HAILO_WAKE_MODE:+  (env override!)}"
+fi
 echo "  AEC     : pa=${NOVA_HAILO_CAPTURE_DEVICE:-default}/${NOVA_HAILO_PLAYBACK_DEVICE:-default}  pulse=${PULSE_SOURCE:-off}/${PULSE_SINK:-off}"
 echo "  Rollback: NOVA_HAILO_PROFILE=oem_rollback $0"
 echo "  Legacy  : NOVA_HAILO_PROFILE=conversation $0  (config.oem.yaml)"

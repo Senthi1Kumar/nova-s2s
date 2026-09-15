@@ -113,11 +113,29 @@ source scripts/setup_env.sh      # uv venv + pip install -e .; first install is 
 ./scripts/run_demo_oem.sh        # backend :8766 — Local Hailo unless Cloud is selected
 ```
 
-Then either:
+Then run the HMI:
 
 ```bash
 # Official driver UI (HDMI / car display). Audio = this Pi.
 cd hmi_qt && ./run.sh
+```
+
+After cloned and want to pull the changes from the remote repository, run the following command:
+
+```bash
+git pull origin share/nova-hailo-poc-v002
+```
+
+Then run the backend:
+
+```bash
+./scripts/run_demo_oem.sh
+```
+
+And Qt HMI:
+
+```bash
+./hmi_qt/run.sh
 ```
 
 | Profile | Command | Tools |
@@ -187,6 +205,7 @@ Choice is also persisted in `runtime/hmi_settings.json` (gitignored).
 | Stage | Backend | Device |
 | --- | --- | --- |
 | VAD | Silero ONNX | CPU |
+| Wake | openWakeWord ONNX (`nova_pro_v3`, phrase **Nova**) | CPU |
 | ASR | EN Nemo streaming GGUF (sidecar; endpointing off) | CPU |
 | Host | Deterministic router + controller (fail-closed). Compact codec `t0`–`t6` is host-side only — Octopus Phase A, not a trained LoRA/HEF. | CPU |
 | LLM | Qwen2-1.5B HEF (`llm_backend: cpp`; `.so` from `fetch_models.sh`). Optional OpenRouter | Hailo-10H or Cloud |
@@ -225,8 +244,10 @@ wrapper is compiled on the Pi by `fetch_models.sh` (HailoRT CMake + pybind11).
 
 HMI: PySide6 + QML is in the same `pyproject.toml` as the backend.
 `source scripts/setup_env.sh` installs everything; `hmi_qt/run.sh` uses that
-venv. No C++ Qt / PyQt build. Empty transcript is **listening**, not a
-wake-word mock.
+venv. No C++ Qt / PyQt build. On Python 3.12+, openWakeWord is installed with
+`--no-deps` (`tflite-runtime` has no wheels; the ONNX path never uses it).
+Wake-word gating (`wake.mode: kws` in `config.oem_v002_test.yaml`) keeps the
+session IDLE until **Nova**; PTT remains the fallback.
 
 ## Models (`models/`)
 
@@ -262,12 +283,14 @@ wrapper only: `./scripts/build_hailo_llm_cpp.sh`.
 | VAD | `models/silero_vad.onnx` | GitHub snakers4/silero-vad (not HF) |
 | TTS | `models/Inflect-Nano-v2-ONNX/` | HF owensong/Inflect-Nano-v2-ONNX |
 | TTS rollback | `models/piper/en_US-amy-low.onnx` | HF rhasspy/piper-voices |
+| Wake (Nova) | `models/wakeword/nova_pro_v3.onnx` + `.onnx.data` | **in git** (custom head). Both files required. |
+| Wake frontend | `models/wakeword/melspectrogram.onnx`, `embedding_model.onnx` | **downloaded by `fetch_models.sh`** (openWakeWord) |
 | LLM HEF | `models/Qwen2-1.5B-Instruct.hef` | Hailo Model Zoo (`dev-public.hailo.ai/v5.3.0/blob/…` on 5.3 firmware) |
 | LLM .so | `nova_hailo/backends/hailo_llm_cpp*.so` | **built by `fetch_models.sh`** (gitignored; HailoRT ABI) |
 
 ## Audio / display
 
-- **HMI on this Pi** (`hmi_qt/run.sh`): HDMI + this Pi’s mic/speakers (WM8960 or USB). Speak — no wake word.
+- **HMI on this Pi** (`hmi_qt/run.sh`): HDMI + this Pi’s mic/speakers (WM8960 or USB). Say **Nova** (or PTT).
 - **Browser on this Pi**: `http://localhost:8766/` (secure context for mic).
 - `voice.barge_in_while_speaking: false` (WM8960 self-echo). Stop / Esc still works.
 - One voice session at a time: close the other client first.

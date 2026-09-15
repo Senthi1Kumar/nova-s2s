@@ -4,6 +4,7 @@ Callers: scripts/verify_oem_gates.sh, pytest.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from nova_hailo.context_history import ConversationHistory
@@ -170,6 +171,31 @@ def test_fsm_complete_while_speaking_stays_until_release():
     fsm.begin_listen()
     assert fsm.state == SessionState.SPEAKING
     assert fsm.release_speaking() is True
+    assert fsm.state == SessionState.LISTENING
+
+
+def test_fsm_listening_expires_to_idle_when_gated():
+    fsm = SessionFSM(session_idle_sec=0.05, expire_listening=True)
+    fsm.arm()
+    fsm.begin_listen()
+    assert fsm.state == SessionState.LISTENING
+    time.sleep(0.07)
+    assert fsm.maybe_expire_arm() is True
+    assert fsm.state == SessionState.IDLE
+
+
+def test_fsm_followup_window_refreshes_after_complete():
+    fsm = SessionFSM(session_idle_sec=0.4, expire_listening=True)
+    fsm.arm()
+    ctx = fsm.begin_turn()
+    assert fsm.set_thinking(ctx.generation_id)
+    assert fsm.set_speaking(ctx.generation_id)
+    time.sleep(0.05)
+    assert fsm.complete(ctx.generation_id, TurnTerminal.COMPLETED)
+    assert fsm.release_speaking() is True
+    assert fsm.state == SessionState.LISTENING
+    time.sleep(0.15)
+    assert fsm.maybe_expire_arm() is False
     assert fsm.state == SessionState.LISTENING
 
 

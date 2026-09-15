@@ -47,7 +47,7 @@ pipeline:
   voice_one_sentence: true
   first_chunk_min_chars: 24
   max_history_turns: 2
-  session_idle_sec: 45
+  session_idle_sec: 8
   validate_before_speak: true
   genai_serial: true
 

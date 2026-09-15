@@ -150,12 +150,34 @@ class QueuedOnnxTTS:
         self._pending_lock = threading.Lock()
         self._last_chunk_hit_sentence_end = False
         self._ready = False
+        self._pcm_cache = None
 
     def _start_worker(self):
         self._ready = True
         self._prewarm_playback()
         self._thread = threading.Thread(target=self._worker, daemon=True, name="tts-worker")
         self._thread.start()
+        self._warm_pcm_cache()
+
+    def _warm_pcm_cache(self) -> None:
+        """Pre-render the fixed ack phrases in the background.
+
+        Off the startup path on purpose: synthesising the bank costs a few
+        seconds of CPU, and delaying the first turn to speed up later ones is
+        the wrong trade on a device that may be demoed shortly after boot.
+        Any failure here leaves _pcm_cache empty, which simply means acks are
+        synthesised live exactly as before.
+        """
+        try:
+            from nova_hailo.backends.tts_cache import PcmCache
+            from nova_hailo.edge_harness.tool_ack import all_ack_lines
+
+            voice = Path(self.model_path).stem if self.model_path else type(self).__name__
+            self._pcm_cache = PcmCache(voice=voice)
+            self._pcm_cache.warm_async(self, all_ack_lines())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pcm cache unavailable: %s", exc)
+            self._pcm_cache = None
 
     def _prewarm_playback(self) -> None:
         """Resolve the output device at startup, not mid-conversation.
@@ -453,7 +475,14 @@ class QueuedOnnxTTS:
                 synth_ms = 0.0
                 play_ms = 0.0
                 emitted = False
-                for audio, sample_rate in self.synthesize_stream(text):
+                # Fixed phrases (tool acks) are pre-rendered, so speaking one
+                # costs a 1us lookup instead of 137ms of synthesis -- which
+                # matters because acks exist to cover dead air, and an ack that
+                # takes 137ms to produce spends a quarter of the budget it
+                # saves. A miss returns None and falls through to live synthesis.
+                cached = self._pcm_cache.get(text) if self._pcm_cache else None
+                stream = iter((cached,)) if cached else self.synthesize_stream(text)
+                for audio, sample_rate in stream:
                     if self._interrupt.is_set() or gen_id != self._active_gen:
                         break
                     if not emitted:

@@ -167,6 +167,51 @@ def test_pcm16_rms_and_dead_capture():
     )
 
 
+def test_playback_hold_covers_tts_chunk_gaps():
+    from nova_hmi.audio_gain import PLAYBACK_DONE_HOLD_S, playback_done_debounce_s
+
+    assert PLAYBACK_DONE_HOLD_S >= 1.5
+    assert (
+        playback_done_debounce_s(
+            queue_empty=True,
+            started_play=True,
+            idle_s=0.4,
+            hold_s=PLAYBACK_DONE_HOLD_S,
+        )
+        is False
+    )
+    assert (
+        playback_done_debounce_s(
+            queue_empty=True,
+            started_play=True,
+            idle_s=2.0,
+            hold_s=PLAYBACK_DONE_HOLD_S,
+        )
+        is True
+    )
+
+
+def test_raw_kws_device_index_prefers_wm8960():
+    from nova_hmi.audio_gain import raw_kws_device_index
+
+    devices = [
+        {"name": "pulse", "max_input_channels": 32},
+        {"name": "wm8960-soundcard: - (hw:2,0)", "max_input_channels": 2},
+        {"name": "array", "max_input_channels": 2},
+    ]
+    assert raw_kws_device_index(devices, "pulse") == 1
+    assert raw_kws_device_index(devices, "wm8960-soundcard") is None
+
+
+def test_uplink_uses_raw_kws_while_idle():
+    from nova_hmi.audio_gain import capture_source_for_uplink
+
+    assert capture_source_for_uplink(raw_open=True, playing=False) == "raw"
+    assert capture_source_for_uplink(raw_open=True, playing=True) == "raw"
+    assert capture_source_for_uplink(raw_open=False, playing=False) == "aec"
+    assert capture_source_for_uplink(raw_open=False, playing=True) == "aec"
+
+
 def test_quiet_attack_is_still_sent():
     """WM8960 ALC starts quiet; dropping those frames chops the first words."""
     from nova_hmi.audio_gain import should_send_uplink
@@ -185,6 +230,35 @@ def test_fsm_maps_to_qml_phases():
     assert map_fsm_to_phase("IDLE") == "idle"
     assert map_fsm_to_phase("ARMED") == "idle"
     assert map_fsm_to_phase("INTERRUPTING") == "listening"
+
+
+def test_wake_detected_maps_to_listening():
+    msg = {"type": "wake.detected", "score": 0.42, "fsm": {"state": "LISTENING"}}
+    assert msg["type"] == "wake.detected"
+    assert map_fsm_to_phase(str((msg.get("fsm") or {}).get("state"))) == "listening"
+
+
+def test_chime_enqueue_does_not_emit_playback_started():
+    emitted: list[int] = []
+
+    class _Stub:
+        def enqueue_playback(self, pcm, rate=24000, *, notify=True):
+            if notify:
+                emitted.append(1)
+
+        def play_chime(self):
+            self.enqueue_playback(b"\x00\x00", 16000, notify=False)
+
+    _Stub().play_chime()
+    assert emitted == []
+
+
+def test_load_chime_missing_file_is_empty(tmp_path):
+    from nova_hmi.chime import load_chime
+
+    pcm, rate = load_chime(tmp_path / "missing.mp3")
+    assert pcm == b""
+    assert rate > 0
 
 
 def test_transcript_and_tool_extractors():

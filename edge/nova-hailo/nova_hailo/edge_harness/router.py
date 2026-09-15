@@ -334,14 +334,28 @@ _SMALLTALK: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
+# Whole-utterance clock asks. Must not steal "what time is the meeting".
+_TIME_RE = re.compile(
+    r"^\s*(?:hey\s+nova[\s,!.]*)?(?:"
+    r"what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?time(?:\s+now)?|"
+    r"whats\s+(?:the\s+)?(?:current\s+)?time(?:\s+now)?|"
+    r"what\s+time\s+is\s+it|"
+    r"tell\s+me\s+(?:the\s+)?(?:current\s+)?time|"
+    r"(?:got|have)\s+the\s+time|"
+    r"what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?date|"
+    r"whats\s+(?:the\s+)?(?:current\s+)?date|"
+    r"what\s+day\s+is\s+it"
+    r")[\s?.!]*$",
+    re.I,
+)
+
+
 # Capability asks with no implementation in this profile. A 1.5B cannot be
 # prompted into reliably declining these -- measured 2026-07-30 it invented a
 # clock time, a fake email result and a false reminder promise. Each entry is
 # (pattern, required_tool, honest_reply); the decline only fires when that tool
 # is NOT enabled, so it never shadows a real tool in oem_readonly.
 _UNAVAILABLE_CAPS: tuple[tuple[re.Pattern[str], str, str], ...] = (
-    (re.compile(r"\b(what|whats|what's)\s+(the\s+)?(time|date|day)\b", re.I),
-     "get_datetime", "I can't read the clock yet, sorry."),
     (re.compile(r"\b(weather|forecast|raining|temperature)\b", re.I),
      "web_search", "I can't check the weather yet."),
     (re.compile(r"\b(traffic|route\s+to|navigate)\b", re.I),
@@ -498,6 +512,8 @@ def route(query: str, profile: CapabilityProfile) -> RoutedIntent | None:
         return RoutedIntent(Intent.CAPABILITY, q)
     if _smalltalk_speak(q):
         return RoutedIntent(Intent.SMALLTALK, q)
+    if _TIME_RE.search(q):
+        return RoutedIntent(Intent.GET_DATETIME, q)
     if _unavailable_cap_speak(q, profile.enabled):
         return RoutedIntent(Intent.CAPABILITY_UNAVAILABLE, q)
     if profile.allows(Intent.CHECK_CALENDAR) and _CAL_RE.search(q):

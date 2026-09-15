@@ -46,6 +46,7 @@ class RealtimeBridge(QObject):
     llmStatus = Signal(str)
     turnMetrics = Signal(dict)
     googleAuthUrl = Signal(str)
+    wakeDetected = Signal(float)
 
     def __init__(self, url: str, parent=None):
         super().__init__(parent)
@@ -203,6 +204,18 @@ class RealtimeBridge(QObject):
             if state:
                 self.fsmReceived.emit(state)
                 self.phaseReceived.emit(map_fsm_to_phase(state))
+            return
+        if kind == "wake.detected":
+            try:
+                score = float(msg.get("score") or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            self.wakeDetected.emit(score)
+            self.phaseReceived.emit("listening")
+            fsm = msg.get("fsm") or {}
+            state = str(fsm.get("state") or "")
+            if state:
+                self.fsmReceived.emit(state)
             return
         if kind == "nova.google.auth_url":
             url = str(msg.get("auth_url") or "").strip()

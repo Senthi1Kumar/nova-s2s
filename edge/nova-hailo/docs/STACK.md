@@ -28,6 +28,7 @@ Override any profile with `NOVA_HAILO_CONFIG=/path/to.yaml`.
 | --- | --- | --- |
 | Capture / playback | PySide6 HMI (`hmi_qt/run.sh`) or browser WS PCM | This Pi (or laptop client) |
 | VAD | Silero ONNX | CPU |
+| Wake | openWakeWord ONNX (`nova_pro_v3`, phrase **Nova**) | CPU |
 | Utterance gate | rms / peak / speech fraction | CPU |
 | ASR | NeMo Speech EN streaming GGUF + optional sidecar | CPU |
 | Host | Router + controller; compact codec `t0`–`t6` (Phase A) | CPU |
@@ -52,6 +53,7 @@ Barge-in while speaking is **off** (UI stop button still interrupts).
 | TTS | `models/Inflect-Nano-v2-ONNX/` (also `cloned/Inflect-Nano-v2-ONNX`) | `fetch_models.sh` |
 | TTS rollback | `models/piper/en_US-amy-low.onnx` | `fetch_models.sh` |
 | VAD | `models/silero_vad.onnx` | `fetch_models.sh` |
+| Wake | `models/wakeword/nova_pro_v3.onnx` + openWakeWord `melspectrogram.onnx` / `embedding_model.onnx` | `fetch_models.sh` (custom head = warn if missing) |
 
 Sidecar binary (when used):  
 `cloned/NeMo-Speech.cpp/build/cpu-server/bin/nemo-speech`  
@@ -65,6 +67,12 @@ Under `voice:` in the active YAML:
 - ASR wait after speech end: `nemo_wait_floor_s`, `nemo_wait_cap_s`, `nemo_wait_base_s`, `nemo_wait_scale`
 - Echo: `echo_tail_ms`, `barge_in_while_speaking` (YAML stays false; soak launcher sets `NOVA_HAILO_BARGE_IN_WHILE_SPEAKING=true` and keeps HMI uplink open during TTS — see `docs/pipewire-aec.md`)
 - STT reopen pause: `reopen_ms` (commit delay after `speech_stopped`; 0 = immediate)
+
+Under `wake:` in `config.oem_v002_test.yaml`:
+
+- `mode: kws` — session stays IDLE until the word **Nova** (or explicit PTT). Follow-ups inside `pipeline.session_idle_sec` (8 s) do not need the wake word. Rollback: `NOVA_HAILO_WAKE_MODE=ptt`.
+- `kws_engine: openwakeword`, `kws_model`, `kws_threshold` (0.15), `kws_barge_threshold` (0.10 while TTS is audible), `kws_consecutive_hits`, `kws_cooldown_s`
+- Missing model fails open to PTT.
 
 Under `model:`:
 

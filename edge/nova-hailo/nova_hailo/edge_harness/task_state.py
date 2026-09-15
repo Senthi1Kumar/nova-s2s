@@ -15,7 +15,7 @@ _TOOL_FAMILY = frozenset(
     }
 )
 _CHATTY = frozenset(
-    {"identity", "capability", "smalltalk", "capability_unavailable"}
+    {"identity", "capability", "smalltalk", "capability_unavailable", "get_datetime"}
 )
 
 

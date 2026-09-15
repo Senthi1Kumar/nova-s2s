@@ -53,7 +53,8 @@ pipeline:
   voice_one_sentence: true
   first_chunk_min_chars: 24
   max_history_turns: 2
-  session_idle_sec: 45
+  session_idle_sec: 8
+  timezone: Asia/Kolkata
   validate_before_speak: true
   genai_serial: true
   # Off by default: OpenRouter tool turns only. When on, a web_search tool
@@ -106,9 +107,14 @@ web:
   port: 8766
 
 wake:
-  mode: ptt
-  kws_enabled: false
-  kws_threshold: 0.65
+  mode: kws                 # kws = "Nova" gates turns; ptt = today (rollback)
+  kws_enabled: true
+  kws_engine: openwakeword
+  kws_model: models/wakeword/nova_pro_v3.onnx
+  kws_threshold: 0.15
+  kws_barge_threshold: 0.10   # lower while TTS is audible (AEC overlap)
+  kws_consecutive_hits: 1
+  kws_cooldown_s: 1.5
 
 pvad:
   enabled: false

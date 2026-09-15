@@ -10,6 +10,8 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 
+from nova_hailo.local_clock import format_clock_stamp
+
 # Proper-noun-ish tokens. Sentence-initial function words are excluded so a
 # reply merely *starting* with "It" or "The" is not treated as naming an entity.
 _ENTITY_RE = re.compile(r"\b[A-Z][A-Za-z0-9&.\-]{2,}\b")
@@ -163,7 +165,7 @@ class ConversationHistory:
         # turn rather than the system prompt on purpose: a changing value in the
         # prefix would break the provider's prompt cache on every request, and
         # recency also keeps it from being lost in the middle of a long context.
-        stamp = (now or datetime.now()).strftime("%A, %d %B %Y, %H:%M")
+        stamp = format_clock_stamp(now)
         ut = f"(Right now it is {stamp}.)\n{ut}" if ut else ut
         if no_think and "/no_think" not in ut.lower():
             ut = ut + "\n/no_think"

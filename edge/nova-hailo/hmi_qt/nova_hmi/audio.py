@@ -22,12 +22,16 @@ from nova_hmi.audio_gain import (
     level_from_rms,
     mic_open_during_tts,
     pick_input_index,
+    PLAYBACK_DONE_HOLD_S,
     playback_done_debounce_s,
+    raw_kws_device_index,
+    capture_source_for_uplink,
     remap_pipewire_device,
     should_send_uplink,
     uplink_is_blocked,
     uplink_multiplier,
 )
+from nova_hmi.chime import load_chime
 
 BANDS = 24
 CAPTURE_RATE = 16000
@@ -101,6 +105,7 @@ class AudioDuplex(QObject):
         self._bands = [0.0] * BANDS
         self._muted = False
         self._in = None
+        self._in_raw = None
         self._out = None
         self._synthetic = True
         self._play_q: deque[bytes] = deque()
@@ -125,6 +130,12 @@ class AudioDuplex(QObject):
         self._in_ch = 1
         self._restarting_in = False
         self._open_during_tts = mic_open_during_tts()
+        self._chime_pcm = b""
+        self._chime_rate = DEVICE_RATE
+        pcm, rate = load_chime(dst_rate=self._play_rate)
+        if pcm:
+            self._chime_pcm = pcm
+            self._chime_rate = rate
         if capture and self._open_during_tts:
             print("[hmi] uplink open during TTS (AEC barge-in)", flush=True)
 
@@ -183,6 +194,7 @@ class AudioDuplex(QObject):
                     f"gain={MANUAL_GAIN}× agc={'on' if AGC_ENABLED else 'off'}",
                     flush=True,
                 )
+                self._try_open_raw_kws(str(dev.get("name") or ""))
             except Exception as exc:
                 self._in = None
                 print(f"[hmi] mic FAILED ({exc}) — no uplink", flush=True)
@@ -276,7 +288,7 @@ class AudioDuplex(QObject):
     def is_playing(self) -> bool:
         return bool(self._started_play or self.play_queue_depth() > 0)
 
-    def enqueue_playback(self, pcm16: bytes, sample_rate: int = 24000) -> None:
+    def enqueue_playback(self, pcm16: bytes, sample_rate: int = 24000, *, notify: bool = True) -> None:
         if not pcm16:
             return
         if self._out is None:
@@ -291,13 +303,18 @@ class AudioDuplex(QObject):
         self._last_play_activity = time.monotonic()
         if not self._open_during_tts:
             self.hold_uplink(dur + self._echo_tail_s)
-        if empty or not self._started_play:
+        if notify and (empty or not self._started_play):
             self._started_play = True
             self._play_was_active = True
             self.playbackStarted.emit()
             if self._out is None:
                 print("[hmi] no speaker device — not parking the mic", flush=True)
                 self._started_play = False
+
+    def play_chime(self) -> None:
+        if not self._chime_pcm:
+            return
+        self.enqueue_playback(self._chime_pcm, self._chime_rate, notify=False)
 
     def flush_playback(self) -> None:
         with self._play_lock:
@@ -306,7 +323,53 @@ class AudioDuplex(QObject):
         if not self._open_during_tts:
             self.hold_uplink(self._echo_tail_s)
 
+    def _try_open_raw_kws(self, aec_name: str) -> None:
+        """Second capture on WM8960 while TTS plays — Pulse AEC cancels 'Nova'."""
+        if sd is None or np is None:
+            return
+        try:
+            devices = list(sd.query_devices())
+        except Exception:
+            return
+        idx = raw_kws_device_index(devices, aec_name)
+        if idx is None:
+            return
+        try:
+            d = devices[idx]
+            ch = int(d.get("max_input_channels") or 1)
+            use_ch = 1 if "wm8960" in str(d.get("name") or "").lower() else max(1, min(ch, 2))
+            self._in_raw = sd.InputStream(
+                samplerate=DEVICE_RATE,
+                blocksize=DEVICE_BLOCK,
+                channels=use_ch,
+                dtype="float32",
+                callback=self._on_in_raw,
+                device=idx,
+            )
+            self._in_raw.start()
+            print(
+                f"[hmi] raw KWS mic: {d.get('name')!r} idx={idx} "
+                f"(idle + TTS uplink)",
+                flush=True,
+            )
+        except Exception as exc:
+            self._in_raw = None
+            print(
+                f"[hmi] raw KWS mic skipped ({exc}); barge-in stays on AEC",
+                flush=True,
+            )
+
     def _on_in(self, indata, frames, time_info, status):  # PortAudio thread
+        if capture_source_for_uplink(raw_open=self._in_raw is not None, playing=self.is_playing()) == "raw":
+            return
+        self._handle_capture(indata, status)
+
+    def _on_in_raw(self, indata, frames, time_info, status):  # PortAudio thread
+        if capture_source_for_uplink(raw_open=True, playing=self.is_playing()) != "raw":
+            return
+        self._handle_capture(indata, status)
+
+    def _handle_capture(self, indata, status) -> None:
         # Keep this cheap. FFT on this thread xruns the WM8960 under Piper/OR load,
         # after which PortAudio keeps calling us with zeros (orb dead, VAD idle,
         # backend still counts uplink frames).
@@ -443,7 +506,7 @@ class AudioDuplex(QObject):
             queue_empty=self.play_queue_depth() == 0,
             started_play=self._started_play,
             idle_s=idle_s,
-            hold_s=0.35,
+            hold_s=PLAYBACK_DONE_HOLD_S,
         ):
             self._started_play = False
             self._play_was_active = False
@@ -460,7 +523,8 @@ class AudioDuplex(QObject):
             print(
                 f"[hmi] uplink rms_in={self._last_in_rms:.4f} "
                 f"blocked={self.uplink_blocked()} xruns={self._xruns} "
-                f"play_q={self.play_queue_depth()}",
+                f"play_q={self.play_queue_depth()} playing={int(self.is_playing())} "
+                f"raw_kws={int(self._in_raw is not None)}",
                 flush=True,
             )
         # Zombie capture: callbacks still fire with digital zeros, not a quiet room.
@@ -495,7 +559,7 @@ class AudioDuplex(QObject):
         self._tick.stop()
         self._drain.stop()
         self.flush_playback()
-        for stream in (self._in, self._out):
+        for stream in (self._in, self._in_raw, self._out):
             if stream is None:
                 continue
             try:
@@ -503,4 +567,4 @@ class AudioDuplex(QObject):
                 stream.close()
             except Exception:
                 pass
-        self._in = self._out = None
+        self._in = self._in_raw = self._out = None

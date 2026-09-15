@@ -85,6 +85,37 @@ def test_route_fills_calendar_day_slot():
     assert route("what's on my calendar", profile).slots == {"day": "week"}
 
 
+def test_route_current_time_is_host_clock_not_llm():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from nova_hailo.edge_harness.tool_broker import ToolBroker
+    from nova_hailo.local_clock import speak_local_time
+
+    profile = CapabilityProfile.from_list(["web_search"])
+    for utt in (
+        "What is the current time now?",
+        "what's the current time",
+        "what time is it",
+    ):
+        routed = route(utt, profile)
+        assert routed is not None, utt
+        assert routed.intent is Intent.GET_DATETIME, (utt, routed)
+
+    meeting = route("what time is the meeting", profile)
+    assert meeting is None or meeting.intent is not Intent.GET_DATETIME
+
+    now = datetime(2026, 9, 15, 22, 39, tzinfo=ZoneInfo("Asia/Kolkata"))
+    speak = speak_local_time(now=now)
+    assert "10:39 PM" in speak
+    assert "IST" in speak
+    broker = ToolBroker(profile)
+    out = broker.execute(route("what time is it", profile))
+    assert out["ok"] is True
+    assert out["name"] == "get_datetime"
+    assert "IST" in out["speak"]
+
+
 def test_capability_profile_none_defaults_to_oem_readonly():
     profile = CapabilityProfile.from_list(None)
     assert profile.allows(Intent.WEB_SEARCH)
@@ -413,10 +444,18 @@ def test_route_list_drive_list_all_and_broker_empty_query(monkeypatch):
         # Router keeps original ASR on RoutedIntent; broker normalizes at execute.
         assert routed.query.strip() == utt.strip(), (utt, routed.query)
 
-    broker = ToolBroker(profile)
+    # Distinctly non-default timeout_sec: proves the broker actually forwards
+    # its configured timeout to the Drive tool constructor, rather than this
+    # test passing merely because both sides happen to agree on a default.
+    broker = ToolBroker(profile, timeout_sec=3.0)
     seen: list[str] = []
+    seen_timeouts: list[float] = []
 
     class FakeDrive:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+            seen_timeouts.append(timeout)
+
         def execute(self, query: str = "") -> dict:
             seen.append(query)
             return {
@@ -430,14 +469,9 @@ def test_route_list_drive_list_all_and_broker_empty_query(monkeypatch):
     monkeypatch.setattr(broker, "_ensure_workspace_auth", lambda: None)
 
     # Stub only the drive MCP module so _mcp_drive's late import needs no dotenv.
-    fake_drive = ModuleType("nova.tools.mcp.drive")
+    fake_drive = ModuleType("nova_hailo.connectors.workspace.drive")
     fake_drive.ListDriveFilesTool = FakeDrive  # type: ignore[attr-defined]
-    for name in ("nova", "nova.tools", "nova.tools.mcp"):
-        if name not in sys.modules:
-            pkg = ModuleType(name)
-            pkg.__path__ = []  # type: ignore[attr-defined]
-            sys.modules[name] = pkg
-    monkeypatch.setitem(sys.modules, "nova.tools.mcp.drive", fake_drive)
+    monkeypatch.setitem(sys.modules, "nova_hailo.connectors.workspace.drive", fake_drive)
 
     for utt in ("files and folders in my drive", "my drive"):
         seen.clear()
@@ -455,3 +489,8 @@ def test_route_list_drive_list_all_and_broker_empty_query(monkeypatch):
     out = broker.execute(routed)
     assert out["ok"] is True
     assert seen == [specific], seen
+
+    # Regression net: the broker must actually forward its configured
+    # timeout_sec to the Drive tool constructor on every call above, not
+    # some hardcoded/default value.
+    assert seen_timeouts and all(t == 3.0 for t in seen_timeouts), seen_timeouts

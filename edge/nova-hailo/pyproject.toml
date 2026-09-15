@@ -21,6 +21,8 @@ dependencies = [
     "requests",
     "psutil",
     "onnxruntime",
+    "openwakeword>=0.6",
+    "tqdm",
     "kaldi_native_fbank",
     "huggingface_hub",
     "fastapi==0.115.6",
@@ -59,6 +61,12 @@ include = ["nova_hailo*"]
 [tool.uv]
 # hailo_platform / pyhailort come from system packages (apt)
 package = true
+# openWakeWord's ONNX path never uses these; tflite-runtime has no cp312+ wheels.
+override-dependencies = [
+    "tflite-runtime ; sys_platform == 'never'",
+    "ai-edge-litert ; sys_platform == 'never'",
+    "speexdsp-ns ; sys_platform == 'never'",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

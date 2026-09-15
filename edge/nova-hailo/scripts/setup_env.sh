@@ -56,6 +56,7 @@ nova_hailo_setup_env() {
 
   # shellcheck disable=SC1091
   source "$root/.venv/bin/activate" || return 1
+  "$root/.venv/bin/python" -m pip install --no-deps -q 'openwakeword==0.6.0' 2>/dev/null || true
 
   if [[ -f "$root/.env" ]]; then
     set -a

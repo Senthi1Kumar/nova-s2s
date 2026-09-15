@@ -58,6 +58,19 @@ _DEFAULT_ACK_LINES: tuple[str, ...] = (
 )
 
 
+def all_ack_lines() -> tuple[str, ...]:
+    """Every line this module can return, for pre-rendering.
+
+    The TTS PCM cache warms on exactly this set, so a line added above is
+    pre-rendered automatically rather than quietly costing a live synthesis
+    the first time it is chosen.
+    """
+    lines: list[str] = list(_DEFAULT_ACK_LINES)
+    for variants in _TOOL_ACK_LINES.values():
+        lines.extend(variants)
+    return tuple(dict.fromkeys(lines))  # de-duplicated, order preserved
+
+
 def choose_tool_ack(tool_name: str | None, rng: random.Random | None = None) -> str:
     """Pick a short filler line for ``tool_name``.
 

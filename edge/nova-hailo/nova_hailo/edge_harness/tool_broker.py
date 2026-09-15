@@ -28,6 +28,7 @@ from nova_hailo.edge_harness.router import (
     _unavailable_cap_speak,
 )
 from nova_hailo.edge_harness.types import Intent, RoutedIntent, ToolResult
+from nova_hailo.local_clock import speak_local_time
 from nova_hailo.tools.search_mcp import deep_research as mcp_deep_research
 from nova_hailo.tools.search_mcp import research_status as mcp_research_status
 from nova_hailo.tools.search_mcp import web_search as mcp_web_search
@@ -151,6 +152,9 @@ class ToolBroker:
             # Router may supply a canned speak (e.g. system-prompt refuse) via slots.
             speak = str(slots.get("speak") or "") or _smalltalk_speak(query)
             return _ok(name, speak) if speak else _unavailable(name, "no_smalltalk_match")
+        if intent is Intent.GET_DATETIME:
+            speak = speak_local_time()
+            return _ok(name, speak, result={"timezone": "Asia/Kolkata"})
         if intent is Intent.CAPABILITY_UNAVAILABLE:
             speak = _unavailable_cap_speak(query, self.profile.enabled)
             return _ok(name, speak) if speak else _unavailable(name, "no_capability_match")
@@ -223,11 +227,11 @@ class ToolBroker:
             blocked["speak"] = "Google Workspace is not connected. Open Settings and tap Connect with Google."
             return blocked
         try:
-            from nova.tools.mcp.calendar import CheckCalendarTool
+            from nova_hailo.connectors.workspace.calendar import CheckCalendarTool
         except Exception as exc:  # noqa: BLE001
             return _unavailable("check_calendar", f"mcp_import:{exc}")
         try:
-            out = CheckCalendarTool().execute(day=day)
+            out = CheckCalendarTool(timeout=self.timeout_sec).execute(day=day)
             return _normalize_mcp("check_calendar", out)
         except Exception as exc:  # noqa: BLE001
             return _unavailable("check_calendar", f"mcp_call:{exc}")
@@ -239,12 +243,12 @@ class ToolBroker:
             blocked["speak"] = "Google Workspace is not connected. Open Settings and tap Connect with Google."
             return blocked
         try:
-            from nova.tools.mcp.gmail import CheckEmailTool
+            from nova_hailo.connectors.workspace.gmail import CheckEmailTool
         except Exception as exc:  # noqa: BLE001
             return _unavailable("check_email", f"mcp_import:{exc}")
         try:
             # CheckEmailTool.execute(mode="unread"|...) -- no free-text query.
-            out = CheckEmailTool().execute(mode="unread")
+            out = CheckEmailTool(timeout=self.timeout_sec).execute(mode="unread")
             return _normalize_mcp("check_email", out)
         except Exception as exc:  # noqa: BLE001
             return _unavailable("check_email", f"mcp_call:{exc}")
@@ -256,11 +260,13 @@ class ToolBroker:
             blocked["speak"] = "Google Workspace is not connected. Open Settings and tap Connect with Google."
             return blocked
         try:
-            from nova.tools.mcp.drive import ListDriveFilesTool
+            from nova_hailo.connectors.workspace.drive import ListDriveFilesTool
         except Exception as exc:  # noqa: BLE001
             return _unavailable("list_drive_files", f"mcp_import:{exc}")
         try:
-            out = ListDriveFilesTool().execute(query=drive_list_query(query))
+            out = ListDriveFilesTool(timeout=self.timeout_sec).execute(
+                query=drive_list_query(query)
+            )
             return _normalize_mcp("list_drive_files", out)
         except Exception as exc:  # noqa: BLE001
             return _unavailable("list_drive_files", f"mcp_call:{exc}")

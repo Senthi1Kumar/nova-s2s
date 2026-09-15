@@ -10,10 +10,12 @@ import base64
 import collections
 import json
 import os
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
 import numpy as np
@@ -57,6 +59,62 @@ RESEARCH_TICK_SEC = 2.0
 OVERLAP_STALE_S = 0.35
 BARGE_IN_WAIT_S = 2.0
 DEFAULT_REOPEN_MS = 300
+# HMI already debounce-holds 1.8 s; keep the server echo gate across chunk gaps.
+PLAYBACK_STOPPED_HOLD_S = 1.8
+
+
+def apply_playback_stopped(
+    *,
+    now: float,
+    echo_until: float,
+    echo_tail_s: float,
+    hold_s: float = PLAYBACK_STOPPED_HOLD_S,
+) -> dict[str, float | bool]:
+    """Chunk-gap stopped must not reopen the mic."""
+    return {
+        "client_playing": False,
+        "release_speaking": False,
+        "echo_until": max(float(echo_until), float(now) + float(echo_tail_s) + float(hold_s)),
+    }
+
+
+def apply_playback_interrupted() -> dict[str, float | bool]:
+    """Barge-in / cancel: drop the echo gate immediately."""
+    return {"client_playing": False, "release_speaking": True, "echo_until": 0.0}
+
+
+def _fold_echo_text(s: str) -> str:
+    t = (s or "").lower().replace("'", "")
+    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    t = re.sub(r"\d+", "#", t)
+    return " ".join(t.split())
+
+
+def _transcript_is_echo(user: str, last_assistant: str) -> bool:
+    """True when ASR likely captured Nova's own last speak-back."""
+    u = (user or "").strip().lower()
+    prev = (last_assistant or "").strip().lower()
+    if not prev or len(u) < 4:
+        return False
+    if u in prev or prev[:24] in u:
+        return True
+    if SequenceMatcher(None, u, prev).ratio() >= 0.50:
+        return True
+    pw = {w for w in prev.replace("'", "").split() if len(w) > 2}
+    uw = {w for w in u.replace("'", "").split() if len(w) > 2}
+    if uw:
+        overlap = len(pw & uw) / max(1, len(uw))
+        if overlap >= 0.45:
+            return True
+        uf = _fold_echo_text(u).split()
+        pf = _fold_echo_text(prev).split()
+        if uf and pf and uf[0] == pf[0] and len(uf) <= 4 and overlap >= 0.30:
+            return True
+    uf = _fold_echo_text(u)
+    pf = _fold_echo_text(prev)
+    if uf and pf and SequenceMatcher(None, uf, pf).ratio() >= 0.55:
+        return True
+    return False
 
 
 def should_interrupt_on_user_speech(
@@ -93,20 +151,6 @@ def should_interrupt_on_user_speech(
 _RESEARCH_QUIET_STATES = frozenset(
     {SessionState.IDLE, SessionState.ARMED, SessionState.LISTENING}
 )
-
-
-def _transcript_is_echo(user: str, last_assistant: str) -> bool:
-    """True when ASR likely captured Nova's own last speak-back."""
-    u = (user or "").strip().lower()
-    prev = (last_assistant or "").strip().lower()
-    if not prev or len(u) < 4:
-        return False
-    pw = {w for w in prev.replace("'", "").split() if len(w) > 2}
-    uw = {w for w in u.replace("'", "").split() if len(w) > 2}
-    if not uw:
-        return False
-    overlap = len(pw & uw) / max(1, len(uw))
-    return overlap >= 0.55 or u in prev or prev[:24] in u
 
 
 def _pcm16_b64(audio: np.ndarray) -> str:
@@ -251,15 +295,27 @@ class RealtimeSession:
         self._utterance_audio: np.ndarray | None = None
         self._turn_revision = 0
         self._ptt_armed = False
-        wake_mode = str(cfg.get("wake", "mode", default="ptt") or "ptt").lower()
+        self._logged_ignore_auto_arm = False
+        wake_mode_env = (os.environ.get("NOVA_HAILO_WAKE_MODE") or "").strip().lower()
+        if wake_mode_env in {"kws", "ptt"}:
+            wake_mode = wake_mode_env
+        else:
+            wake_mode = str(cfg.get("wake", "mode", default="ptt") or "ptt").lower()
         self.wake = WakeWordDetector(
             enabled=bool(cfg.get("wake", "kws_enabled", default=False)),
-            threshold=float(cfg.get("wake", "kws_threshold", default=0.65) or 0.65),
+            engine=str(cfg.get("wake", "kws_engine", default="openwakeword") or "openwakeword"),
+            threshold=float(cfg.get("wake", "kws_threshold", default=0.15) or 0.15),
             model_path=cfg.get("wake", "kws_model"),
+            consecutive_hits=int(cfg.get("wake", "kws_consecutive_hits", default=1) or 1),
+            cooldown_s=float(cfg.get("wake", "kws_cooldown_s", default=1.5) or 1.5),
+            barge_threshold=float(
+                cfg.get("wake", "kws_barge_threshold", default=0.10) or 0.10
+            ),
         )
-        self.require_arm = wake_mode in {"kws", "ptt"} and (
-            bool(cfg.get("wake", "kws_enabled", default=False)) or wake_mode == "ptt"
-        )
+        self.gate_on_wake = wake_mode == "kws" and self.wake.available
+        if hasattr(self.fsm, "_expire_listening"):
+            self.fsm._expire_listening = self.gate_on_wake
+        self.require_arm = self.gate_on_wake
         if wake_mode == "ptt" and not self.wake.available:
             self.require_arm = True
         self.pvad = OptionalFireRedPVAD(
@@ -276,10 +332,18 @@ class RealtimeSession:
             self.barge_in_while_speaking = bool(
                 cfgv.get("voice", "barge_in_while_speaking", default=False)
             )
+        if self.gate_on_wake:
+            wake_banner = (
+                f"kws model={self.wake.model_path or '?'} "
+                f"thr={self.wake.threshold}"
+            )
+        else:
+            wake_banner = "ptt"
         print(
             f"[voice] barge_in_while_speaking={self.barge_in_while_speaking} "
             f"echo_tail_ms={cfgv.get('voice', 'echo_tail_ms', default=400)} "
-            f"stt={getattr(pipeline, 'stt_engine', None)}",
+            f"stt={getattr(pipeline, 'stt_engine', None)} "
+            f"wake={wake_banner}",
             flush=True,
         )
         self.echo_tail_ms = int(cfgv.get("voice", "echo_tail_ms", default=400) or 400)
@@ -327,6 +391,7 @@ class RealtimeSession:
         self._echo_hold_started: float = 0.0
         self._uplink_frames: int = 0
         self._uplink_log_at: float = 0.0
+        self._wake_peak: float = 0.0
 
     async def send(self, event: dict[str, Any]):
         if self._closed or self.ws.client_state != WebSocketState.CONNECTED:
@@ -634,8 +699,9 @@ class RealtimeSession:
 
     async def run(self):
         await self.ws.accept()
-        self.fsm.arm()
-        self.fsm.begin_listen()
+        if not self.gate_on_wake:
+            self.fsm.arm()
+            self.fsm.begin_listen()
         self._research_task = asyncio.create_task(self._research_tick())
         greeting = ""
         try:
@@ -703,6 +769,14 @@ class RealtimeSession:
             if thr is not None:
                 self.vad.set_threshold(float(thr))
             if session.get("arm") or session.get("ptt"):
+                if self.gate_on_wake:
+                    if not self._logged_ignore_auto_arm:
+                        print(
+                            "[wake] ignoring HMI auto-arm (gated; say Nova or use PTT)",
+                            flush=True,
+                        )
+                        self._logged_ignore_auto_arm = True
+                    return
                 self._ptt_armed = True
                 self.fsm.arm()
                 self.fsm.begin_listen()
@@ -749,17 +823,34 @@ class RealtimeSession:
         if mtype == "playback.started":
             self._first_audio_ack_at = time.perf_counter()
             self._client_playing = True
+            print("[play] started", flush=True)
             ctx = self.fsm.current
             if ctx is not None and ctx.first_audio_played_at is None:
                 ctx.first_audio_played_at = self._first_audio_ack_at
             return
 
-        if mtype == "playback.interrupted" or mtype == "playback.stopped":
+        if mtype == "playback.interrupted":
             self._playback_stop_ack_at = time.perf_counter()
-            self._client_playing = False
-            self._echo_until = 0.0  # audible output is over; reopen the mic
-            if mtype == "playback.stopped":
-                self.fsm.release_speaking()
+            decision = apply_playback_interrupted()
+            self._client_playing = bool(decision["client_playing"])
+            self._echo_until = float(decision["echo_until"])
+            print("[play] playback.interrupted", flush=True)
+            ctx = self.fsm.current
+            if ctx is not None and ctx.barge_in_at is not None:
+                stop_ms = (self._playback_stop_ack_at - ctx.barge_in_at) * 1000
+                ctx.metadata["barge_in_stop_ms"] = stop_ms
+            return
+
+        if mtype == "playback.stopped":
+            self._playback_stop_ack_at = time.perf_counter()
+            decision = apply_playback_stopped(
+                now=time.monotonic(),
+                echo_until=float(getattr(self, "_echo_until", 0.0) or 0.0),
+                echo_tail_s=self.echo_tail_ms / 1000.0,
+            )
+            self._client_playing = bool(decision["client_playing"])
+            self._echo_until = float(decision["echo_until"])
+            print("[play] playback.stopped", flush=True)
             ctx = self.fsm.current
             if ctx is not None and ctx.barge_in_at is not None:
                 stop_ms = (self._playback_stop_ack_at - ctx.barge_in_at) * 1000
@@ -792,6 +883,22 @@ class RealtimeSession:
             pcm = _b64_pcm16(audio_b64)
             self._uplink_frames += 1
             now_m = time.monotonic()
+            self.fsm.maybe_expire_arm()
+
+            audible = (
+                self.fsm.state == SessionState.SPEAKING
+                or bool(self.pipeline.tts.is_speaking)
+                or bool(getattr(self, "_client_playing", False))
+            )
+            wake_thr = self.wake.barge_threshold if audible else None
+            if self.wake.enabled and self.wake.process(
+                pcm, threshold=wake_thr, ignore_cooldown=audible
+            ):
+                self._on_wake_hit()
+                return
+
+            score = float(getattr(self.wake, "last_score", 0.0) or 0.0)
+            self._wake_peak = max(getattr(self, "_wake_peak", 0.0), score)
             if now_m - self._uplink_log_at >= 5.0:
                 self._uplink_log_at = now_m
                 rms = 0.0
@@ -803,15 +910,16 @@ class RealtimeSession:
                 print(
                     f"[uplink] frames={self._uplink_frames} bytes={len(pcm)} "
                     f"rms={rms:.4f}{silent} fsm={self.fsm.state.value} "
-                    f"speaking={self.pipeline.tts.is_speaking}",
+                    f"speaking={self.pipeline.tts.is_speaking} "
+                    f"playing={int(bool(self._client_playing))} "
+                    f"wake={score:.3f} peak={self._wake_peak:.3f}",
                     flush=True,
                 )
-            self.fsm.maybe_expire_arm()
+                self._wake_peak = 0.0
 
-            if self.wake.enabled and self.wake.process(pcm):
-                self.fsm.arm()
-                self.fsm.begin_listen()
-                self._schedule_send({"type": "wake.detected", "fsm": self.fsm.snapshot()})
+            if self.gate_on_wake and self.fsm.state == SessionState.IDLE:
+                self.vad.feed(pcm)
+                return
 
             if (
                 self.fsm.state == SessionState.SPEAKING
@@ -843,7 +951,12 @@ class RealtimeSession:
             if not (speaking or in_echo_window):
                 self._echo_hold_started = 0.0
             gated = (speaking or in_echo_window) and not self.barge_in_while_speaking
-            if gated and echo_held_s > echo_cap:
+            if (
+                gated
+                and echo_held_s > echo_cap
+                and not self._client_playing
+                and time.monotonic() >= float(getattr(self, "_echo_until", 0.0) or 0.0)
+            ):
                 gated = False
                 self._echo_until = 0.0
                 self._echo_hold_started = 0.0
@@ -922,6 +1035,29 @@ class RealtimeSession:
 
         if mtype == "input_audio_buffer.commit":
             return
+
+    def _on_wake_hit(self) -> None:
+        score = float(getattr(self.wake, "last_score", 0.0) or 0.0)
+        if hasattr(self.vad, "reset"):
+            self.vad.reset()
+        self._utterance_audio = None
+        self._cancel_reopen()
+        audible = (
+            self.fsm.state == SessionState.SPEAKING
+            or bool(self.pipeline.tts.is_speaking)
+            or bool(getattr(self, "_client_playing", False))
+        )
+        if audible:
+            self._barge_in(reason="wake_word")
+        self.fsm.arm()
+        self.fsm.begin_listen()
+        print(
+            f"[wake] hit score={score:.3f} fsm={self.fsm.state.value} barge={audible}",
+            flush=True,
+        )
+        self._schedule_send(
+            {"type": "wake.detected", "score": score, "fsm": self.fsm.snapshot()}
+        )
 
     def _barge_in(self, reason: str, *, abort_nemo: bool = True):
         t0 = time.perf_counter()

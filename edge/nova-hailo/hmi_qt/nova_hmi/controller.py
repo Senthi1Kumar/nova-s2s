@@ -162,6 +162,8 @@ class NovaController(QObject):
                 bridge.turnMetrics.connect(self._on_metrics)
             if hasattr(bridge, "googleAuthUrl"):
                 bridge.googleAuthUrl.connect(self._on_google_auth_url)
+            if hasattr(bridge, "wakeDetected"):
+                bridge.wakeDetected.connect(self._on_wake_detected)
 
         self._speak_watch = QTimer(self)
         self._speak_watch.setSingleShot(True)
@@ -507,6 +509,11 @@ class NovaController(QObject):
             return
         self._phase = value
         self.phaseChanged.emit(value)
+
+    def _on_wake_detected(self, score: float) -> None:
+        if hasattr(self._audio, "play_chime"):
+            self._audio.play_chime()
+        self._set_phase_from_server("listening")
 
     def _tts_playing(self) -> bool:
         audio = self._audio

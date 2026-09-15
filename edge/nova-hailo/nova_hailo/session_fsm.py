@@ -85,10 +85,12 @@ class SessionFSM:
         self,
         session_idle_sec: float = 45.0,
         on_change: Callable[[dict[str, Any]], None] | None = None,
+        expire_listening: bool = False,
     ):
         self._lock = threading.RLock()
         self.state = SessionState.IDLE
         self.session_idle_sec = float(session_idle_sec)
+        self._expire_listening = bool(expire_listening)
         self._generation = 0
         self._armed_until: float | None = None
         self.current: TurnContext | None = None
@@ -122,10 +124,23 @@ class SessionFSM:
             hold = self.session_idle_sec if hold_sec is None else float(hold_sec)
             self._armed_until = time.perf_counter() + hold
 
+    def _refresh_followup_window(self) -> None:
+        self._armed_until = time.perf_counter() + self.session_idle_sec
+
     def maybe_expire_arm(self) -> bool:
         with self._lock:
-            if self.state == SessionState.ARMED and self._armed_until is not None:
-                if time.perf_counter() >= self._armed_until:
+            if self._armed_until is None:
+                return False
+            if time.perf_counter() < self._armed_until:
+                return False
+            if self.state == SessionState.ARMED:
+                self.state = SessionState.IDLE
+                self._armed_until = None
+                self._emit()
+                return True
+            if self._expire_listening and self.state == SessionState.LISTENING:
+                in_flight = self.current is not None and self.current.terminal is None
+                if not in_flight:
                     self.state = SessionState.IDLE
                     self._armed_until = None
                     self._emit()
@@ -217,6 +232,8 @@ class SessionFSM:
             if metadata:
                 ctx.metadata.update(metadata)
             self.last_terminal = terminal
+            if self._expire_listening:
+                self._refresh_followup_window()
             # Synthesis finished; the client is often still playing. Stay
             # SPEAKING until release_speaking() or interrupt().
             if self.state == SessionState.SPEAKING:
@@ -233,7 +250,10 @@ class SessionFSM:
         with self._lock:
             if self.state != SessionState.SPEAKING:
                 return False
-            if self._armed_until and time.perf_counter() < self._armed_until:
+            if self._expire_listening:
+                self._refresh_followup_window()
+                self.state = SessionState.LISTENING
+            elif self._armed_until and time.perf_counter() < self._armed_until:
                 self.state = SessionState.LISTENING
             else:
                 self.state = SessionState.IDLE

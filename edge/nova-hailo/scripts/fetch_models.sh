@@ -109,7 +109,48 @@ for name in model_1.onnx model_2.onnx; do
 done
 
 # ---------------------------------------------------------------------------
-# 1b. Hailo LLM HEF — Qwen2-1.5B-Instruct (alias qwen2)
+# 1b. Wake word — openWakeWord frontend ONNX + custom Nova head
+# ---------------------------------------------------------------------------
+OWW_DIR="$ROOT/models/wakeword"
+mkdir -p "$OWW_DIR"
+OWW_REL="https://github.com/dscripka/openWakeWord/releases/download/v0.5.1"
+OWW_HF="https://huggingface.co/littlebearlabs/openwakeword-features/resolve/main"
+for name in melspectrogram.onnx embedding_model.onnx; do
+  dst="$OWW_DIR/$name"
+  if [[ -s "$dst" ]]; then
+    log "wake frontend already at $dst"
+    continue
+  fi
+  fetched=0
+  for url in "$OWW_REL/$name" "$OWW_HF/$name"; do
+    log "wake  $url → models/wakeword/$name"
+    if command -v curl >/dev/null; then
+      if curl -fL --retry 3 --retry-delay 2 -o "$dst" "$url"; then
+        fetched=1
+        break
+      fi
+    elif wget -q -O "$dst" "$url"; then
+      fetched=1
+      break
+    fi
+    rm -f "$dst"
+  done
+  [[ "$fetched" -eq 1 && -s "$dst" ]] || { log "ERROR: wake frontend $name empty"; rm -f "$dst"; exit 1; }
+done
+CUSTOM_SRC="$ROOT/nova-project/nova_wakeword_runtime/models/nova_pro_v3.onnx"
+if [[ -s "$CUSTOM_SRC" && ! -s "$OWW_DIR/nova_pro_v3.onnx" ]]; then
+  log "wake  copy nova_pro_v3.onnx from nova-project"
+  cp -a "$CUSTOM_SRC" "$OWW_DIR/nova_pro_v3.onnx"
+  if [[ -s "${CUSTOM_SRC}.data" ]]; then
+    cp -a "${CUSTOM_SRC}.data" "$OWW_DIR/nova_pro_v3.onnx.data"
+  fi
+fi
+if [[ -x "$PY" ]]; then
+  "$PY" -m pip install --no-deps -q 'openwakeword==0.6.0' || log "wake  pip --no-deps openwakeword skipped"
+fi
+
+# ---------------------------------------------------------------------------
+# 1c. Hailo LLM HEF — Qwen2-1.5B-Instruct (alias qwen2)
 #     Zoo path is firmware-specific: a 5.1.1 HEF will not load on 5.3.0 FW.
 #     Detect via `hailortcli fw-control identify` (override: HAILO_LLM_ZOO_VERSION
 #     or HAILO_LLM_HEF_URL). Sidecar models/*.hef.hailort-zoo records the tag.
@@ -453,6 +494,20 @@ do
     ok=0
   fi
 done
+
+for rel in models/wakeword/melspectrogram.onnx models/wakeword/embedding_model.onnx; do
+  if [[ -e "$ROOT/$rel" ]]; then
+    log "OK  $rel"
+  else
+    log "MISSING  $rel"
+    ok=0
+  fi
+done
+if [[ -e "$ROOT/models/wakeword/nova_pro_v3.onnx" ]]; then
+  log "OK  models/wakeword/nova_pro_v3.onnx"
+else
+  log "WARN  models/wakeword/nova_pro_v3.onnx missing (wake word stays PTT)"
+fi
 
 if [[ "$ok" -eq 1 ]]; then
   log "STT + VAD + TTS + LLM HEF ready under models/ (LLM zoo ${HAILO_ZOO_TAG:-?} fw ${HAILO_FW:-?})"

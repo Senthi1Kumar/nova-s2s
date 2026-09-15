@@ -118,6 +118,65 @@ def _session() -> RealtimeSession:
     return s
 
 
+def test_idle_gated_uplink_feeds_vad_but_starts_no_turn():
+    import base64
+
+    s = _session()
+    s.gate_on_wake = True
+    s.pipeline.tts.is_speaking = False
+    s._client_playing = False
+    s._echo_until = 0.0
+    s.echo_tail_ms = 0
+    s.echo_max_ms = 12000
+    s._echo_logged = False
+    s._ns_held = False
+    s._echo_hold_started = 0.0
+    s._uplink_frames = 0
+    s._uplink_log_at = 0.0
+    s.ns = None
+    s.barge_in_while_speaking = True
+    s.pvad = SimpleNamespace(available=False, feed_pcm16=lambda pcm: False)
+
+    class _Vad:
+        def __init__(self):
+            self.fed = 0
+
+        def feed(self, pcm):
+            self.fed += 1
+            return [("speech_started", None)]
+
+        def reset(self):
+            return None
+
+    s.vad = _Vad()
+    s.wake = SimpleNamespace(enabled=True, process=lambda pcm, **kwargs: False, last_score=0.0, barge_threshold=0.10)
+    pcm = np.zeros(960, dtype=np.int16).tobytes()
+    msg = {
+        "type": "input_audio_buffer.append",
+        "audio": base64.b64encode(pcm).decode("ascii"),
+    }
+
+    async def _go():
+        await s._handle_client(msg)
+
+    asyncio.run(_go())
+    assert s.fsm.state == SessionState.IDLE
+    assert s.vad.fed == 1
+    assert s._sent == []
+
+
+def test_wake_from_idle_enters_listening():
+    s = _session()
+    s.pipeline.tts.is_speaking = False
+    s._client_playing = False
+    s.wake = SimpleNamespace(last_score=0.3)
+    s.vad = SimpleNamespace(reset=lambda: None)
+    s._on_wake_hit()
+    assert s.fsm.state == SessionState.LISTENING
+    wake = next(m for m in s._sent if m.get("type") == "wake.detected")
+    assert wake.get("score") == 0.3
+
+
 def test_barge_in_queues_while_lock_held_and_survives_overlap_expiry():
     s = _session()
     s.fsm.begin_turn()
@@ -186,6 +245,26 @@ def test_barge_in_sends_playback_cancel():
     assert "response.done" in types
     cancel = next(m for m in s._sent if m.get("type") == "playback.cancel")
     assert cancel.get("reason") == "vad_speech_started"
+
+
+def test_wake_word_while_audible_barges():
+    s = _session()
+    s.fsm.begin_turn()
+    gid = s.fsm.current.generation_id
+    s.fsm.set_thinking(gid)
+    s.fsm.set_speaking(gid)
+    s.pipeline.tts.is_speaking = True
+    s._client_playing = True
+    s.wake = SimpleNamespace(last_score=0.42)
+    s.vad = SimpleNamespace(reset=lambda: None)
+    s._on_wake_hit()
+    types = [m.get("type") for m in s._sent]
+    assert "playback.cancel" in types
+    cancel = next(m for m in s._sent if m.get("type") == "playback.cancel")
+    assert cancel.get("reason") == "wake_word"
+    wake = next(m for m in s._sent if m.get("type") == "wake.detected")
+    assert wake.get("score") == 0.42
+    assert s.fsm.state == SessionState.LISTENING
 
 
 def test_reopen_cancel_does_not_start_turn():
@@ -425,3 +504,38 @@ def test_barge_only_while_tts_audible_and_enabled():
         )
         is False
     )
+
+
+def test_transcript_is_echo_catches_live_session_garble():
+    from nova_hailo.web.realtime_session import _transcript_is_echo
+
+    assert _transcript_is_echo("It's Tense.", "It's 10:09 am.") is True
+    assert (
+        _transcript_is_echo(
+            "I'm not sure if it's exact time right now.",
+            "I'm not sure of the exact time right now.",
+        )
+        is True
+    )
+    assert _transcript_is_echo("are you listening or not", "It's 10:09 am.") is False
+    assert _transcript_is_echo("What is the current time now?", "") is False
+
+
+def test_playback_stopped_keeps_echo_window():
+    from nova_hailo.web.realtime_session import apply_playback_stopped
+
+    out = apply_playback_stopped(
+        now=10.0, echo_until=9.5, echo_tail_s=0.4, hold_s=1.8
+    )
+    assert out["release_speaking"] is False
+    assert out["client_playing"] is False
+    assert out["echo_until"] >= 10.0 + 0.4 + 1.8
+
+
+def test_playback_interrupted_clears_echo_window():
+    from nova_hailo.web.realtime_session import apply_playback_interrupted
+
+    out = apply_playback_interrupted()
+    assert out["release_speaking"] is True
+    assert out["client_playing"] is False
+    assert out["echo_until"] == 0.0
