@@ -4,6 +4,7 @@ __pycache__/
 logs/
 session_logs/
 *.jsonl
+!examples/realtime/lvgl/demo/*.jsonl
 models/*.hef
 models/*.hef.hailort-zoo
 models/.hailo_llm_fetch.env
@@ -14,6 +15,7 @@ models/dtln/
 !models/wakeword/nova_pro_v3.onnx
 hailort.log
 *.wav
+!examples/realtime/python/samples/*.wav
 .python-version
 !bench/corpus/*.jsonl
 

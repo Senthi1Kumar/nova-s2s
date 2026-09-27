@@ -156,7 +156,7 @@ class ToolBroker:
             speak = speak_local_time()
             return _ok(name, speak, result={"timezone": "Asia/Kolkata"})
         if intent is Intent.CAPABILITY_UNAVAILABLE:
-            speak = _unavailable_cap_speak(query, self.profile.enabled)
+            speak = str(slots.get("speak") or "") or _unavailable_cap_speak(query, self.profile.enabled)
             return _ok(name, speak) if speak else _unavailable(name, "no_capability_match")
         if not self.profile.allows(intent):
             return _unavailable(name, "tool_not_in_oem_allowlist")

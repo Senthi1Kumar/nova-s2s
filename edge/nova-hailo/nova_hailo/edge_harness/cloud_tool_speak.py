@@ -6,9 +6,35 @@ already a complete spoken line; an empty model rewrite must not drop that line.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 CLOUD_EMPTY_REWRITE_SPEAK = "I couldn't get that just now."
+
+# Tool-message note after a numeric miss. The miss goes to the model's second
+# round (so a follow-up like "Why is it?" gets answered), which reopens the
+# door the numeric shortcut closed: a price recalled from training data.
+NUMERIC_MISS_NOTE = (
+    "The search results contain no reliable price or number for this. "
+    "Do not state any price, number, or percentage. Tell the user you could "
+    "not find a current figure, and answer what they actually asked."
+)
+
+# Tool-message note on a successful search. The system prompt marks tool
+# results as untrusted web content (so the model never obeys instructions in
+# them); without this, the model sometimes also refused to *use* them and
+# answered from memory ("my info is a bit fuzzy on today's specifics").
+SEARCH_RESULT_NOTE = (
+    "These are current search results for the user's question. Answer from "
+    "them; if they do not answer it, say that plainly."
+)
+
+# A spoken money amount or percentage: what a model invents after a miss.
+_AMOUNT_RE = re.compile(
+    r"[$€£₹]\s?\d"
+    r"|\d[\d,]*(?:\.\d+)?\s?(?:%|percent\b|dollars?\b|usd\b|rupees?\b|inr\b|euros?\b)",
+    re.I,
+)
 
 
 def tool_result_is_final(out: dict[str, Any] | None) -> bool:
@@ -23,7 +49,12 @@ def tool_result_is_final(out: dict[str, Any] | None) -> bool:
     if not speak:
         return False
     result = out.get("result")
-    return bool(isinstance(result, dict) and result.get("numeric"))
+    if not isinstance(result, dict) or not result.get("numeric"):
+        return False
+    # A miss has nothing to quote. Treating it as final voiced the same
+    # "couldn't find a number" line for every follow-up in the thread
+    # ("Why is it?", "Can you search?") instead of answering them.
+    return not result.get("numeric_miss")
 
 
 def resolve_cloud_followup_speak(
@@ -49,3 +80,43 @@ def resolve_cloud_followup_speak(
     if tool:
         return tool
     return CLOUD_EMPTY_REWRITE_SPEAK
+
+
+def is_numeric_miss(out: dict[str, Any] | None) -> bool:
+    """True when a price/number lookup ran and found nothing to quote."""
+    if not isinstance(out, dict):
+        return False
+    result = out.get("result")
+    return bool(isinstance(result, dict) and result.get("numeric") and result.get("numeric_miss"))
+
+
+def tool_message_content(out: dict[str, Any]) -> dict[str, Any]:
+    """Compact tool result for the model's next round (not the raw payload)."""
+    content = {
+        "ok": out.get("ok"),
+        "status": out.get("status"),
+        "speak": str(out.get("speak") or "")[:800],
+    }
+    result = out.get("result")
+    if is_numeric_miss(out):
+        content["note"] = NUMERIC_MISS_NOTE
+    elif (
+        out.get("ok")
+        and isinstance(result, dict)
+        and result.get("evidence")
+        and not result.get("numeric")
+    ):
+        content["note"] = SEARCH_RESULT_NOTE
+    return content
+
+
+def states_amount(text: str) -> bool:
+    """True when text speaks a money amount or a percentage."""
+    return bool(_AMOUNT_RE.search(text or ""))
+
+
+def guard_numeric_miss_text(text: str, *, forbid: bool, miss_speak: str) -> str:
+    """After a numeric miss, never voice a number the search did not contain."""
+    if forbid and states_amount(text):
+        return miss_speak
+    return text

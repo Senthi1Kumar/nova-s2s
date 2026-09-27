@@ -10,6 +10,100 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/1.1.0/).
 
 ## [Unreleased] — v0.0.2 (in progress)
 
+### Added — Realtime device API v1 (LAN)
+
+- **`/v1/realtime` as a device API** (`nova-realtime/1`): binary PCM uplink
+  frames, capability `session.update` (`input.wake` server|device,
+  `input.echo_cancellation`, `audio.output.sample_rate` with resampling),
+  protocol + audio formats in `session.created`, audio deltas capped at 200 ms.
+  Contract: `docs/api/realtime.md`.
+- **TLS on the LAN**: `nova_hailo/web/serve.py` runs plain `ws://` on
+  loopback (Qt HMI) plus `wss://` on `:8767` over the same app;
+  `scripts/make_lan_cert.sh` makes the self-signed cert. `?token=` is
+  redacted from uvicorn logs.
+- **Reference clients**: `examples/realtime/python/nova_client.py` (laptop as
+  the device) and `examples/realtime/esp32/` (ESP-IDF v5.4: compiles with no
+  warnings; not yet run on hardware). **Coding-agent skill**: `skills/nova-realtime-client/`.
+
+### Added — Device skills and the Nova face (LVGL)
+
+- **UI-state contract** (`nova-ui-state/1`, `docs/api/ui-state.md`): JSON
+  lines from a client to its screen (`conn`, `state`, `you`, `nova`, `level`,
+  `error`) and `{"wake":true}` back. The seven FSM states collapse to four
+  screen states. Both skills carry byte-identical copies (a test checks).
+- **`nova_client.py --ui CMD`**: starts a screen process and feeds it
+  UI-state (bounded drop-oldest queue, `level` at most 10 Hz). A tap arms the
+  session like a local wake word, and a tap made while the socket is still
+  opening is replayed once connected. A screen that dies, prints noise or
+  cannot start never stops the audio.
+- **Nova face** (`examples/realtime/lvgl/`): LVGL v9.6.0 reference screen in
+  C — orb, thinking arc, speaking ripple, connection dot, subtitles,
+  tap-to-talk, error banner. `nova_face.c/.h` is portable (a firmware keeps
+  it); `main.c` is a desktop shell (SDL window or `--headless`, `--size WxH`,
+  `--round`, `--demo`, `--script`, `--dump`). CMake fetches LVGL and cJSON;
+  no warnings with `-Wall -Wextra`. Headless smoke and layout tests at
+  240/360/480 round, 480 square and 1024×600.
+- **Skills**: `skills/nova-realtime-client/` now asks about the device,
+  provisions the Pi (TLS cert, token file at mode 600, server; asks before
+  restarting a live one) and proves the Pi with
+  `samples/what-time-is-it.wav` before any device code. New
+  `skills/nova-lvgl-ui/` fetches the LVGL docs at runtime
+  (`lvgl.io/docs/open/llms.txt` plus per-page `llms.mdx`, never
+  `llms-full.txt`), asks about the panel, and ports the face to ESP32, Pi or
+  desktop.
+- **`.gitignore`** re-includes the example fixtures
+  (`examples/realtime/python/samples/*.wav`,
+  `examples/realtime/lvgl/demo/*.jsonl`) that `*.wav` and `*.jsonl` hid.
+- On the Pi: the face builds without warnings, the test suite passes, and
+  the client drives the face on the HDMI desktop (labwc/Wayland).
+- **Secure by default, one command on the Pi**: `run_demo_oem.sh` (through
+  `scripts/lan_auth.sh`) makes the TLS certificate and API token on its first
+  run, loads them every time, makes a new certificate (and prints its SHA-256)
+  when the Pi's IP changes, and never prints the token. `NOVA_HAILO_TLS=off`
+  keeps plain mode. `docs/api/getting-started.md` leads with the skills.
+- **Skill checked by a real build**: a fresh agent built a working C client
+  (libcurl WebSockets, OpenSSL, PortAudio) from `skills/nova-realtime-client`
+  alone, and it answered on the Pi. Fixes from that run: find the live
+  checkout from the running server (the agent nearly picked a stale copy),
+  check the TLS port instead of a log, and drain the WebSocket library's
+  buffer after the handshake: `session.created` arrives with the handshake
+  reply, and the C client's socket wait missed it (a seeming 10 s "slow
+  connect"; the Pi's handshake takes about 0.5 s).
+- **A new connection is a new conversation**: the pipeline outlived its
+  connections, so a new device session inherited the last one's history. Its
+  last reply became the echo filter's reference ("Can you hear me?" was
+  dropped as Nova's own voice), and its unanswered question was replayed on
+  the new session's first turn. `RealtimeSession.run()` now clears the
+  conversation (history, replay slot, LLM context, payment confirmation);
+  long-term memory stays. `clear_context()` also re-seeds the on-device model.
+- **Reference client Ctrl-C**: one Ctrl-C now stops live `--wake device`
+  mode (it took three: the Enter-key reader was a thread-pool read that kept
+  the process alive), and end of input no longer re-arms in a loop.
+
+### Fixed — follow-up questions and turn latency (measured on the Pi, laptop client over LAN wss)
+
+- **Cloud turn latency**: every Groq turn first made a Jev/TypeSafe routing
+  call (~0.6–0.8 s from the Pi) only to spot a clock question. The cloud path
+  now leaves tool routing to Groq's function calling; the host clock check is
+  local. End of speech → first audio: p50 ~2.6 s → **~1.25 s** (11 turns;
+  clock turn 0.91 s).
+- **Jev on the local path**: one keep-alive `TypeSafeClient`, warmed at
+  startup (median 615 → 409 ms per routing call).
+- **Follow-ups after a failed price lookup** ("Why is it?", "search for it")
+  no longer repeat "I couldn't find a reliable number": a miss goes to the
+  model's second round with a no-numbers note, and a guard drops any amount
+  it states anyway.
+- **History**: a question whose reply is dropped as a refusal is carried into
+  the next turn, so "Why is it?" can resolve "it".
+- **Echo filter**: follow-ups that reuse the last answer's words ("the current
+  stock price") were dropped as Nova's own voice; word overlap now only
+  counts for short fragments.
+- **Lost questions in device-wake mode**: the follow-up window no longer
+  expires while the user is mid-utterance (seen when frames arrived late).
+- **Search answers**: the model sometimes answered news from memory despite
+  good results (3/5 vague); the tool message now tells it to answer from the
+  results (5/5 grounded after the change).
+
 ### Added — share/nova-hailo-poc-v002 (host harness + Qt HMI)
 
 Standalone Pi + Hailo-10H drop. No Tailscale; clone this branch on the

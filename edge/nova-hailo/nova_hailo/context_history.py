@@ -90,9 +90,12 @@ class ConversationHistory:
         self._turns: deque[HistoryTurn] = deque(maxlen=self.max_turns or 1)
         if self.max_turns <= 0:
             self._turns = deque(maxlen=0)
+        # Question whose reply was dropped as a refusal; replayed once.
+        self._unanswered: str | None = None
 
     def clear(self) -> None:
         self._turns.clear()
+        self._unanswered = None
 
     def add(
         self,
@@ -115,6 +118,9 @@ class ConversationHistory:
         # Refusals/fallbacks are never worth remembering: keeping one makes the
         # model refuse the next (unrelated) turn too.
         if _is_refusal(key):
+            # Drop the reply, keep the question: without it the next turn's
+            # "Why is it?" / "search for it" has nothing to refer to.
+            self._unanswered = u[:240]
             return
         # Reject a reply that carries an entity forward from the previous reply
         # when the current question never mentioned it. A wrong "NVIDIA's stock
@@ -137,6 +143,7 @@ class ConversationHistory:
         self._turns.append(
             HistoryTurn(user=u[:240], assistant=a[:240], tool_summary=(ts or None))
         )
+        self._unanswered = None
 
     def build_messages(
         self,
@@ -166,6 +173,10 @@ class ConversationHistory:
         # prefix would break the provider's prompt cache on every request, and
         # recency also keeps it from being lost in the middle of a long context.
         stamp = format_clock_stamp(now)
+        if ut and self._unanswered:
+            # Beside the question, like the clock: context for resolving "it",
+            # not a stored exchange the model could echo back.
+            ut = f"(Earlier question you could not answer: {self._unanswered})\n{ut}"
         ut = f"(Right now it is {stamp}.)\n{ut}" if ut else ut
         if no_think and "/no_think" not in ut.lower():
             ut = ut + "\n/no_think"

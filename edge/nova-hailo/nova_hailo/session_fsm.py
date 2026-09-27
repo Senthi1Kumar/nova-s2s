@@ -125,6 +125,16 @@ class SessionFSM:
             self._armed_until = time.perf_counter() + hold
 
     def _refresh_followup_window(self) -> None:
+        """Restart the idle countdown.
+
+        _armed_until answers two different questions: "has ARMED timed out"
+        (a deadline from the wake word) and "should a finished turn land in
+        LISTENING or IDLE" (which has to mean time since the user last did
+        something). Every terminal path refreshes it, so session_idle_sec
+        measures silence rather than session age -- otherwise a conversation
+        outliving the window drops to IDLE mid-flow and silently demands a new
+        wake word.
+        """
         self._armed_until = time.perf_counter() + self.session_idle_sec
 
     def maybe_expire_arm(self) -> bool:
@@ -207,6 +217,11 @@ class SessionFSM:
         with self._lock:
             self._generation += 1
             self._transition(SessionState.INTERRUPTING)
+            # Interrupting is the strongest evidence of an engaged user there
+            # is, so it extends the window like any other terminal path. The
+            # utterance that caused the barge-in is usually still being
+            # spoken; it must not land on an expired session.
+            self._refresh_followup_window()
             ctx = self.current
             if ctx is not None and ctx.terminal is None:
                 ctx.barge_in_at = time.perf_counter()
@@ -232,8 +247,10 @@ class SessionFSM:
             if metadata:
                 ctx.metadata.update(metadata)
             self.last_terminal = terminal
-            if self._expire_listening:
-                self._refresh_followup_window()
+            # Unconditional: the LISTENING-vs-IDLE choice below reads
+            # _armed_until regardless of _expire_listening, so gating the
+            # refresh on that flag left the window frozen at the wake word.
+            self._refresh_followup_window()
             # Synthesis finished; the client is often still playing. Stay
             # SPEAKING until release_speaking() or interrupt().
             if self.state == SessionState.SPEAKING:
@@ -250,8 +267,8 @@ class SessionFSM:
         with self._lock:
             if self.state != SessionState.SPEAKING:
                 return False
+            self._refresh_followup_window()
             if self._expire_listening:
-                self._refresh_followup_window()
                 self.state = SessionState.LISTENING
             elif self._armed_until and time.perf_counter() < self._armed_until:
                 self.state = SessionState.LISTENING

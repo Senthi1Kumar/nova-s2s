@@ -345,7 +345,7 @@ _TIME_RE = re.compile(
     r"what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?date|"
     r"whats\s+(?:the\s+)?(?:current\s+)?date|"
     r"what\s+day\s+is\s+it"
-    r")[\s?.!]*$",
+    r")(?:\s+(?:right\s+)?now)?[\s?.!]*$",
     re.I,
 )
 
@@ -495,6 +495,29 @@ def _company_lookup_query(query: str) -> str | None:
     if len(name) < 2:
         return None
     return f"company {name}"
+
+
+def exact_routed(query: str) -> RoutedIntent | None:
+    """Canned turns that skip Jev: identity, prompt refuse, clarify, capability, clock.
+
+    Callers: ``OemToolGateway.route`` / ``route_and_execute`` before the Jev call.
+    ``route()`` keeps its own copy of these checks so the regex path stays ordered
+    (smalltalk still precedes the clock).
+    """
+    q = (query or "").strip()
+    if not q:
+        return None
+    if _IDENTITY_RE.search(q):
+        return RoutedIntent(Intent.IDENTITY, q)
+    if _SYSTEM_PROMPT_RE.search(q):
+        return RoutedIntent(Intent.SMALLTALK, q, {"speak": SYSTEM_PROMPT_SPEAK})
+    if _CLARIFY_RE.match(q):
+        return RoutedIntent(Intent.SMALLTALK, q, {"speak": CLARIFY_SPEAK})
+    if _CAPABILITY_RE.search(q):
+        return RoutedIntent(Intent.CAPABILITY, q)
+    if _TIME_RE.search(q):
+        return RoutedIntent(Intent.GET_DATETIME, q)
+    return None
 
 
 def route(query: str, profile: CapabilityProfile) -> RoutedIntent | None:

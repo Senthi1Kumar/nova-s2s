@@ -148,6 +148,9 @@ class FireRedVadConfig:
     # min_silence endpoints mid-sentence and yields fragments ASR mangles.
     min_silence_ms: int = 600
     min_speech_ms: int = 400
+    # Mirrors silero_vad.py: an utterance that interrupted playback has
+    # already proven intent and faces a lower bar. See mark_barge_in().
+    barge_in_min_speech_ms: int = 150
     speech_pad_ms: int = 400
     max_utterance_s: float = 8.0
     onnx_path: str | None = None
@@ -229,6 +232,10 @@ class FireRedVadSegmenter:
         self._pad = int(self.cfg.sample_rate * self.cfg.speech_pad_ms / 1000)
         self._min_sil = int(self.cfg.sample_rate * self.cfg.min_silence_ms / 1000)
         self._min_speech = int(self.cfg.sample_rate * self.cfg.min_speech_ms / 1000)
+        self._barge_min_speech = int(
+            self.cfg.sample_rate * self.cfg.barge_in_min_speech_ms / 1000
+        )
+        self._barge_in = False
         self._max_utt = int(self.cfg.max_utterance_s * self.cfg.sample_rate)
         self._neg = max(0.01, self.cfg.speech_threshold - 0.15)
         print(f"VAD: FireRedVAD ONNX ({onnx.name}) thr={self.cfg.speech_threshold}")
@@ -240,7 +247,16 @@ class FireRedVadSegmenter:
         self.cfg.min_silence_ms = int(500 + (1.0 - t) * 250)
         self._min_sil = int(self.cfg.sample_rate * self.cfg.min_silence_ms / 1000)
 
+    def mark_barge_in(self) -> None:
+        """Treat the utterance now in progress as a barge-in (one-shot).
+
+        Same contract as SileroVadSegmenter.mark_barge_in(); see that
+        docstring for why the mark is scoped to the current utterance.
+        """
+        self._barge_in = True
+
     def reset(self):
+        self._barge_in = False
         self._model.reset_states()
         self._fbank = _make_fbank()
         self._frames_popped = 0
@@ -358,6 +374,10 @@ class FireRedVadSegmenter:
         self._active_speech = 0
         self._pre.clear()
         self._pre_samples = 0
-        if active < self._min_speech or len(audio) < self._min_speech:
+        # One-shot, consumed here: every exit ends the utterance it applied to.
+        barge_in = self._barge_in
+        self._barge_in = False
+        min_speech = self._barge_min_speech if barge_in else self._min_speech
+        if active < min_speech or len(audio) < min_speech:
             return None
         return audio

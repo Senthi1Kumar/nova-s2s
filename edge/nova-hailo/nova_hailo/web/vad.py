@@ -23,6 +23,17 @@ class VadSegmenter(Protocol):
     def reset(self) -> None: ...
     def feed(self, pcm16: bytes) -> list[tuple[str, np.ndarray | None]]: ...
 
+    def mark_barge_in(self) -> None:
+        """Treat the utterance in progress as having interrupted playback.
+
+        Part of the protocol rather than a duck-typed extra because the
+        session calls it on whichever segmenter create_vad_segmenter()
+        returned, and a missing method would surface as an AttributeError
+        mid-barge-in -- exactly when the pipeline can least afford one.
+        Implementations with no short-speech gate may no-op.
+        """
+        ...
+
 
 def create_vad_segmenter() -> Any:
     """Prefer Silero (HF s2s); fall back to webrtcvad. NOVA_HAILO_VAD=firered
@@ -87,6 +98,11 @@ class WebRtcVadSegmenter:
         self.cfg.start_speech_frames = 4 if t < 0.4 else 5 if t < 0.75 else 6
         # Higher threshold → higher energy floor (fewer false starts)
         self.cfg.min_frame_rms = 0.010 + t * 0.028
+
+    def mark_barge_in(self) -> None:
+        """No-op: this segmenter endpoints on frame counts and has no
+        short-speech gate to relax. Present so the protocol holds."""
+        return None
 
     def reset(self):
         self._buf.clear()

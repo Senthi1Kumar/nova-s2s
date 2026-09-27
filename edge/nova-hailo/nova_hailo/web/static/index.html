@@ -794,7 +794,11 @@
   }
   instructionsEl.addEventListener('change', () => { if (wsOpen) sendSessionUpdate(); });
 
-  const configReady = fetch('/config').then(r => r.json()).then(data => {
+  // A LAN browser authenticates with ?token= (a WebSocket cannot set headers);
+  // carry it from the page URL to /config, which echoes it into ws_url.
+  const pageToken = new URLSearchParams(location.search).get('token');
+  const configUrl = pageToken ? '/config?token=' + encodeURIComponent(pageToken) : '/config';
+  const configReady = fetch(configUrl).then(r => r.json()).then(data => {
     if (data.instructions) instructionsEl.value = data.instructions;
     if (data.ws_url) wsUrl = data.ws_url;
   }).catch(e => log('config: ' + e.message));

@@ -47,6 +47,9 @@ asr-bench = [
 # Optional provider A/B script only (scripts/bench_websearch_providers.py):
 #   uv sync --extra bench-search
 bench-search = ["exa-py"]
+# Jev semantic router (optional). Regex remains the fallback without this extra.
+#   uv sync --extra typesafe
+typesafe = ["typesafe-sdk"]
 
 [project.scripts]
 nova-hailo = "main:main"

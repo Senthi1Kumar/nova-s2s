@@ -124,6 +124,11 @@ pvad:
 
 tools:
   # Read-only tools ON for primary demo (router → broker → fail-closed).
+  # jev: TypeSafe semantic router when TYPESAFE_API_KEY is set; regex if not.
+  router: jev
+  jev_timeout_sec: 0.45
+  jev_noul_min: 0.65
+  jev_max_actions: 2
   enable_in_prompt: false
   profile: oem_readonly
   enabled: [web_search, deep_research, check_calendar, check_email, list_drive_files]

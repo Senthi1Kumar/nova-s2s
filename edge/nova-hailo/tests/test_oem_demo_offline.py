@@ -647,3 +647,35 @@ def test_oem_config_yaml_exists():
     root = Path(__file__).resolve().parents[1]
     assert (root / "config.oem.yaml").is_file()
     assert (root / "config.oem_rollback.yaml").is_file()
+
+
+def test_answer_from_hits_marks_stock_price_miss():
+    from nova_hailo.tools.search_mcp import answer_from_hits
+
+    hits = [
+        {
+            "title": "Nvidia unveils new chips at GTC",
+            "snippet": "Nvidia showed its next-generation data center GPUs on Tuesday.",
+            "source": "example.com",
+        }
+    ]
+    out = answer_from_hits("NVIDIA stock price", hits)
+    assert out["result"]["numeric"] is True
+    assert out["result"]["numeric_miss"] is True
+    assert out["speak"] == "I couldn't find a reliable number for that."
+
+
+def test_answer_from_hits_stock_price_hit_is_not_a_miss():
+    from nova_hailo.tools.search_mcp import answer_from_hits
+
+    hits = [
+        {
+            "title": "NVDA quote",
+            "snippet": "NVIDIA (NVDA) stock price is $182.40, up 1.2% today.",
+            "source": "example.com",
+        }
+    ]
+    out = answer_from_hits("NVIDIA stock price", hits)
+    assert out["result"]["numeric"] is True
+    assert out["result"]["numeric_miss"] is False
+    assert "182.40" in out["speak"]

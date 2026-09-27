@@ -228,7 +228,7 @@ def _multi_stock_speak(query: str, evidence: str) -> str | None:
         return f"Search results say {s1} {p1}. I couldn't find a reliable second price."
     if p2:
         return f"Search results say {s2} {p2}. I couldn't find a reliable second price."
-    return "I couldn't find a reliable number for that."
+    return _NUMERIC_MISS_SPEAK
 
 
 def brave_search(
@@ -451,6 +451,9 @@ def exa_search_answer(
     return {"text": "".join(text_parts).strip(), "grounding": grounding}
 
 
+_NUMERIC_MISS_SPEAK = "I couldn't find a reliable number for that."
+
+
 def answer_from_hits(query: str, hits: list, *, tool_name: str = "web_search") -> dict[str, Any]:
     cleaner = SearchResultCleaner()
     evidence = cleaner.evidence_block(hits)
@@ -460,10 +463,12 @@ def answer_from_hits(query: str, hits: list, *, tool_name: str = "web_search") -
     if is_numeric_fact_query(query) or stockish:
         if _is_multi_stock_query(query):
             speak = _multi_stock_speak(query, evidence)
+            miss = not speak or speak == _NUMERIC_MISS_SPEAK
             return _ok(
                 tool_name,
-                speak or "I couldn't find a reliable number for that.",
-                {"evidence": evidence, "numeric": True, "needs_summary": False},
+                speak or _NUMERIC_MISS_SPEAK,
+                {"evidence": evidence, "numeric": True, "numeric_miss": miss,
+                 "needs_summary": False},
             )
         if stockish:
             num = pick_stock_price(evidence)
@@ -472,11 +477,15 @@ def answer_from_hits(query: str, hits: list, *, tool_name: str = "web_search") -
         if num:
             speak = f"Search results say {num}."
         else:
-            speak = "I couldn't find a reliable number for that."
+            speak = _NUMERIC_MISS_SPEAK
         return _ok(
             tool_name,
             speak,
-            {"evidence": evidence, "numeric": True, "needs_summary": False},
+            # numeric_miss: nothing to quote, so the cloud path lets the LLM
+            # answer the user's actual question from the evidence instead of
+            # voicing this line verbatim (cloud_tool_speak.tool_result_is_final).
+            {"evidence": evidence, "numeric": True, "numeric_miss": not num,
+             "needs_summary": False},
         )
     # News / general: speak Exa summary/highlight (or first clean snippet).
     # Qwen summarizer is opt-in via tools.summarize_search (currently off).

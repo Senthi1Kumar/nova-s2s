@@ -13,19 +13,24 @@ API pipeline.py and tests/test_oem_demo_offline.py depend on.
 """
 from __future__ import annotations
 
+import logging
+import os
+import threading
 from typing import Any
 
+from nova_hailo.edge_harness.jev_router import route_with_jev
 from nova_hailo.edge_harness.policy import OEM_READONLY, WEBSEARCH_READONLY, CapabilityProfile
-from nova_hailo.edge_harness.task_state import TaskState, apply_routed_turn
 from nova_hailo.edge_harness.router import (
     _SMALLTALK,  # noqa: F401 -- re-exported for test_persona_drift.py
     _UNAVAILABLE_CAPS,  # noqa: F401 -- re-exported for test_persona_drift.py
     CAPABILITY_SPEAK,
     IDENTITY_SPEAK,
     calendar_day_slot,
+    exact_routed,
     is_search_again,
 )
 from nova_hailo.edge_harness.router import route as _route
+from nova_hailo.edge_harness.task_state import TaskState, apply_routed_turn
 from nova_hailo.edge_harness.tool_broker import ToolBroker
 from nova_hailo.edge_harness.types import Intent, RoutedIntent, ToolResult
 
@@ -41,6 +46,7 @@ _MEMORY_INTENTS = frozenset(
     }
 )
 _SEARCH_RERUN_INTENTS = frozenset({Intent.WEB_SEARCH.value, Intent.DEEP_RESEARCH.value})
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CAPABILITY_SPEAK",
@@ -67,12 +73,35 @@ class OemToolGateway:
         timeout_sec: float = 1.5,
         write_enabled: bool = False,
         serper_fallback: bool = False,
+        router: str = "regex",
+        jev_timeout_sec: float = 0.45,
+        jev_noul_min: float = 0.65,
+        jev_max_actions: int = 2,
+        jev_client: Any = None,
+        jev_warm: bool = True,
     ):
         self.profile = CapabilityProfile.from_list(enabled, write_enabled=write_enabled)
         self.enabled = set(self.profile.enabled)
         self.timeout_sec = float(timeout_sec)
         self.write_enabled = bool(write_enabled)
         self.serper_fallback = bool(serper_fallback)
+        self.router = (router or "regex").strip().lower()
+        self.jev_timeout_sec = float(jev_timeout_sec)
+        self.jev_noul_min = float(jev_noul_min)
+        self.jev_max_actions = int(jev_max_actions)
+        # One keep-alive TypeSafeClient for the process (built lazily when not
+        # injected). A client per call paid TCP+TLS setup on every routed turn.
+        self._jev_client = jev_client
+        self._jev_client_lock = threading.Lock()
+        if (
+            jev_warm
+            and self.router == "jev"
+            and jev_client is None
+            and os.environ.get("TYPESAFE_API_KEY", "").strip()
+        ):
+            # Open the connection before the first turn needs it; listing
+            # models costs no inference.
+            threading.Thread(target=self._warm_jev_client, daemon=True).start()
         self._broker = ToolBroker(
             self.profile, timeout_sec=self.timeout_sec, serper_fallback=self.serper_fallback
         )
@@ -84,6 +113,12 @@ class OemToolGateway:
         self.last_clear_llm = False
 
     def route(self, query: str) -> str | None:
+        exact = exact_routed(query)
+        if exact is not None:
+            return exact.intent.value
+        jev = self._jev_routes(query)
+        if jev:
+            return jev[0].intent.value
         routed = _route(query, self.profile)
         return routed.intent.value if routed is not None else None
 
@@ -91,18 +126,95 @@ class OemToolGateway:
         # Intercept search-again / pure meta before route() (which returns None).
         rerun = self._search_again_routed(query)
         if rerun is not None:
-            result = self._broker.execute(rerun)
-            self._maybe_store_last_tool(rerun, result)
-            self._apply_task_state(query, rerun, result, search_again=True)
-            return result
+            return self._finish_one(query, rerun, search_again=True)
+
+        exact = exact_routed(query)
+        if exact is not None:
+            return self._finish_one(query, exact, search_again=False)
+
+        jev = self._jev_routes(query)
+        if jev:
+            return self._finish_many(query, jev)
 
         routed = _route(query, self.profile)
         if routed is None:
             self.last_clear_llm = False
             return None
+        return self._finish_one(query, routed, search_again=False)
+
+    def _live_jev_client(self) -> Any:
+        """The process-wide TypeSafeClient, or None when the SDK is missing."""
+        with self._jev_client_lock:
+            if self._jev_client is None:
+                try:
+                    from typesafe_sdk import RetryPolicy, TypeSafeClient
+                except ImportError:
+                    logger.info("jev_router:sdk_missing")
+                    return None
+                self._jev_client = TypeSafeClient(
+                    retry=RetryPolicy(max_retries=0), timeout=self.jev_timeout_sec
+                )
+            return self._jev_client
+
+    def _warm_jev_client(self) -> None:
+        try:
+            client = self._live_jev_client()
+            if client is not None:
+                client.models.list()
+        except Exception as exc:  # noqa: BLE001 -- warming is best effort
+            logger.info("jev_router:warm_failed %s", exc)
+
+    def _jev_routes(self, query: str) -> list[RoutedIntent] | None:
+        """Jev intents, or None so the caller uses the regex router."""
+        if self.router != "jev":
+            return None
+        if self._jev_client is None and not os.environ.get("TYPESAFE_API_KEY", "").strip():
+            logger.info("jev_router:fallback")
+            return None
+        client = self._live_jev_client()
+        if client is None:
+            return None
+        return route_with_jev(
+            query,
+            self.profile,
+            self.task_state,
+            client=client,
+            timeout_sec=self.jev_timeout_sec,
+            noul_min=self.jev_noul_min,
+            max_actions=self.jev_max_actions,
+        )
+
+    def _finish_one(
+        self, query: str, routed: RoutedIntent, *, search_again: bool
+    ) -> dict[str, Any]:
         result = self._broker.execute(routed)
         self._maybe_store_last_tool(routed, result)
-        self._apply_task_state(query, routed, result, search_again=False)
+        self._apply_task_state(query, routed, result, search_again=search_again)
+        return result
+
+    def _finish_many(self, query: str, routed_list: list[RoutedIntent]) -> dict[str, Any]:
+        if len(routed_list) == 1:
+            return self._finish_one(query, routed_list[0], search_again=False)
+        parts: list[dict[str, Any]] = []
+        speaks: list[str] = []
+        for routed in routed_list:
+            part = self._broker.execute(routed)
+            parts.append(part)
+            self._maybe_store_last_tool(routed, part)
+            speak = str(part.get("speak") or "").strip()
+            if speak:
+                speaks.append(speak)
+        primary = routed_list[0]
+        joined = " ".join(speaks).strip()
+        ok = any(bool(part.get("ok")) for part in parts)
+        result = {
+            "ok": ok,
+            "name": "compound",
+            "status": "success" if ok else str(parts[0].get("status") or "unavailable"),
+            "speak": joined or str(parts[0].get("speak") or ""),
+            "result": {"actions": parts},
+        }
+        self._apply_task_state(query, primary, result, search_again=False)
         return result
 
     def execute(self, name: str, **kwargs: Any) -> dict[str, Any]:

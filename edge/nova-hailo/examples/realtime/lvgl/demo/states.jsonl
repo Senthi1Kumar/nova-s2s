@@ -1,0 +1,17 @@
+{"conn":"connecting"}
+{"conn":"up"}
+{"state":"IDLE"}
+{"state":"LISTENING"}
+{"level":0.2}
+{"level":0.9}
+{"you":"What's the weather in Delhi today?"}
+{"state":"THINKING"}
+{"state":"SPEAKING"}
+{"nova":"It's about 33 degrees in Delhi with a light chance of rain this afternoon."}
+{"state":"IDLE"}
+{"error":"session_limit_reached"}
+{"error":""}
+not json at all
+{"unknown_field":1}
+{"_tap":true}
+{"conn":"down"}

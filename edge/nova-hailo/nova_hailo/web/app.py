@@ -24,7 +24,10 @@ from nova_hailo.google_oauth import (
 )
 from nova_hailo.pipeline import NovaPipeline
 from nova_hailo.session_log import start_process_log, stop_process_log
+from nova_hailo.web.public_url import public_ws_url
 from nova_hailo.web.realtime_session import RealtimeSession
+from nova_hailo.web.transport_auth import authorize as transport_authorize
+from nova_hailo.web.transport_auth import configured_token
 from nova_hailo.backends.nemo_speech_sidecar import ensure_sidecar, shutdown_sidecar
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -136,6 +139,34 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Nova-Hailo Realtime", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def _transport_auth_middleware(request: Request, call_next):
+    """Gate every HTTP route on transport auth.
+
+    Middleware rather than per-route Depends() on purpose: this is a security
+    control, and a control you have to remember to attach to each new route is
+    one that eventually gets forgotten. /static is exempt because it serves the
+    page that then asks the user for a token.
+    """
+    if request.url.path.startswith("/static"):
+        return await call_next(request)
+    result = transport_authorize(
+        client_host=request.client.host if request.client else None,
+        authorization=request.headers.get("authorization"),
+        query_token=request.query_params.get("token"),
+        token=configured_token(),
+    )
+    if not result.allowed:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={
+                "error": {"type": result.decision.value, "message": result.reason}
+            },
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
+
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -159,26 +190,19 @@ async def dashboard():
 
 @app.get("/config")
 async def config(request: Request):
-    port = int(os.environ.get("NOVA_HAILO_PORT", "8766"))
-    # Prefer Host header so laptop→Pi demos get the right WS URL
-    host_hdr = request.headers.get("host") or ""
-    if host_hdr and ":" in host_hdr:
-        public_host = host_hdr.rsplit(":", 1)[0]
-        try:
-            port = int(host_hdr.rsplit(":", 1)[1])
-        except ValueError:
-            pass
-    elif host_hdr:
-        public_host = host_hdr
-    else:
-        public_host = os.environ.get("NOVA_HAILO_PUBLIC_HOST") or "localhost"
     instructions = ""
     soul = ROOT / "prompts" / "soul.md"
     if soul.exists():
         instructions = soul.read_text().strip()
     return {
         "instructions": instructions,
-        "ws_url": f"ws://{public_host}:{port}/v1/realtime",
+        "ws_url": public_ws_url(
+            scheme=request.url.scheme,
+            host_header=request.headers.get("host") or "",
+            default_host=os.environ.get("NOVA_HAILO_PUBLIC_HOST") or "localhost",
+            default_port=int(os.environ.get("NOVA_HAILO_PORT", "8766")),
+            query_token=request.query_params.get("token"),
+        ),
         "voices": ["amy-low"],
         "default_voice": "amy-low",
         "product": "nova-hailo",
@@ -334,6 +358,26 @@ async def connectors_delete(cid: str):
 @app.websocket("/v1/realtime")
 async def realtime(ws: WebSocket):
     global _active_sessions
+    # HTTP middleware does not run for the WebSocket scope, so the socket
+    # carries its own check. Same accept-then-typed-error-then-close shape the
+    # session limit below uses: a bare handshake rejection gives browser
+    # clients no way to tell "wrong token" from "server down".
+    auth = transport_authorize(
+        client_host=ws.client.host if ws.client else None,
+        authorization=ws.headers.get("authorization"),
+        query_token=ws.query_params.get("token"),
+        token=configured_token(),
+    )
+    if not auth.allowed:
+        await ws.accept()
+        await ws.send_json(
+            {
+                "type": "error",
+                "error": {"type": auth.decision.value, "message": auth.reason},
+            }
+        )
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     with _session_lock:
         if _active_sessions >= _MAX_SESSIONS or _pipeline is None:
             await ws.accept()

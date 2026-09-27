@@ -107,3 +107,108 @@ def test_groq_toolbox_has_search_not_clock():
     assert "web_search" in names
     assert "check_calendar" in names
     assert "get_datetime" not in names
+
+
+def test_numeric_miss_is_not_final():
+    # A price lookup that found nothing must not short-circuit the reply:
+    # voicing it verbatim ignored follow-ups like "Why is it?" and repeated the
+    # same miss line for every question in the thread.
+    out = {
+        "ok": True,
+        "name": "web_search",
+        "speak": "I couldn't find a reliable number for that.",
+        "result": {"numeric": True, "numeric_miss": True, "needs_summary": False,
+                   "evidence": "Nvidia unveils new chips"},
+    }
+    assert tool_result_is_final(out) is False
+
+
+def test_numeric_miss_still_voiced_when_groq_returns_nothing():
+    # Groq round 2 can come back empty (gpt-oss 0-token); the miss line is
+    # still better than a generic "I didn't catch that".
+    assert resolve_cloud_followup_speak(
+        llm_rewrite="",
+        tool_speak="I couldn't find a reliable number for that.",
+        tool_is_final=False,
+    ) == "I couldn't find a reliable number for that."
+
+
+# ---- after a numeric miss the model must not invent the number -------------
+
+from nova_hailo.edge_harness.cloud_tool_speak import (  # noqa: E402
+    guard_numeric_miss_text,
+    is_numeric_miss,
+    states_amount,
+    tool_message_content,
+)
+
+_MISS = {
+    "ok": True,
+    "name": "web_search",
+    "status": "success",
+    "speak": "I couldn't find a reliable number for that.",
+    "result": {"numeric": True, "numeric_miss": True, "evidence": "Nvidia unveils chips"},
+}
+_HIT = {
+    "ok": True,
+    "name": "web_search",
+    "status": "success",
+    "speak": "Search results say NVIDIA $182.40.",
+    "result": {"numeric": True, "numeric_miss": False, "evidence": "NVDA $182.40"},
+}
+
+
+def test_states_amount_catches_prices_and_percentages():
+    for text in ("It's trading at $130.", "around 182.40 dollars", "down 2.5% today",
+                 "up 3 percent", "about ₹1,200", "€45 a share", "roughly 90 USD"):
+        assert states_amount(text), text
+    for text in ("I couldn't find a current price for NVIDIA.",
+                 "Search snippets rarely carry live quotes.", "In 2026 it launched Blackwell."):
+        assert not states_amount(text), text
+
+
+def test_is_numeric_miss():
+    assert is_numeric_miss(_MISS) is True
+    assert is_numeric_miss(_HIT) is False
+    assert is_numeric_miss({"ok": True, "speak": "news", "result": {"numeric": False}}) is False
+    assert is_numeric_miss(None) is False
+
+
+def test_tool_message_tells_model_not_to_state_numbers_after_a_miss():
+    miss = tool_message_content(_MISS)
+    assert miss["speak"] == _MISS["speak"]
+    assert "do not state" in miss["note"].lower()
+    assert "note" not in tool_message_content(_HIT)
+
+
+def test_guard_replaces_invented_amount_after_miss():
+    assert guard_numeric_miss_text(
+        "NVIDIA is trading around $130.", forbid=True, miss_speak=_MISS["speak"]
+    ) == _MISS["speak"]
+
+
+def test_guard_keeps_honest_text_and_ignores_normal_turns():
+    honest = "I couldn't find a live NVIDIA price; a finance app will have it."
+    assert guard_numeric_miss_text(honest, forbid=True, miss_speak="x") == honest
+    assert guard_numeric_miss_text("It rose 3% today.", forbid=False, miss_speak="x") == (
+        "It rose 3% today."
+    )
+
+
+def test_search_results_tell_the_model_to_answer_from_them():
+    # Seen on the Pi: the search returned current headlines, and the model
+    # still said "my info is a bit fuzzy on today's specifics".
+    news = {
+        "ok": True, "name": "web_search", "status": "success",
+        "speak": "OpenAI says dozens of third parties were affected by agents...",
+        "result": {"numeric": False, "needs_summary": True, "evidence": "OpenAI says..."},
+    }
+    content = tool_message_content(news)
+    assert "answer" in content["note"].lower()
+    assert "current" in content["note"].lower()
+
+
+def test_failed_tool_gets_no_answer_from_results_note():
+    failed = {"ok": False, "name": "web_search", "status": "unavailable",
+              "speak": "I can't reach that service right now.", "result": {}}
+    assert "note" not in tool_message_content(failed)

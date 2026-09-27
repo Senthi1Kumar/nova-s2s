@@ -61,6 +61,15 @@ BARGE_IN_WAIT_S = 2.0
 DEFAULT_REOPEN_MS = 300
 # HMI already debounce-holds 1.8 s; keep the server echo gate across chunk gaps.
 PLAYBACK_STOPPED_HOLD_S = 1.8
+PROTOCOL_VERSION = "nova-realtime/1"
+OUTPUT_SAMPLE_RATES = (16000, 22050, 24000, 48000)
+# One TTS chunk is a whole sentence; sent as one delta it overflows the receive
+# buffer of a microcontroller client. Short deltas also let a device start
+# playing after one slice instead of one sentence.
+MAX_DELTA_MS = 200
+# Longest utterance that holds the follow-up window open; past this the VAD is
+# assumed to have lost the end of speech, and the window may expire again.
+MAX_UTTERANCE_S = 30.0
 
 
 def apply_playback_stopped(
@@ -104,7 +113,11 @@ def _transcript_is_echo(user: str, last_assistant: str) -> bool:
     uw = {w for w in u.replace("'", "").split() if len(w) > 2}
     if uw:
         overlap = len(pw & uw) / max(1, len(uw))
-        if overlap >= 0.45:
+        # Word overlap ignores order, so it only marks a short garbled
+        # fragment as echo ("It's Tense." for "It's 10:09 am."). A full
+        # follow-up reuses the last answer's topic words ("the current stock
+        # price") by nature; a real long echo is caught by the ordered checks.
+        if overlap >= 0.45 and len(uw) <= 4:
             return True
         uf = _fold_echo_text(u).split()
         pf = _fold_echo_text(prev).split()
@@ -162,6 +175,24 @@ def _pcm16_b64(audio: np.ndarray) -> str:
 
 def _b64_pcm16(data: str) -> bytes:
     return base64.b64decode(data.encode("ascii") if isinstance(data, str) else data)
+
+
+def _resample_f32(x: np.ndarray, src: int, dst: int) -> np.ndarray:
+    """Per-chunk polyphase resample for devices whose codec runs at one rate.
+
+    Chunks are whole TTS clauses, so boundaries fall in speech pauses where the
+    filter's edge transient is inaudible; a stateful resampler is not worth a
+    new dependency for that.
+    """
+    if src == dst:
+        return x
+    from math import gcd
+
+    from scipy.signal import resample_poly
+
+    g = gcd(int(src), int(dst))
+    y = resample_poly(np.asarray(x, dtype=np.float32).reshape(-1), dst // g, src // g)
+    return y.astype(np.float32, copy=False)
 
 
 @dataclass
@@ -318,6 +349,14 @@ class RealtimeSession:
         self.require_arm = self.gate_on_wake
         if wake_mode == "ptt" and not self.wake.available:
             self.require_arm = True
+        # Where the wake gate lives for this session. "server": nova_pro_v3.onnx
+        # scores the uplink. "device": the client ran its own wake word and says
+        # so with session.arm. "none": no gate (PTT profile without KWS).
+        self._wake_source = "server" if self.gate_on_wake else "none"
+        # None = client did not declare; keep the HMI-tuned echo behavior.
+        self._client_aec: bool | None = None
+        # None = send TTS at its native rate (reported on every delta).
+        self._output_rate: int | None = None
         self.pvad = OptionalFireRedPVAD(
             enabled=bool(cfg.get("pvad", "enabled", default=False)),
             model_dir=cfg.get("pvad", "model_dir"),
@@ -405,6 +444,58 @@ class RealtimeSession:
         if self._closed:
             return
         asyncio.run_coroutine_threadsafe(self.send(event), self.loop)
+
+    async def _send_error(self, err_type: str, message: str) -> None:
+        # Protocol errors keep the socket open: a device with one bad frame
+        # should not have to redo TLS + auth to recover.
+        await self.send({"type": "error", "error": {"type": err_type, "message": message}})
+
+    def _audio_delta_events(
+        self, chunk: np.ndarray, sample_rate: int, generation_id
+    ) -> list[dict[str, Any]]:
+        rate = int(sample_rate)
+        out_rate = getattr(self, "_output_rate", None) or rate
+        x = np.asarray(chunk, dtype=np.float32).reshape(-1)
+        if out_rate != rate:
+            x = _resample_f32(x, rate, out_rate)
+        step = max(1, out_rate * MAX_DELTA_MS // 1000)
+        return [
+            {
+                "type": "response.audio.delta",
+                "delta": _pcm16_b64(x[i : i + step]),
+                "sample_rate": out_rate,
+                "generation_id": generation_id,
+            }
+            for i in range(0, max(x.size, 1), step)
+        ]
+
+    def _send_audio(self, chunk: np.ndarray, sample_rate: int, generation_id) -> None:
+        for event in self._audio_delta_events(chunk, sample_rate, generation_id):
+            self._schedule_send(event)
+
+    def _session_created_payload(self, greeting: str) -> dict[str, Any]:
+        return {
+            "type": "session.created",
+            "session": {
+                "id": self.session_id,
+                "type": "realtime",
+                "model": "nova-hailo",
+                "protocol": PROTOCOL_VERSION,
+                "audio": {
+                    "input": {"format": "pcm16", "sample_rate": 16000, "channels": 1},
+                    # null = native TTS rate, stated on every delta; devices pin
+                    # it with session.update audio.output.sample_rate.
+                    "output": {"format": "pcm16", "sample_rate": self._output_rate, "channels": 1},
+                },
+                "wake_source": self._wake_source,
+                "wake": self.wake.status(),
+                "pvad": self.pvad.status(),
+                "fsm": self.fsm.snapshot(),
+                "stt_engine": getattr(self.pipeline, "stt_engine", None),
+                "greeting": greeting,
+                "llm": getattr(self.pipeline, "llm_settings_snapshot", lambda: {})(),
+            },
+        }
 
     def _voice_snapshot(self) -> dict[str, Any]:
         ns = self.ns
@@ -596,14 +687,7 @@ class RealtimeSession:
             self._echo_until = min(
                 max(self._echo_until, now_m) + dur, now_m + self.echo_max_ms / 1000.0
             )
-            self._schedule_send(
-                {
-                    "type": "response.audio.delta",
-                    "delta": _pcm16_b64(chunk),
-                    "sample_rate": int(sample_rate),
-                    "generation_id": my_gen,
-                }
-            )
+            self._send_audio(chunk, sample_rate, my_gen)
 
         def on_clause(text: str) -> None:
             if not self.pipeline.gen_guard.is_live(my_gen):
@@ -699,6 +783,13 @@ class RealtimeSession:
 
     async def run(self):
         await self.ws.accept()
+        # One WebSocket is one conversation (docs/api/realtime.md). The pipeline
+        # outlives connections, so drop the last one's history: its last reply is
+        # the echo filter's reference, and its unanswered question would be
+        # replayed on this connection's first turn. Long-term memory stays.
+        clear = getattr(self.pipeline, "clear_context", None)
+        if clear is not None:
+            clear()
         if not self.gate_on_wake:
             self.fsm.arm()
             self.fsm.begin_listen()
@@ -710,22 +801,7 @@ class RealtimeSession:
                 greeting = self.pipeline.startup_greet()
         except Exception:
             greeting = ""
-        await self.send(
-            {
-                "type": "session.created",
-                "session": {
-                    "id": self.session_id,
-                    "type": "realtime",
-                    "model": "nova-hailo",
-                    "wake": self.wake.status(),
-                    "pvad": self.pvad.status(),
-                    "fsm": self.fsm.snapshot(),
-                    "stt_engine": getattr(self.pipeline, "stt_engine", None),
-                    "greeting": greeting,
-                    "llm": getattr(self.pipeline, "llm_settings_snapshot", lambda: {})(),
-                },
-            }
-        )
+        await self.send(self._session_created_payload(greeting))
         snap = getattr(self.pipeline, "llm_settings_snapshot", None)
         if snap is not None:
             await self.send({"type": "nova.settings", **snap(), **_integrations_snapshot()})
@@ -740,12 +816,9 @@ class RealtimeSession:
         )
         try:
             while True:
-                raw = await self.ws.receive_text()
-                try:
-                    msg = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                await self._handle_client(msg)
+                message = await self.ws.receive()
+                if not await self._dispatch_frame(message):
+                    break
         except WebSocketDisconnect:
             pass
         finally:
@@ -758,10 +831,141 @@ class RealtimeSession:
             self._cancel_reopen()
             await self._finish_nemo_stream()
 
+    def _release_speaking_if_quiet(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        if (
+            self.fsm.state == SessionState.SPEAKING
+            and not self.pipeline.tts.is_speaking
+            and not self._client_playing
+            and time.monotonic() >= float(getattr(self, "_echo_until", 0.0) or 0.0)
+        ):
+            self.fsm.release_speaking()
+
+    def _schedule_speaking_release(self) -> None:
+        # Leaving SPEAKING used to wait for the next uplink frame, but a device
+        # without AEC may hold its mic until the server leaves SPEAKING --
+        # neither side would move. Check again once the echo hold has passed.
+        loop = getattr(self, "loop", None)
+        if loop is None:
+            return
+        delay = max(0.0, float(getattr(self, "_echo_until", 0.0) or 0.0) - time.monotonic())
+        loop.call_later(delay + 0.05, self._release_speaking_if_quiet)
+
+    def _barge_allowed(self) -> bool:
+        # A client that declared its echo capability is the authority on
+        # whether its mic can hear the user over Nova's own playback.
+        aec = getattr(self, "_client_aec", None)
+        if aec is None:
+            return bool(self.barge_in_while_speaking)
+        return bool(aec)
+
+    def _set_wake_source(self, source: str) -> None:
+        self._wake_source = source
+        # Both declared modes gate turns on a wake event and let the follow-up
+        # window expire to IDLE, which is what tells a device to stop streaming.
+        self.gate_on_wake = True
+        self.require_arm = True
+        if hasattr(self.fsm, "_expire_listening"):
+            self.fsm._expire_listening = True
+        if source == "device":
+            # run() parks non-KWS profiles in LISTENING at connect; a device
+            # that owns the wake word expects IDLE until its session.arm.
+            self.fsm._armed_until = 0.0
+            self.fsm.maybe_expire_arm()
+
+    async def _apply_capabilities(self, session: Any) -> bool:
+        """Validate and apply device capabilities; False = rejected with an error."""
+        inp = session.get("input") if isinstance(session, dict) else None
+        audio = session.get("audio") if isinstance(session, dict) else None
+        out = audio.get("output") if isinstance(audio, dict) else None
+        if (
+            not isinstance(session, dict)
+            or not isinstance(inp or {}, dict)
+            or not isinstance(audio or {}, dict)
+            or not isinstance(out or {}, dict)
+        ):
+            await self._send_error(
+                "invalid_session_update", "session, session.input and session.audio.output must be objects"
+            )
+            return False
+        inp = inp or {}
+        out = out or {}
+        wake = inp.get("wake")
+        if wake is not None:
+            if wake not in ("server", "device"):
+                await self._send_error(
+                    "invalid_session_update",
+                    f"input.wake must be 'server' or 'device', got {wake!r}",
+                )
+                return
+            if wake == "server" and not self.wake.available:
+                await self._send_error(
+                    "invalid_session_update",
+                    "server wake word is not available on this Pi; "
+                    "use input.wake='device' and send session.arm",
+                )
+                return
+        aec = inp.get("echo_cancellation")
+        if aec is not None and not isinstance(aec, bool):
+            await self._send_error(
+                "invalid_session_update", "input.echo_cancellation must be true or false"
+            )
+            return
+        rate = out.get("sample_rate")
+        if rate is not None and (
+            isinstance(rate, bool) or not isinstance(rate, int) or rate not in OUTPUT_SAMPLE_RATES
+        ):
+            await self._send_error(
+                "unsupported_sample_rate",
+                f"audio.output.sample_rate must be one of {list(OUTPUT_SAMPLE_RATES)}",
+            )
+            return
+        if wake is not None:
+            self._set_wake_source(wake)
+        if aec is not None:
+            self._client_aec = aec
+        if rate is not None:
+            self._output_rate = int(rate)
+        return True
+
+    async def _dispatch_frame(self, message: dict[str, Any]) -> bool:
+        """Route one ASGI websocket message; False means the peer went away.
+
+        Binary frames are raw PCM16LE 16 kHz mono -- the always-on uplink from
+        small devices, which should not pay base64 (+33% bytes, CPU) forever.
+        Text frames are the JSON events.
+        """
+        if message.get("type") == "websocket.disconnect":
+            return False
+        data = message.get("bytes")
+        if data is not None:
+            if len(data) % 2:
+                await self._send_error(
+                    "invalid_audio_frame",
+                    f"binary frames are PCM16LE; got {len(data)} bytes (odd)",
+                )
+                return True
+            if data:
+                await self._on_uplink_pcm(data)
+            return True
+        raw = message.get("text")
+        if raw is None:
+            return True
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            return True
+        if isinstance(msg, dict):
+            await self._handle_client(msg)
+        return True
+
     async def _handle_client(self, msg: dict[str, Any]):
         mtype = msg.get("type")
         if mtype == "session.update":
             session = msg.get("session") or {}
+            if not await self._apply_capabilities(session):
+                return
             audio = session.get("audio") or {}
             inp = audio.get("input") or {}
             td = inp.get("turn_detection") or {}
@@ -815,6 +1019,11 @@ class RealtimeSession:
 
         if mtype in {"input_audio_buffer.arm", "ptt.down", "session.arm"}:
             self._ptt_armed = True
+            if self._wake_source == "device":
+                # The device's wake word is this session's wake event: same
+                # path as a server KWS hit, including barge-in over playback.
+                self._on_wake_hit(source="device")
+                return
             self.fsm.arm()
             self.fsm.begin_listen()
             await self.send({"type": "session.armed", "fsm": self.fsm.snapshot()})
@@ -851,6 +1060,7 @@ class RealtimeSession:
             self._client_playing = bool(decision["client_playing"])
             self._echo_until = float(decision["echo_until"])
             print("[play] playback.stopped", flush=True)
+            self._schedule_speaking_release()
             ctx = self.fsm.current
             if ctx is not None and ctx.barge_in_at is not None:
                 stop_ms = (self._playback_stop_ack_at - ctx.barge_in_at) * 1000
@@ -862,7 +1072,7 @@ class RealtimeSession:
             # Ignore it inside the echo window: the browser's own VAD also trips
             # on Nova's playback, which would re-open the self-barge path.
             if (
-                not self.barge_in_while_speaking
+                not self._barge_allowed()
                 and time.monotonic()
                 < getattr(self, "_echo_until", 0.0) + self.echo_tail_ms / 1000.0
             ):
@@ -870,7 +1080,7 @@ class RealtimeSession:
             if should_interrupt_on_user_speech(
                 fsm_state=self.fsm.state,
                 tts_speaking=bool(self.pipeline.tts.is_speaking),
-                barge_in_while_speaking=self.barge_in_while_speaking,
+                barge_in_while_speaking=self._barge_allowed(),
                 client_playing=bool(self._client_playing),
             ):
                 self._barge_in(reason="client_cancel")
@@ -880,164 +1090,187 @@ class RealtimeSession:
             audio_b64 = msg.get("audio")
             if not audio_b64:
                 return
-            pcm = _b64_pcm16(audio_b64)
-            self._uplink_frames += 1
-            now_m = time.monotonic()
-            self.fsm.maybe_expire_arm()
-
-            audible = (
-                self.fsm.state == SessionState.SPEAKING
-                or bool(self.pipeline.tts.is_speaking)
-                or bool(getattr(self, "_client_playing", False))
-            )
-            wake_thr = self.wake.barge_threshold if audible else None
-            if self.wake.enabled and self.wake.process(
-                pcm, threshold=wake_thr, ignore_cooldown=audible
-            ):
-                self._on_wake_hit()
-                return
-
-            score = float(getattr(self.wake, "last_score", 0.0) or 0.0)
-            self._wake_peak = max(getattr(self, "_wake_peak", 0.0), score)
-            if now_m - self._uplink_log_at >= 5.0:
-                self._uplink_log_at = now_m
-                rms = 0.0
-                if pcm:
-                    x = np.frombuffer(pcm[: len(pcm) - (len(pcm) % 2)], dtype=np.int16)
-                    if x.size:
-                        rms = float(np.sqrt(np.mean(x.astype(np.float32) ** 2)) + 1e-12) / 32768.0
-                silent = " silent" if rms < 1e-4 else ""
-                print(
-                    f"[uplink] frames={self._uplink_frames} bytes={len(pcm)} "
-                    f"rms={rms:.4f}{silent} fsm={self.fsm.state.value} "
-                    f"speaking={self.pipeline.tts.is_speaking} "
-                    f"playing={int(bool(self._client_playing))} "
-                    f"wake={score:.3f} peak={self._wake_peak:.3f}",
-                    flush=True,
-                )
-                self._wake_peak = 0.0
-
-            if self.gate_on_wake and self.fsm.state == SessionState.IDLE:
-                self.vad.feed(pcm)
-                return
-
-            if (
-                self.fsm.state == SessionState.SPEAKING
-                and not self.pipeline.tts.is_speaking
-                and not self._client_playing
-                and time.monotonic() >= float(getattr(self, "_echo_until", 0.0) or 0.0)
-            ):
-                self.fsm.release_speaking()
-            speaking = (
-                self.fsm.state == SessionState.SPEAKING
-                or self.pipeline.tts.is_speaking
-                or self._client_playing
-            )
-            if speaking and self.pvad.available and self.pvad.feed_pcm16(pcm):
-                self._barge_in(reason="pvad_target_speech")
-
-            # Echo guard: the speaker feeds the mic, so while Nova is speaking the
-            # VAD sees Nova's own voice, barges in, then starts a fresh turn from
-            # that audio — self-conversation plus chopped playback. Browser AEC
-            # does not cancel it on this PipeWire path and pVAD (the proper
-            # speaker check) is off by default. Unless barge-in is explicitly
-            # enabled, drop VAD events while speaking and through a decay tail.
-            tail = self.echo_tail_ms / 1000.0
-            in_echo_window = time.monotonic() < (getattr(self, "_echo_until", 0.0) + tail)
-            echo_cap = self.echo_max_ms / 1000.0
-            echo_held_s = max(0.0, time.monotonic() - float(getattr(self, "_echo_hold_started", 0.0) or 0.0))
-            if (speaking or in_echo_window) and not getattr(self, "_echo_hold_started", 0.0):
-                self._echo_hold_started = time.monotonic()
-            if not (speaking or in_echo_window):
-                self._echo_hold_started = 0.0
-            gated = (speaking or in_echo_window) and not self.barge_in_while_speaking
-            if (
-                gated
-                and echo_held_s > echo_cap
-                and not self._client_playing
-                and time.monotonic() >= float(getattr(self, "_echo_until", 0.0) or 0.0)
-            ):
-                gated = False
-                self._echo_until = 0.0
-                self._echo_hold_started = 0.0
-            if gated:
-                self.vad.feed(pcm)  # keep VAD state coherent, discard events
-                if self.ns is not None and not self._ns_held:
-                    self.ns.reset()
-                    self._ns_held = True
-                if not self._echo_logged:
-                    remain = max(0.0, self._echo_until - time.monotonic())
-                    print(f"[echo] mic gated during playback ({remain:.1f}s left)")
-                    self._echo_logged = True
-                return
-            self._echo_logged = False
-            self._ns_held = False
-
-            if self.ns is not None:
-                pcm = self.ns.process_pcm16(pcm)
-                if not pcm:
-                    return
-
-            # Process VAD events, but always forward PCM to the sidecar *before*
-            # commit. Previous order committed on speech_stopped then tried to
-            # send the same frame on a cleared socket — last audio + finish()
-            # never paired, so `.completed` often never arrived (5s timeout).
-            vad_events = list(self.vad.feed(pcm))
-            for ev, payload in vad_events:
-                if ev == "speech_started":
-                    print(
-                        f"[vad] speech_started fsm={self.fsm.state.value} "
-                        f"tts={self.pipeline.tts.is_speaking}",
-                        flush=True,
-                    )
-                    await self.send({"type": "input_audio_buffer.speech_started"})
-                    reopen_pending = self._reopen_task is not None
-                    if reopen_pending:
-                        print("[vad] reopen cancelled (speech again)", flush=True)
-                        self._cancel_reopen()
-                        self._turn_revision += 1
-                        await self._start_nemo_stream(reuse=True)
-                    else:
-                        await self._start_nemo_stream(reuse=False)
-                        if should_interrupt_on_user_speech(
-                            fsm_state=self.fsm.state,
-                            tts_speaking=speaking,
-                            barge_in_while_speaking=self.barge_in_while_speaking,
-                            client_playing=bool(self._client_playing),
-                        ):
-                            self._barge_in(reason="vad_speech_started", abort_nemo=False)
-                            self._utterance_audio = None
-                            self._turn_revision = 0
-                        else:
-                            self.fsm.begin_listen()
-
-            await self._nemo_send_pcm(pcm)
-
-            for ev, payload in vad_events:
-                if ev == "speech_stopped" and payload is not None:
-                    print(
-                        f"[vad] speech_stopped sec={float(payload.size) / 16000.0:.2f} "
-                        f"fsm={self.fsm.state.value}",
-                        flush=True,
-                    )
-                    stopped_at = self.fsm.note_speech_stopped()
-                    await self.send({"type": "input_audio_buffer.speech_stopped"})
-                    self._utterance_audio = _concat_audio(self._utterance_audio, payload)
-                    audio_sec = float(self._utterance_audio.size) / 16000.0
-                    await self._schedule_utterance_commit(
-                        self._utterance_audio,
-                        audio_sec=audio_sec,
-                        speech_stopped_at=stopped_at,
-                    )
-                    if self.ns is not None:
-                        self.ns.reset()
+            await self._on_uplink_pcm(_b64_pcm16(audio_b64))
             return
 
         if mtype == "input_audio_buffer.commit":
             return
 
-    def _on_wake_hit(self) -> None:
+    def _speech_in_progress(self) -> bool:
+        started = getattr(self, "_speech_started_mono", None)
+        return started is not None and time.monotonic() - started < MAX_UTTERANCE_S
+
+    async def _on_uplink_pcm(self, pcm: bytes) -> None:
+        """One chunk of mic PCM16 from any transport (JSON append or binary frame)."""
+        self._uplink_frames += 1
+        now_m = time.monotonic()
+        # Never expire the follow-up window under a user who is mid-sentence:
+        # when frames arrive late (a stalled loop, a slow link) the deadline
+        # passes during speech, and IDLE would silently drop the question.
+        if not self._speech_in_progress():
+            self.fsm.maybe_expire_arm()
+
+        audible = (
+            self.fsm.state == SessionState.SPEAKING
+            or bool(self.pipeline.tts.is_speaking)
+            or bool(getattr(self, "_client_playing", False))
+        )
+        wake_thr = self.wake.barge_threshold if audible else None
+        # No server scoring when the device owns the wake word, and none while
+        # a no-AEC device plays Nova's voice ("...ask Nova..." would self-wake).
+        score_wake = (
+            self.wake.enabled
+            and getattr(self, "_wake_source", "server") != "device"
+            and not (audible and getattr(self, "_client_aec", None) is False)
+        )
+        if score_wake and self.wake.process(pcm, threshold=wake_thr, ignore_cooldown=audible):
+            self._on_wake_hit()
+            return
+
         score = float(getattr(self.wake, "last_score", 0.0) or 0.0)
+        self._wake_peak = max(getattr(self, "_wake_peak", 0.0), score)
+        if now_m - self._uplink_log_at >= 5.0:
+            self._uplink_log_at = now_m
+            rms = 0.0
+            if pcm:
+                x = np.frombuffer(pcm[: len(pcm) - (len(pcm) % 2)], dtype=np.int16)
+                if x.size:
+                    rms = float(np.sqrt(np.mean(x.astype(np.float32) ** 2)) + 1e-12) / 32768.0
+            silent = " silent" if rms < 1e-4 else ""
+            print(
+                f"[uplink] frames={self._uplink_frames} bytes={len(pcm)} "
+                f"rms={rms:.4f}{silent} fsm={self.fsm.state.value} "
+                f"speaking={self.pipeline.tts.is_speaking} "
+                f"playing={int(bool(self._client_playing))} "
+                f"wake={score:.3f} peak={self._wake_peak:.3f}",
+                flush=True,
+            )
+            self._wake_peak = 0.0
+
+        if self.gate_on_wake and self.fsm.state == SessionState.IDLE:
+            self.vad.feed(pcm)
+            return
+
+        self._release_speaking_if_quiet()
+        speaking = (
+            self.fsm.state == SessionState.SPEAKING
+            or self.pipeline.tts.is_speaking
+            or self._client_playing
+        )
+        if speaking and self.pvad.available and self.pvad.feed_pcm16(pcm):
+            self._barge_in(reason="pvad_target_speech")
+
+        # Echo guard: the speaker feeds the mic, so while Nova is speaking the
+        # VAD sees Nova's own voice, barges in, then starts a fresh turn from
+        # that audio — self-conversation plus chopped playback. Browser AEC
+        # does not cancel it on this PipeWire path and pVAD (the proper
+        # speaker check) is off by default. Unless barge-in is explicitly
+        # enabled, drop VAD events while speaking and through a decay tail.
+        tail = self.echo_tail_ms / 1000.0
+        in_echo_window = time.monotonic() < (getattr(self, "_echo_until", 0.0) + tail)
+        echo_cap = self.echo_max_ms / 1000.0
+        echo_held_s = max(0.0, time.monotonic() - float(getattr(self, "_echo_hold_started", 0.0) or 0.0))
+        if (speaking or in_echo_window) and not getattr(self, "_echo_hold_started", 0.0):
+            self._echo_hold_started = time.monotonic()
+        if not (speaking or in_echo_window):
+            self._echo_hold_started = 0.0
+        gated = (speaking or in_echo_window) and not self._barge_allowed()
+        if (
+            gated
+            and echo_held_s > echo_cap
+            and not self._client_playing
+            and time.monotonic() >= float(getattr(self, "_echo_until", 0.0) or 0.0)
+        ):
+            gated = False
+            self._echo_until = 0.0
+            self._echo_hold_started = 0.0
+        if gated:
+            self.vad.feed(pcm)  # keep VAD state coherent, discard events
+            if self.ns is not None and not self._ns_held:
+                self.ns.reset()
+                self._ns_held = True
+            if not self._echo_logged:
+                remain = max(0.0, self._echo_until - time.monotonic())
+                print(f"[echo] mic gated during playback ({remain:.1f}s left)")
+                self._echo_logged = True
+            return
+        self._echo_logged = False
+        self._ns_held = False
+
+        if self.ns is not None:
+            pcm = self.ns.process_pcm16(pcm)
+            if not pcm:
+                return
+
+        # Process VAD events, but always forward PCM to the sidecar *before*
+        # commit. Previous order committed on speech_stopped then tried to
+        # send the same frame on a cleared socket — last audio + finish()
+        # never paired, so `.completed` often never arrived (5s timeout).
+        vad_events = list(self.vad.feed(pcm))
+        for ev, _payload in vad_events:
+            if ev == "speech_started":
+                self._speech_started_mono = time.monotonic()
+            elif ev == "speech_stopped":
+                self._speech_started_mono = None
+        for ev, payload in vad_events:
+            if ev == "speech_started":
+                print(
+                    f"[vad] speech_started fsm={self.fsm.state.value} "
+                    f"tts={self.pipeline.tts.is_speaking}",
+                    flush=True,
+                )
+                await self.send({"type": "input_audio_buffer.speech_started"})
+                reopen_pending = self._reopen_task is not None
+                if reopen_pending:
+                    print("[vad] reopen cancelled (speech again)", flush=True)
+                    self._cancel_reopen()
+                    self._turn_revision += 1
+                    await self._start_nemo_stream(reuse=True)
+                else:
+                    await self._start_nemo_stream(reuse=False)
+                    if should_interrupt_on_user_speech(
+                        fsm_state=self.fsm.state,
+                        tts_speaking=speaking,
+                        barge_in_while_speaking=self._barge_allowed(),
+                        client_playing=bool(self._client_playing),
+                    ):
+                        self._barge_in(reason="vad_speech_started", abort_nemo=False)
+                        # The utterance the segmenter is mid-way through
+                        # is the one that just interrupted playback, so it
+                        # must not be discarded for being short -- "stop"
+                        # is the shortest thing a user ever says and the
+                        # one they most expect to land.
+                        self.vad.mark_barge_in()
+                        self._utterance_audio = None
+                        self._turn_revision = 0
+                    else:
+                        self.fsm.begin_listen()
+
+        await self._nemo_send_pcm(pcm)
+
+        for ev, payload in vad_events:
+            if ev == "speech_stopped" and payload is not None:
+                print(
+                    f"[vad] speech_stopped sec={float(payload.size) / 16000.0:.2f} "
+                    f"fsm={self.fsm.state.value}",
+                    flush=True,
+                )
+                stopped_at = self.fsm.note_speech_stopped()
+                await self.send({"type": "input_audio_buffer.speech_stopped"})
+                self._utterance_audio = _concat_audio(self._utterance_audio, payload)
+                audio_sec = float(self._utterance_audio.size) / 16000.0
+                await self._schedule_utterance_commit(
+                    self._utterance_audio,
+                    audio_sec=audio_sec,
+                    speech_stopped_at=stopped_at,
+                )
+                if self.ns is not None:
+                    self.ns.reset()
+        return
+
+    def _on_wake_hit(self, source: str = "server") -> None:
+        self._speech_started_mono = None  # the VAD is reset below
+        score = float(getattr(self.wake, "last_score", 0.0) or 0.0) if source == "server" else None
         if hasattr(self.vad, "reset"):
             self.vad.reset()
         self._utterance_audio = None
@@ -1052,11 +1285,11 @@ class RealtimeSession:
         self.fsm.arm()
         self.fsm.begin_listen()
         print(
-            f"[wake] hit score={score:.3f} fsm={self.fsm.state.value} barge={audible}",
+            f"[wake] hit source={source} score={score} fsm={self.fsm.state.value} barge={audible}",
             flush=True,
         )
         self._schedule_send(
-            {"type": "wake.detected", "score": score, "fsm": self.fsm.snapshot()}
+            {"type": "wake.detected", "source": source, "score": score, "fsm": self.fsm.snapshot()}
         )
 
     def _barge_in(self, reason: str, *, abort_nemo: bool = True):
@@ -1420,14 +1653,7 @@ class RealtimeSession:
                 max(self._echo_until, now_echo) + dur,
                 now_echo + self.echo_max_ms / 1000.0,
             )
-            self._schedule_send(
-                {
-                    "type": "response.audio.delta",
-                    "delta": _pcm16_b64(chunk),
-                    "sample_rate": int(sample_rate),
-                    "generation_id": generation_id,
-                }
-            )
+            self._send_audio(chunk, sample_rate, generation_id)
 
         def on_clause(text: str):
             if not self.fsm.is_current(generation_id):
@@ -1787,14 +2013,7 @@ class RealtimeSession:
             self._echo_until = min(
                 max(self._echo_until, now_m) + dur, now_m + self.echo_max_ms / 1000.0
             )
-            self._schedule_send(
-                {
-                    "type": "response.audio.delta",
-                    "delta": _pcm16_b64(chunk),
-                    "sample_rate": int(sample_rate),
-                    "generation_id": generation_id,
-                }
-            )
+            self._send_audio(chunk, sample_rate, generation_id)
 
         def on_clause(text: str):
             if not self.fsm.is_current(generation_id):

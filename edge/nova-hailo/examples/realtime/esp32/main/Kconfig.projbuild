@@ -1,0 +1,23 @@
+menu "Nova realtime"
+    config NOVA_WS_URI
+        string "Nova realtime URL"
+        default "wss://192.168.1.36:8767/v1/realtime"
+    config NOVA_TOKEN
+        string "NOVA_HAILO_API_TOKEN"
+        default ""
+    choice NOVA_WAKE
+        prompt "Wake word runs on"
+        default NOVA_WAKE_DEVICE
+        config NOVA_WAKE_DEVICE
+            bool "device (button / local WakeNet -> session.arm)"
+        config NOVA_WAKE_SERVER
+            bool "server (stream continuously; Pi hears 'Hey Nova')"
+    endchoice
+    config NOVA_ECHO_CANCELLATION
+        bool "Mic path has acoustic echo cancellation"
+        default n
+    config NOVA_PREROLL_MS
+        int "Pre-roll sent after a local wake (ms)"
+        default 400
+        range 20 1000
+endmenu

@@ -539,3 +539,81 @@ def test_playback_interrupted_clears_echo_window():
     assert out["release_speaking"] is True
     assert out["client_playing"] is False
     assert out["echo_until"] == 0.0
+
+
+def test_turn_completion_extends_the_followup_window():
+    """session_idle_sec is an *idle* timeout, not a session lifetime.
+
+    _armed_until is read two ways: it expires the ARMED state, and it decides
+    whether a finished turn lands in LISTENING or IDLE. Only the first is a
+    deadline from the wake word; the second has to mean "time since the user
+    last did something", or a conversation outliving the window drops to IDLE
+    mid-flow and silently demands a new wake word.
+    """
+    from nova_hailo.session_fsm import TurnTerminal
+
+    fsm = SessionFSM(session_idle_sec=0.05)
+    fsm.arm()
+    ctx = fsm.begin_turn()
+    time.sleep(0.08)  # the window opened by arm() has now elapsed
+    assert fsm.complete(ctx.generation_id, TurnTerminal.COMPLETED) is True
+    assert fsm.state is SessionState.LISTENING
+
+
+def test_barge_in_extends_the_followup_window():
+    """Interrupting is the strongest evidence of an engaged user there is.
+
+    complete() and release_speaking() are the other two terminal paths and
+    both refresh the window; interrupt() refreshing nothing is what strands a
+    barge-in followed by a dropped utterance in IDLE.
+    """
+    from nova_hailo.session_fsm import TurnTerminal
+
+    fsm = SessionFSM(session_idle_sec=0.05)
+    fsm.arm()
+    first = fsm.begin_turn()
+    fsm.set_speaking(first.generation_id)
+    time.sleep(0.08)
+    fsm.interrupt(reason="vad_speech_started")
+
+    # The user is mid-sentence; a turn committed now is a follow-up, not a
+    # cold start that should need the wake word again.
+    ctx = fsm.begin_turn()
+    assert fsm.complete(ctx.generation_id, TurnTerminal.COMPLETED) is True
+    assert fsm.state is SessionState.LISTENING
+
+
+def test_topical_follow_up_is_not_mistaken_for_echo():
+    # A follow-up that reuses the last answer's topic words was dropped as
+    # Nova's own voice ("skip TTS-echo"), so the user got silence.
+    from nova_hailo.web.realtime_session import _transcript_is_echo
+
+    assert _transcript_is_echo(
+        "What is the current stock price of NVIDIA?",
+        "I'm not able to look up real-time market data, so I can't give you the "
+        "current SpaceX stock price.",
+    ) is False
+    # A real follow-up and the reply it followed.
+    assert _transcript_is_echo(
+        "Where is it that landslides and waterlogging happened?",
+        "Um, today's broad news in India includes severe rain causing landslides, "
+        "water-logging and road disruptions across several states, and a Supreme "
+        "Court order upholding a decision that quashed a student's detention under.",
+    ) is False
+
+
+def test_real_echoes_are_still_caught():
+    from nova_hailo.web.realtime_session import _transcript_is_echo
+
+    # A real echo: the tail of Nova's reply, heard back by the mic.
+    assert _transcript_is_echo(
+        "Yeah, that's the most recent version from SpaceX AI.",
+        "Hmm, it looks like the latest Grok release is actually Grok 4. announced "
+        "around September 21 2026. Yeah, that's the most recent version from SpaceX AI.",
+    ) is True
+    # Garbled but in order.
+    assert _transcript_is_echo(
+        "it's warm in deli today around thirty three degrees in the afternoon",
+        "Sure, it's warm in Delhi today, around 33 degrees in the afternoon with a "
+        "light chance of rain.",
+    ) is True

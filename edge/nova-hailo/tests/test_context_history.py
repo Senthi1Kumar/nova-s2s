@@ -108,3 +108,45 @@ def test_state_line_is_not_in_the_cacheable_prefix() -> None:
     user = " ".join(m["content"] for m in messages if m["role"] == "user")
     assert "IST" in user
     assert "10:06" in user
+
+
+# ---- a refused turn drops its reply, not its question ------------------------
+
+SPACEX_Q = "What is the stock price of SpaceX right now?"
+SPACEX_REFUSAL = "I'm not sure there's a public stock price for SpaceX right now."
+
+
+def test_question_behind_a_refusal_is_carried_to_the_next_turn() -> None:
+    """"Why is it?" after a "not sure" reply asked the user to clarify,
+    because the whole refused turn -- question included -- was dropped."""
+    h = ConversationHistory(max_turns=5)
+    h.add(SPACEX_Q, SPACEX_REFUSAL)
+
+    messages = h.build_messages("You are Nova.", "Why is it?")
+
+    current = messages[-1]["content"]
+    assert SPACEX_Q in current
+    assert current.rstrip().endswith("Why is it?")
+    # The refusal itself still never enters the prompt (repetition-lock guard).
+    assert not any(SPACEX_REFUSAL in m["content"] for m in messages)
+
+
+def test_carried_question_is_dropped_once_a_turn_is_stored() -> None:
+    h = ConversationHistory(max_turns=5)
+    h.add(SPACEX_Q, SPACEX_REFUSAL)
+    h.add("Why is it?", "SpaceX is privately held, so it has no public share price.")
+
+    messages = h.build_messages("You are Nova.", "What's the weather in Delhi?")
+
+    assert not any(
+        SPACEX_Q in m["content"] and m["role"] == "user" and m is messages[-1]
+        for m in messages
+    )
+
+
+def test_clear_drops_the_carried_question() -> None:
+    h = ConversationHistory(max_turns=5)
+    h.add(SPACEX_Q, SPACEX_REFUSAL)
+    h.clear()
+
+    assert SPACEX_Q not in h.build_messages("You are Nova.", "Why is it?")[-1]["content"]

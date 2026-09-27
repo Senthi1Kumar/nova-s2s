@@ -38,6 +38,13 @@ class SileroVadConfig:
     # turn-taking needs a longer hangover — measured 2026-07-29.
     min_silence_ms: int = 600
     min_speech_ms: int = 400
+    # min_speech_ms is an intent heuristic: it stops a 1-2 word fragment
+    # reaching STT as a cold turn. An utterance that interrupted playback has
+    # already proven intent, so it faces a lower bar -- see mark_barge_in().
+    # The asymmetry is deliberate: a false accept costs one "I didn't catch
+    # that", a false reject silently drops the user's command and strands the
+    # session with the audio already stopped.
+    barge_in_min_speech_ms: int = 150
     # Pi talk-and-replay: 200 ms preroll ate "hey"; 400 ms pre+post keeps onsets/endings.
     speech_pad_ms: int = 400
     max_utterance_s: float = 8.0
@@ -117,6 +124,10 @@ class SileroVadSegmenter:
         self._pad = int(self.cfg.sample_rate * self.cfg.speech_pad_ms / 1000)
         self._min_sil = int(self.cfg.sample_rate * self.cfg.min_silence_ms / 1000)
         self._min_speech = int(self.cfg.sample_rate * self.cfg.min_speech_ms / 1000)
+        self._barge_min_speech = int(
+            self.cfg.sample_rate * self.cfg.barge_in_min_speech_ms / 1000
+        )
+        self._barge_in = False
         self._max_utt = int(self.cfg.max_utterance_s * self.cfg.sample_rate)
         self._neg = max(0.01, self.cfg.threshold - 0.15)
         print(f"VAD: Silero ONNX ({onnx.name}) thr={self.cfg.threshold}")
@@ -129,6 +140,17 @@ class SileroVadSegmenter:
         self.cfg.min_silence_ms = int(500 + (1.0 - t) * 250)
         self._min_sil = int(self.cfg.sample_rate * self.cfg.min_silence_ms / 1000)
 
+    def mark_barge_in(self):
+        """Treat the utterance now in progress as a barge-in.
+
+        One-shot, consumed by the next _finish(): the caller knows a turn was
+        interrupted, the segmenter only sees audio. Marking the *current*
+        utterance rather than setting a mode keeps the relaxation scoped to
+        exactly the speech that did the interrupting -- the turn after it is a
+        fresh cold start and faces the normal bar again.
+        """
+        self._barge_in = True
+
     def reset(self):
         self._model.reset_states()
         self._buf = np.zeros(0, dtype=np.float32)
@@ -140,6 +162,7 @@ class SileroVadSegmenter:
         self._sample_i = 0
         self._active_speech = 0
         self._last_voiced_utt = 0
+        self._barge_in = False
 
     def _remember_pre(self, chunk: np.ndarray):
         self._pre.append(chunk.copy())
@@ -224,10 +247,16 @@ class SileroVadSegmenter:
         self._last_voiced_utt = 0
         self._pre.clear()
         self._pre_samples = 0
-        if active < self._min_speech or len(audio) < self._min_speech:
+        # Consume the one-shot mark here, not in feed(): every exit from this
+        # function ends the utterance it applied to.
+        barge_in = self._barge_in
+        self._barge_in = False
+        min_speech = self._barge_min_speech if barge_in else self._min_speech
+        if active < min_speech or len(audio) < min_speech:
             print(
                 f"[vad] drop short active_ms={active / 16.0:.0f} "
-                f"audio_ms={len(audio) / 16.0:.0f} min_ms={self._min_speech / 16.0:.0f}",
+                f"audio_ms={len(audio) / 16.0:.0f} min_ms={min_speech / 16.0:.0f}"
+                f"{' barge_in' if barge_in else ''}",
                 flush=True,
             )
             return None
