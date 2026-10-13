@@ -99,17 +99,19 @@ Keys: Space wake · M mute · T tuck · O orb tap · E end · P pause demo · 1/
 ## Raspberry Pi
 
 ```bash
-scripts/pi_sync.sh                          # rsync + build gpu and sw + ctest on the Pi (not .deps/: copy the
-                                            # arm64 MapLibre package to cb_lvgl/.deps/maplibre/ once)
+scripts/pi_sync.sh                          # rsync + build gpu and sw + ctest on the Pi (not .deps/: on a new
+                                            # Pi, nova-hailo's scripts/setup_pi.sh downloads MapLibre)
 ssh RPi5-AI-HAT+2 '~/repos/test_nova_repo/nova-s2s/edge/nova-hailo/cb_lvgl/scripts/run_on_pi.sh sw --fullscreen --live'
 scripts/cpu_sample.sh <pid> 60              # on the Pi: % of one core
 scripts/measure_on_pi.sh sw 60 tag          # on the Pi: run, screenshots, CPU, alive check (EVENTS="6:shot 9:key=m ...")
 ```
 
-CabinEnv on the Pi, two terminals in the nova-hailo directory: `scripts/run_demo_oem.sh` (the pipeline; its
-`wake.mode` decides "Hey Nova" vs open mic), then `scripts/run_cabinenv_client.sh`, which runs the headless
-mic/speaker client and opens this cockpit beside it (`run_on_pi.sh sw --fullscreen --live`, log
-`/tmp/cb_lvgl.log`). `run_on_pi.sh` loads `MAPBOX_API_KEY` and sets the clock to IST. In live mode the display is
+CabinEnv on a new Pi: nova-hailo's [QUICKSTART.md](../QUICKSTART.md) (`scripts/setup_pi.sh` once, then
+`scripts/run_cabinenv.sh`). By hand, two terminals in the nova-hailo directory: `scripts/run_demo_oem.sh` (the
+pipeline; its `wake.mode` decides "Hey Nova" vs open mic), then `scripts/run_cabinenv_client.sh`, which runs the
+headless mic/speaker client and opens this cockpit beside it (`run_on_pi.sh sw --fullscreen --live`, log
+`/tmp/cb_lvgl.log`). `run_on_pi.sh` loads `MAPBOX_API_KEY`; the clock follows the car's time zone, which the
+pipeline sends (the GPS fix's, else the simulated drive's). In live mode the display is
 an observer: mic, × and orb taps do nothing (the pipeline owns the mic); tuck still works.
 
 ## Fonts

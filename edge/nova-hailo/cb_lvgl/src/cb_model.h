@@ -27,6 +27,7 @@ typedef struct {
     lv_subject_t *speed_kph, *gear, *soc_pct, *range_km, *route_permille, *eta_min;
     lv_subject_t *driver_temp_dc, *passenger_temp_dc, *fan_level, *ac_on;
     lv_subject_t *win_pct[CB_WIN_COUNT], *sunroof_pct, *wipers_on, *locked, *seat_heat;
+    lv_subject_t *sunshade_pct;    /* 0 retracted (open) .. 100 deployed (closed), as VSS */
     lv_subject_t *wiper_mode;      /* 0 off, 1 auto, 2 low, 3 high */
     lv_subject_t *headlights;      /* 0 off, 1 auto, 2 low, 3 high */
     lv_subject_t *defrost;         /* bit 0 front, bit 1 rear */
@@ -46,7 +47,7 @@ void cb_model_set_speed(int32_t kph);                  /* clamp 0..250 */
 void cb_model_set_soc(int32_t pct);                    /* clamp 0..100; range_km = pct * 309 / 100 */
 void cb_model_set_temp(bool driver, int32_t deci_c);   /* clamp 160..300 */
 void cb_model_set_window(cb_window_t w, int32_t pct);  /* clamp 0..100 */
-void cb_model_set_sunroof(int32_t pct);                /* clamp 0..100 */
+void cb_model_set_sunroof(int32_t pct);                /* clamp -100..100; below 0 is tilted, as VSS */
 void cb_model_set_last_turn(const cb_last_turn_t *t);
 const char *cb_model_track_title(int32_t idx);         /* 3 tracks; idx wraps */
 int32_t cb_model_track_duration(int32_t idx);          /* seconds */

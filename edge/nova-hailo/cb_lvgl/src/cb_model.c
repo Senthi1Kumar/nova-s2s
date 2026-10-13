@@ -55,7 +55,8 @@ void cb_model_init(void)
     s_m.win_pct[CB_WIN_FR] = mk_int(0);
     s_m.win_pct[CB_WIN_RL] = mk_int(10);
     s_m.win_pct[CB_WIN_RR] = mk_int(10);
-    s_m.sunroof_pct = mk_int(15);
+    s_m.sunroof_pct = mk_int(-100);
+    s_m.sunshade_pct = mk_int(0);
     s_m.wipers_on = mk_int(0);
     s_m.wiper_mode = mk_int(0);
     s_m.headlights = mk_int(1);
@@ -103,7 +104,7 @@ void cb_model_set_window(cb_window_t w, int32_t pct)
     cb_model_set_int(s_m.win_pct[w], clamp(pct, 0, 100));
 }
 
-void cb_model_set_sunroof(int32_t pct) { cb_model_set_int(s_m.sunroof_pct, clamp(pct, 0, 100)); }
+void cb_model_set_sunroof(int32_t pct) { cb_model_set_int(s_m.sunroof_pct, clamp(pct, -100, 100)); }
 
 void cb_model_set_last_turn(const cb_last_turn_t *t)
 {

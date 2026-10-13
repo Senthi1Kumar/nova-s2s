@@ -5,7 +5,9 @@
 #include "nova/nova_fsm.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int fails;
 #define CHECK(c) do { if(!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); fails++; } } while(0)
@@ -173,6 +175,25 @@ static void set_request(void)
     CHECK(strstr(out, cl) != NULL);
 }
 
+/* Writes the cockpit used to drop: a tilted sunroof showed closed, and the passenger
+   fan and the sunshade never showed at all. */
+static void cabin_writes_shown(void)
+{
+    cb_model_t *m = cb_model();
+    feed("{\"type\":\"nova.vehicle\",\"seq\":100,\"snapshot\":{}}");   /* sequence starts here */
+    feed("{\"type\":\"nova.vehicle\",\"seq\":101,\"changed\":{"
+         "\"Vehicle.Cabin.Sunroof.Position\":-100,"
+         "\"Vehicle.Cabin.Sunroof.Shade.Position\":100,"
+         "\"Vehicle.Cabin.HVAC.Station.Row1.Driver.FanSpeed\":1,"
+         "\"Vehicle.Cabin.HVAC.Station.Row1.Passenger.FanSpeed\":6}}");
+    CHECK(iv(m->sunroof_pct) == -100);
+    CHECK(iv(m->sunshade_pct) == 100);
+    CHECK(iv(m->fan_level) == 6);   /* the stronger zone */
+    feed("{\"type\":\"nova.vehicle\",\"seq\":102,\"changed\":{"
+         "\"Vehicle.Cabin.HVAC.Station.Row1.Passenger.FanSpeed\":0}}");
+    CHECK(iv(m->fan_level) == 1);
+}
+
 static void position_label(void)
 {
     char t[80];
@@ -183,6 +204,20 @@ static void position_label(void)
     CHECK(!live_position_label(-1, 0, "sim", false, t, sizeof t) && strstr(t, "simulated drive"));
     CHECK(!live_position_label(1, 7, "gps", true, t, sizeof t));    /* a route plays: the drive owns the puck */
     CHECK(!strcmp(t, "Simulated drive \xC2\xB7 GPS 7 sats"));
+}
+
+static void timezone_follows_car(void)
+{
+    CHECK(live_set_timezone("America/Los_Angeles") && !strcmp(getenv("TZ"), "America/Los_Angeles"));
+    time_t noon_utc = 1791892800;   /* 2026-10-13 12:00 UTC */
+    struct tm tmv;
+    localtime_r(&noon_utc, &tmv);
+    CHECK(tmv.tm_hour == 5);   /* PDT */
+    CHECK(live_set_timezone("Asia/Kolkata"));
+    localtime_r(&noon_utc, &tmv);
+    CHECK(tmv.tm_hour == 17 && tmv.tm_min == 30);
+    CHECK(!live_set_timezone("") && !live_set_timezone("../etc/passwd") && !live_set_timezone("A B"));
+    CHECK(!strcmp(getenv("TZ"), "Asia/Kolkata"));   /* a bad name leaves the clock alone */
 }
 
 static void llm_settings(void)
@@ -220,7 +255,9 @@ int main(void)
     mic_frames();
     session_requests();
     set_request();
+    cabin_writes_shown();
     position_label();
+    timezone_follows_car();
     llm_settings();
     if(fails) return 1;
     printf("ok\n");

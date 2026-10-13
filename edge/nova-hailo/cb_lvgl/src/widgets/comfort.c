@@ -28,9 +28,10 @@ static int32_t s_fan_on;   /* bars lit; they pulse on the ambient clock */
 static void fan_obs(lv_observer_t *o, lv_subject_t *s)
 {
     LV_UNUSED(o);
-    int32_t n = lv_subject_get_int(s);
-    s_fan_on = LV_CLAMP(0, n, 5);
-    for(int32_t i = 0; i < 5; i++) lv_obj_set_style_bg_opa(s_fan[i], i < n ? LV_OPA_COVER : 40, 0);
+    int32_t n = LV_CLAMP(0, lv_subject_get_int(s), 6);
+    int32_t lit = (n * 5 + 5) / 6;   /* levels 0..6 on five bars; max lights all five */
+    s_fan_on = lit;
+    for(int32_t i = 0; i < 5; i++) lv_obj_set_style_bg_opa(s_fan[i], i < lit ? LV_OPA_COVER : 40, 0);
     lv_label_set_text_fmt(s_fan_lbl, "Fan %d", (int)n);
 }
 
@@ -237,10 +238,13 @@ static void tile_draw(lv_event_t *e)
         g_poly(&g, r3, 2, 2, cyan, o);
         break;
     }
-    case T_SUNROOF:
-        g_rect(&g, 3, 3, 20.0f * (float)lv_subject_get_int(m->sunroof_pct) / 100.0f, 16, 3, cyan, 153);
+    case T_SUNROOF: {
+        int32_t sp = lv_subject_get_int(m->sunroof_pct);
+        float open = sp < 0 ? 0.2f : (float)sp / 100.0f;   /* tilted: a sliver */
+        g_rect(&g, 3, 3, 20.0f * open, 16, 3, cyan, 153);
         g_frame(&g, 3, 3, 20, 16, 3, white, 51);
         break;
+    }
     case T_WIPERS: {
         g_arc(&g, 13, 20, 11, 2, 180, 360, white, 36);
         float s = (float)lv_trigo_sin((int16_t)s_blade) / LV_TRIGO_SIN_MAX;
@@ -465,7 +469,9 @@ static void tile_refresh(tile_t *t)
         break;
     case T_SUNROOF: {
         int32_t p = lv_subject_get_int(m->sunroof_pct);
-        lv_label_set_text(t->val, p >= 100 ? "Open" : p > 0 ? "Tilted" : "Closed");
+        const char *shade = lv_subject_get_int(m->sunshade_pct) >= 50 ? "shade closed" : "shade open";
+        if(p > 0 && p < 100) lv_label_set_text_fmt(t->val, "Open %d%% " DOT " %s", (int)p, shade);
+        else lv_label_set_text_fmt(t->val, "%s " DOT " %s", p >= 100 ? "Open" : p < 0 ? "Tilted" : "Closed", shade);
         break;
     }
     case T_WIPERS: {
@@ -578,6 +584,7 @@ static void tiles_grid(lv_obj_t *col)
     lv_subject_add_observer_obj(m->seat_heat, tile_obs, s_tiles[T_SEATS].box, &s_tiles[T_SEATS]);
     lv_subject_add_observer_obj(m->locked, tile_obs, s_tiles[T_DOORS].box, &s_tiles[T_DOORS]);
     lv_subject_add_observer_obj(m->sunroof_pct, tile_obs, s_tiles[T_SUNROOF].box, &s_tiles[T_SUNROOF]);
+    lv_subject_add_observer_obj(m->sunshade_pct, tile_obs, s_tiles[T_SUNROOF].box, &s_tiles[T_SUNROOF]);
     lv_subject_add_observer_obj(m->wiper_mode, tile_obs, s_tiles[T_WIPERS].box, &s_tiles[T_WIPERS]);
     lv_subject_add_observer_obj(m->headlights, tile_obs, s_tiles[T_LIGHTS].box, &s_tiles[T_LIGHTS]);
     lv_subject_add_observer_obj(m->defrost, tile_obs, s_tiles[T_DEFROST].box, &s_tiles[T_DEFROST]);

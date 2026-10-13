@@ -10,6 +10,5 @@ cd "$(dirname "$0")/.."
 source scripts/mapbox_env.sh
 cb_load_mapbox_key   # MAPBOX_API_KEY from nova-hailo's .env, for the map page
 export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 DISPLAY=:0
-export TZ=${TZ:-Asia/Kolkata}   # the Pi runs UTC; the strip clock shows local time
 if [ "$R" = gpu ]; then export SDL_VIDEODRIVER=x11; else export SDL_VIDEODRIVER=wayland; fi
 exec "./build-$R/cb_lvgl" "$@"

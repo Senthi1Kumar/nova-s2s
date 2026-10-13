@@ -11,6 +11,7 @@
 #include "map/map_view.h"
 #include "screens/cockpit.h"
 #include "widgets/ui_kit.h"
+#include <ctype.h>
 #include <errno.h>
 #include <math.h>
 #include <netdb.h>
@@ -57,6 +58,7 @@ static struct {
     double nav_eta, nav_dist;
     bool nav_active;
     int gps_fix, gps_sats;   /* -1 unknown */
+    int32_t fan[2];          /* driver, passenger */
     bool have_place;
     lv_timer_t *toast_timer;
 } L = { .user_gen = -1, .reply_gen = -1, .gps_fix = -1, .gps_sats = -1 };
@@ -209,8 +211,13 @@ static void apply(const char *p, const cbj_t *v, const char *source)
     else if(!strcmp(p, "Vehicle.Cabin.HVAC.Station.Row1.Passenger.Temperature")) {
         if(num(v, &d)) cb_model_set_temp(false, clampi(d * 10, 0, 400));
     }
-    else if(!strcmp(p, "Vehicle.Cabin.HVAC.Station.Row1.Driver.FanSpeed")) {
-        if(num(v, &d)) cb_model_set_int(m->fan_level, clampi(d, 0, 5));
+    else if(!strcmp(p, "Vehicle.Cabin.HVAC.Station.Row1.Driver.FanSpeed")
+            || !strcmp(p, "Vehicle.Cabin.HVAC.Station.Row1.Passenger.FanSpeed")) {
+        /* One fan readout: the stronger zone, so a passenger-only change still shows. */
+        if(num(v, &d)) {
+            L.fan[strstr(p, "Passenger") != NULL] = clampi(d, 0, 6);
+            cb_model_set_int(m->fan_level, L.fan[0] > L.fan[1] ? L.fan[0] : L.fan[1]);
+        }
     }
     else if(!strcmp(p, "Vehicle.Cabin.HVAC.IsAirConditioningActive")) {
         if(num(v, &d)) cb_model_set_int(m->ac_on, d != 0);
@@ -239,7 +246,10 @@ static void apply(const char *p, const cbj_t *v, const char *source)
         if(s) cb_model_set_int(m->drive_mode, mode_ix(s, modes, 3, 1));
     }
     else if(!strcmp(p, "Vehicle.Cabin.Sunroof.Position")) {
-        if(num(v, &d)) cb_model_set_sunroof(clampi(d, 0, 100));
+        if(num(v, &d)) cb_model_set_sunroof(clampi(d, -100, 100));   /* -100: tilted */
+    }
+    else if(!strcmp(p, "Vehicle.Cabin.Sunroof.Shade.Position")) {
+        if(num(v, &d)) cb_model_set_int(m->sunshade_pct, clampi(d, 0, 100));
     }
     else if(!strcmp(p, "Vehicle.Cabin.Door.Row1.DriverSide.IsLocked")) {
         if(num(v, &d)) cb_model_set_int(m->locked, d != 0);
@@ -291,6 +301,9 @@ static void apply(const char *p, const cbj_t *v, const char *source)
             L.have_place = true;
         }
     }
+    else if(!strcmp(p, "Vehicle.Private.Nova.Location.TimeZone")) {
+        if(s) live_set_timezone(s);
+    }
     else if(!strcmp(p, "Vehicle.Private.Nova.Location.GpsFix")) {
         if(num(v, &d)) L.gps_fix = d != 0, L.pos_dirty = true;
     }
@@ -317,6 +330,18 @@ static void flush_position(void)
         snprintf(t, sizeof t, "%.4f, %.4f", L.lat, L.lon);
         lv_label_set_text(c->place, t);
     }
+}
+
+bool live_set_timezone(const char *zone)
+{
+    if(!zone || !*zone || strlen(zone) > 64 || zone[0] == '/' || strstr(zone, "..")) return false;
+    for(const char *c = zone; *c; c++)
+        if(!isalnum((unsigned char)*c) && !strchr("/_+-", *c)) return false;
+    const char *now = getenv("TZ");
+    if(now && !strcmp(now, zone)) return true;
+    setenv("TZ", zone, 1);
+    tzset();
+    return true;
 }
 
 bool live_position_label(int fix, int sats, const char *source, bool driving, char *out, size_t cap)

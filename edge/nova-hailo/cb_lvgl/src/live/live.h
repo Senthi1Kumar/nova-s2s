@@ -18,6 +18,9 @@ void live_temp_step(bool driver, int32_t delta_dc);                   /* dock -/
 /* Map chip text: GpsFix decides when the stream has it (-1 = unknown), else the snapshot's position source;
    while a route plays the simulated drive owns the position even under a fix. True when the puck is GPS. */
 bool live_position_label(int gps_fix, int sats, const char *source, bool driving, char *out, size_t cap);
+/* The car's IANA zone (Location.TimeZone: the GPS fix's, else the simulated drive's) becomes the process TZ, so
+   every clock follows the car. False, and TZ unchanged, for an empty or malformed name. */
+bool live_set_timezone(const char *zone);
 
 /* Nova's language model, as GET/POST /v1/settings and the nova.settings observe frame describe it. */
 #define LIVE_LLM_PROVIDERS 4

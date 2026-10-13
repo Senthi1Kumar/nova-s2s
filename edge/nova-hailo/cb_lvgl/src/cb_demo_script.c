@@ -123,7 +123,7 @@ void cb_demo_apply_to_model(int apply_id)
         case APPLY_RESET:
             cb_model_set_temp(true, 200);
             for(int w = 0; w < CB_WIN_COUNT; w++) cb_model_set_window((cb_window_t)w, 0);
-            cb_model_set_sunroof(15);
+            cb_model_set_sunroof(-100);
             break;
         default:
             break;

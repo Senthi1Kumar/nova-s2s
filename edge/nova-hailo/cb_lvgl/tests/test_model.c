@@ -11,7 +11,7 @@ static void count_cb(lv_observer_t *o, lv_subject_t *s) { LV_UNUSED(o); LV_UNUSE
 static void initial_values(void) {
     CHECK_EQ(GET(speed_kph), 62); CHECK_EQ(GET(gear), CB_GEAR_D);
     CHECK_EQ(GET(soc_pct), 68); CHECK_EQ(GET(range_km), 210);
-    CHECK_EQ(GET(win_pct[CB_WIN_RL]), 10); CHECK_EQ(GET(sunroof_pct), 15);
+    CHECK_EQ(GET(win_pct[CB_WIN_RL]), 10); CHECK_EQ(GET(sunroof_pct), -100);
     CHECK_EQ(GET(driver_temp_dc), 200); CHECK_EQ(GET(media_playing), 1);
     const cb_last_turn_t *t = lv_subject_get_pointer(cb_model()->last_turn);
     CHECK(t != NULL);
@@ -27,6 +27,7 @@ static void clamps(void) {
     cb_model_set_temp(true, 400);  CHECK_EQ(GET(driver_temp_dc), 300);
     cb_model_set_temp(false, 100); CHECK_EQ(GET(passenger_temp_dc), 160);
     cb_model_set_sunroof(101); CHECK_EQ(GET(sunroof_pct), 100);
+    cb_model_set_sunroof(-101); CHECK_EQ(GET(sunroof_pct), -100);   /* tilted */
     cb_model_set_speed(62);
 }
 static void notifies_once_per_change(void) {
