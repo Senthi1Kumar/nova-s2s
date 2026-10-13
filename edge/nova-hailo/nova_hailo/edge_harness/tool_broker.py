@@ -28,7 +28,7 @@ from nova_hailo.edge_harness.router import (
     _unavailable_cap_speak,
 )
 from nova_hailo.edge_harness.types import Intent, RoutedIntent, ToolResult
-from nova_hailo.local_clock import speak_local_time
+from nova_hailo.local_clock import speak_local_time, timezone_name
 from nova_hailo.tools.search_mcp import deep_research as mcp_deep_research
 from nova_hailo.tools.search_mcp import research_status as mcp_research_status
 from nova_hailo.tools.search_mcp import web_search as mcp_web_search
@@ -156,7 +156,7 @@ class ToolBroker:
             return _ok(name, speak) if speak else _unavailable(name, "no_smalltalk_match")
         if intent is Intent.GET_DATETIME:
             speak = speak_local_time()
-            return _ok(name, speak, result={"timezone": "Asia/Kolkata"})
+            return _ok(name, speak, result={"timezone": timezone_name()})
         if intent is Intent.CAPABILITY_UNAVAILABLE:
             speak = str(slots.get("speak") or "") or _unavailable_cap_speak(query, self.profile.enabled)
             return _ok(name, speak) if speak else _unavailable(name, "no_capability_match")

@@ -112,15 +112,30 @@ def _fold_echo_text(s: str) -> str:
     return " ".join(t.split())
 
 
+# Share of the transcript found, in order, inside Nova's line. A real echo is a
+# garbled stretch of that line (0.8 and up); a follow-up that only reuses its
+# words ("switch the drive mode to sport" after "Switch to sport mode?") stays
+# under 0.6.
+ECHO_COVERAGE = 0.75
+
+
+def _echo_coverage(user: str, prev: str) -> float:
+    if not user:
+        return 0.0
+    blocks = SequenceMatcher(None, user, prev, autojunk=False).get_matching_blocks()
+    return sum(b.size for b in blocks if b.size >= 3) / len(user)
+
+
 def _transcript_is_echo(user: str, last_assistant: str) -> bool:
-    """True when ASR likely captured Nova's own last speak-back."""
+    """True when ASR likely captured Nova's own last speak-back.
+
+    Only meaningful for speech that began while Nova was audible or just after
+    (the caller's echo_suspect); later speech is the user, whatever it says."""
     u = (user or "").strip().lower()
     prev = (last_assistant or "").strip().lower()
     if not prev or len(u) < 4:
         return False
     if u in prev or prev[:24] in u:
-        return True
-    if SequenceMatcher(None, u, prev).ratio() >= 0.50:
         return True
     pw = {w for w in prev.replace("'", "").split() if len(w) > 2}
     uw = {w for w in u.replace("'", "").split() if len(w) > 2}
@@ -138,9 +153,7 @@ def _transcript_is_echo(user: str, last_assistant: str) -> bool:
             return True
     uf = _fold_echo_text(u)
     pf = _fold_echo_text(prev)
-    if uf and pf and SequenceMatcher(None, uf, pf).ratio() >= 0.55:
-        return True
-    return False
+    return bool(uf and pf and _echo_coverage(uf, pf) >= ECHO_COVERAGE)
 
 
 def should_interrupt_on_user_speech(
@@ -240,6 +253,9 @@ class RealtimeSession:
     _last_barge_mono = 0.0
     _utterance_started_mono: float | None = None
     _last_user_turn: tuple[str, float] | None = None
+    # What Nova is (or was last) audibly saying: "answer" or "guidance". Route
+    # prompts do not close the mic, and the user can talk over them.
+    _audible_kind = "answer"
 
     def __init__(
         self,
@@ -345,7 +361,9 @@ class RealtimeSession:
         self.echo_max_ms = int(cfgv.get("voice", "echo_max_ms", default=12000) or 12000)
         # Energy gate knobs (audio_gate.accept_utterance); defaults match module constants.
         self.gate_min_rms = float(
-            cfgv.get("voice", "gate_min_rms", default=DEFAULT_MIN_RMS) or DEFAULT_MIN_RMS
+            os.environ.get("NOVA_HAILO_GATE_MIN_RMS")
+            or cfgv.get("voice", "gate_min_rms", default=DEFAULT_MIN_RMS)
+            or DEFAULT_MIN_RMS
         )
         self.gate_min_peak = float(
             cfgv.get("voice", "gate_min_peak", default=DEFAULT_MIN_PEAK) or DEFAULT_MIN_PEAK
@@ -672,6 +690,7 @@ class RealtimeSession:
             self._echo_until = min(
                 max(self._echo_until, now_m) + dur, now_m + self.echo_max_ms / 1000.0
             )
+            self._audible_kind = "answer"
             self._send_audio(chunk, sample_rate, my_gen)
 
         def on_clause(text: str) -> None:
@@ -767,8 +786,10 @@ class RealtimeSession:
         line = take()
         if not line:
             return False
+        print(f"[guidance] {line}", flush=True)
         self.pipeline.begin_turn()
         my_gen = self.pipeline.gen_guard.generation_id
+        self._guidance_gen = my_gen
 
         def on_pcm(chunk: np.ndarray, sample_rate: int) -> None:
             if not self.pipeline.gen_guard.is_live(my_gen):
@@ -778,6 +799,7 @@ class RealtimeSession:
             self._echo_until = min(
                 max(self._echo_until, now_m) + dur, now_m + self.echo_max_ms / 1000.0
             )
+            self._audible_kind = "guidance"
             self._send_audio(chunk, sample_rate, my_gen)
 
         def on_clause(text: str) -> None:
@@ -811,7 +833,9 @@ class RealtimeSession:
                 auth_decision="n/a",
                 tool_name="navigation",
                 record_session=False,
-                add_history=True,
+                # A route prompt is not conversation: in history it pushed real
+                # turns out of the window and became the echo filter's reference.
+                add_history=False,
             )
             if not self.pipeline.gen_guard.is_live(my_gen):
                 return False
@@ -1293,7 +1317,11 @@ class RealtimeSession:
             self._echo_hold_started = time.monotonic()
         if not (speaking or in_echo_window):
             self._echo_hold_started = 0.0
-        gated = (speaking or in_echo_window) and not self._barge_allowed()
+        gated = (
+            (speaking or in_echo_window)
+            and not self._barge_allowed()
+            and self._audible_kind != "guidance"
+        )
         if (
             gated
             and echo_held_s > echo_cap
@@ -1469,6 +1497,23 @@ class RealtimeSession:
         if guard is None:
             guard = self.echo_guard = EchoGuard()
         return guard
+
+    def _stop_guidance(self) -> None:
+        """A real turn ends a route prompt still playing (begin_turn already
+        stopped its synthesis; this stops what the client has buffered)."""
+        if self._audible_kind != "guidance":
+            return
+        if self._client_playing or time.monotonic() < float(getattr(self, "_echo_until", 0.0) or 0.0):
+            self._schedule_send(
+                {
+                    "type": "playback.cancel",
+                    "generation_id": getattr(self, "_guidance_gen", 0),
+                    "reason": "user_turn",
+                }
+            )
+        self._client_playing = False
+        self._echo_until = 0.0
+        self._audible_kind = "answer"
 
     def _confirmation_pending(self) -> bool:
         vehicle = getattr(getattr(self.pipeline, "oem_gateway", None), "vehicle", None)
@@ -1739,8 +1784,10 @@ class RealtimeSession:
         reason: str,
         metrics_extra: dict | None = None,
         echo_suspect: bool = False,
+        silent: bool = False,
     ) -> None:
-        """Speak a fixed fallback when gate/STT fails — never silent, never LLM.
+        """Speak a fixed fallback when gate/STT fails — never an LLM. Silent for an
+        echo suspect, within the cooldown, or when the caller says so (low energy).
 
         Callers send ``conversation.item.input_audio_transcription.completed``
         with an empty transcript first. Cooldown within FAIL_CLOSED_COOLDOWN_S
@@ -1750,10 +1797,12 @@ class RealtimeSession:
         now_m = time.monotonic()
         # Never for a suspect: the line itself echoes back and loops. Never twice
         # within the cooldown either.
-        on_cooldown = echo_suspect or not should_speak_fail_closed(
+        on_cooldown = silent or echo_suspect or not should_speak_fail_closed(
             self._last_fail_closed_mono, now_m, self.fail_closed_cooldown_s
         )
-        silent_reason = "echo_suspect" if echo_suspect else "fail_closed_cooldown"
+        silent_reason = (
+            "echo_suspect" if echo_suspect else "low_energy" if silent else "fail_closed_cooldown"
+        )
 
         metrics: dict[str, Any] = dict(metrics_extra or {})
         notes = list(metrics.get("notes") or [])
@@ -1815,6 +1864,7 @@ class RealtimeSession:
                 max(self._echo_until, now_echo) + dur,
                 now_echo + self.echo_max_ms / 1000.0,
             )
+            self._audible_kind = "answer"
             self._send_audio(chunk, sample_rate, generation_id)
 
         def on_clause(text: str):
@@ -2033,11 +2083,14 @@ class RealtimeSession:
                     "generation_id": generation_id,
                 }
             )
+            # Too quiet to transcribe is not worth a spoken "I didn't catch
+            # that": the line closes the mic again and the next try is lost too.
             self._speak_fail_closed(
                 generation_id,
                 reason=str(reason),
                 metrics_extra={"reason": reason, **st},
                 echo_suspect=echo_suspect,
+                silent=str(reason).startswith(("low_rms", "low_peak", "low_speech_frac")),
             )
             return
 
@@ -2155,8 +2208,15 @@ class RealtimeSession:
         # "Switch it." answering "Switch to eco mode?" shares the question's words;
         # with a question pending, a yes or no is an answer, not an echo.
         answering = self._confirmation_pending() and parse_confirmation(transcript) is not None
-        if not answering and (guard.is_echo(transcript)
-                              or _transcript_is_echo(transcript, last_speak)):
+        # The last answer is only a suspect reference for speech that began
+        # while Nova was audible or just after, and never while a route prompt
+        # was what played; the word-pair guard covers every spoken clause.
+        text_echo = (
+            echo_suspect
+            and self._audible_kind != "guidance"
+            and _transcript_is_echo(transcript, last_speak)
+        )
+        if not answering and (guard.is_echo(transcript) or text_echo):
             print(f"[asr] skip TTS-echo transcript: {transcript!r}", flush=True)
             self._skip_turn(generation_id, "tts_echo")
             return
@@ -2167,6 +2227,7 @@ class RealtimeSession:
             self._skip_turn(generation_id, "duplicate")
             return
 
+        self._stop_guidance()
         self.fsm.set_thinking(generation_id)
 
         def on_pcm(chunk: np.ndarray, sample_rate: int):
@@ -2185,6 +2246,7 @@ class RealtimeSession:
             self._echo_until = min(
                 max(self._echo_until, now_m) + dur, now_m + self.echo_max_ms / 1000.0
             )
+            self._audible_kind = "answer"
             self._send_audio(chunk, sample_rate, generation_id)
 
         def on_clause(text: str):

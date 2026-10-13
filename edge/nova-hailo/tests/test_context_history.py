@@ -106,7 +106,7 @@ def test_state_line_is_not_in_the_cacheable_prefix() -> None:
     assert messages[0]["role"] == "system"
     assert "September" not in messages[0]["content"]
     user = " ".join(m["content"] for m in messages if m["role"] == "user")
-    assert "IST" in user
+    assert "PDT" in user   # the zone of the simulated drive
     assert "10:06" in user
 
 

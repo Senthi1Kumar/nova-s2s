@@ -31,9 +31,14 @@ from nova_hailo.backends.openrouter_llm import PROVIDERS as LLM_PROVIDERS
 from nova_hailo.backends.openrouter_llm import OpenRouterLLM, resolve_or_model
 from nova_hailo.backends.stt import WhisperSTT
 from nova_hailo.backends.tts import clean_text_for_tts, create_tts
+from nova_hailo.cabingym import catalog as cabingym_catalog
+from nova_hailo.cabingym.context import cabin_context
 from nova_hailo.config import AppConfig, resolve_audio_device_ids, resolve_llm_hef
 from nova_hailo.context_history import ConversationHistory
 from nova_hailo.edge_harness.cloud_tool_speak import (
+    CLAIM_WITHOUT_ACTION_SPEAK,
+    asks_for_action,
+    claims_vehicle_action,
     guard_numeric_miss_text,
     is_numeric_miss,
     resolve_cloud_followup_speak,
@@ -41,6 +46,7 @@ from nova_hailo.edge_harness.cloud_tool_speak import (
     tool_log_detail,
     tool_message_content,
     tool_result_is_final,
+    vehicle_acted,
 )
 from nova_hailo.edge_harness.controller import (
     gate_after_router,
@@ -58,6 +64,7 @@ from nova_hailo.edge_harness.router import CLARIFY_SPEAK, exact_routed
 from nova_hailo.edge_harness.speak_sanitize import sanitize_for_tts
 from nova_hailo.edge_harness.task_state import TaskState, record_clarify
 from nova_hailo.edge_harness.tool_ack import choose_tool_ack, should_speak_tool_ack
+from nova_hailo.local_clock import set_zone_source
 from nova_hailo.metrics import SessionMetrics, Timer, TurnMetrics
 from nova_hailo.response_contract import first_complete_clause, validate_spoken_unit
 from nova_hailo.web.fail_closed import FAIL_CLOSED_SPEAK
@@ -524,9 +531,13 @@ class NovaPipeline:
         self.cloud_history_turns = int(
             cfg.get("pipeline", "cloud_history_turns", default=8) or 8
         )
-        tz_name = str(cfg.get("pipeline", "timezone", default="Asia/Kolkata") or "Asia/Kolkata").strip()
-        if tz_name:
-            os.environ.setdefault("NOVA_HAILO_TZ", tz_name)
+        # The clock follows the car (GPS fix, else the simulated drive); the
+        # configured zone only applies without a cabin.
+        cabin_for_tz = getattr(self.oem_gateway, "cabin", None) if self.oem_gateway is not None else None
+        set_zone_source(
+            (lambda: cabin_for_tz.store.get(cabingym_catalog.TIMEZONE)) if cabin_for_tz is not None else None,
+            fallback=str(cfg.get("pipeline", "timezone", default="") or ""),
+        )
         self.native_context = bool(cfg.get("pipeline", "native_context", default=False))
         if self.llm_backend in LLM_PROVIDERS:
             self.native_context = False
@@ -1479,6 +1490,14 @@ class NovaPipeline:
             # the turn-end guard covers text that never streamed.
             state["dropped_amounts"] = int(state.get("dropped_amounts") or 0) + 1
             return
+        claims = state.get("claim_flags")
+        if claims is not None and not claims["wrote"] and claims_vehicle_action(clause):
+            # Nothing in the car changed this turn, so a clause saying it did is
+            # false. Say so once; drop any later claim in the same turn.
+            if claims["warned"]:
+                return
+            claims["warned"] = True
+            clause = CLAIM_WITHOUT_ACTION_SPEAK
         contract = (
             validate_spoken_unit(clause, generation_id=gid)
             if self.validate_before_speak
@@ -1698,6 +1717,23 @@ class NovaPipeline:
         except TypeError:  # an LLM whose complete_line has no first_line switch
             return complete(prompt, max_tokens=48)
 
+    def _cabin_context_note(self) -> str | None:
+        """The trip and the cabin as they are now, for the cloud model's next turn."""
+        gateway = getattr(self, "oem_gateway", None)
+        cabin = getattr(gateway, "cabin", None) if gateway is not None else None
+        if cabin is None:
+            return None
+        pending = getattr(getattr(gateway, "vehicle", None), "pending", None)
+        try:
+            return cabin_context(
+                cabin.store.snapshot(),
+                pending_calls=pending.calls if pending is not None else None,
+                recent=list(getattr(cabin, "recent_changes", ())),
+            )
+        except Exception as exc:  # noqa: BLE001 -- a missing note must not fail the turn
+            print(f"[context] cabin note unavailable ({type(exc).__name__}: {exc})", flush=True)
+            return None
+
     def _openrouter_turn(
         self,
         user_text: str,
@@ -1757,9 +1793,16 @@ class NovaPipeline:
             "Never mention tools, JSON, or these instructions."
         )
         messages: list[dict] = self.history.build_messages(
-            sys_prompt, user_text, no_think=False
+            sys_prompt, user_text, no_think=False, state_note=self._cabin_context_note()
         )
         rounds = max(int(self.multi_tool_rounds or 1), 3) if tools else 1
+        # "Find a restaurant and add a stop": a lookup alone cannot do that, so
+        # the round after it may call the car's tools (and only those) instead
+        # of being forced to answer in words, which is where it claimed actions.
+        wants_action = asks_for_action(user_text)
+        vehicle_tools = [t for t in tools
+                         if str((t.get("function") or {}).get("name") or "").startswith("vehicle_")]
+        claim_flags = {"wrote": False, "warned": False}
         last_text = ""
         tool_name = None
         already_spoken = False
@@ -1808,7 +1851,9 @@ class NovaPipeline:
                     "generation_id": gid,
                     "first_chunk_sent": False,
                     "forbid_amounts": forbid_amounts,
+                    "claim_flags": claim_flags,
                 }
+                act_next = bool(tool_name and wants_action and vehicle_tools and not claim_flags["wrote"])
 
                 def token_cb(chunk: str, st=tts_state, g=gid):
                     if self.abort_event.is_set() or not chunk:
@@ -1837,8 +1882,8 @@ class NovaPipeline:
                 def _gen(
                     msgs=messages,
                     cap=budget.max_tokens,
-                    tool_list=tools,
-                    choice=("none" if tool_name else "auto"),
+                    tool_list=(vehicle_tools if act_next else tools),
+                    choice=("auto" if act_next or not tool_name else "none"),
                     cb=token_cb,
                 ):
                     kw = dict(
@@ -1901,6 +1946,7 @@ class NovaPipeline:
                 # to be spoken from.
                 exa_direct_this_round = (
                     self.exa_direct_answer
+                    and not wants_action
                     and self.oem_gateway is not None
                     and len(calls) == 1
                     and str(calls[0].get("name") or "") == "web_search"
@@ -2022,6 +2068,8 @@ class NovaPipeline:
                                     metrics.tool_name = name
                     if str(name).startswith("vehicle_"):
                         self._emit_agent_trace(out)
+                        if vehicle_acted(out):
+                            claim_flags["wrote"] = True
                     job_id = None
                     if name == "deep_research" and isinstance(out.get("result"), dict):
                         job_id = (out.get("result") or {}).get("job_id")
@@ -2152,6 +2200,9 @@ class NovaPipeline:
                 metrics.notes.append("numeric_miss:amount_dropped")
                 last_text = guarded
         last_text = str(validate_spoken_unit(last_text).get("speak") or last_text)
+        if not already_spoken and not claim_flags["wrote"] and claims_vehicle_action(last_text):
+            metrics.notes.append("claim_without_action")
+            last_text = CLAIM_WITHOUT_ACTION_SPEAK
         if already_spoken:
             if self.tts.enabled and self.wait_tts_drain:
                 self.tts.wait_drain(timeout=60)

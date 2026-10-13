@@ -248,9 +248,10 @@ class NovaAgent(Agent):
                 auth_decision="n/a",
                 tool_name="navigation",
                 record_session=False,
-                add_history=True,
+                add_history=False,  # a route prompt is not conversation
             )
 
+        print(f"[guidance] {line}", flush=True)
         self._start_speech(speak, label="nav")
         return True
 

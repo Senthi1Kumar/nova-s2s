@@ -89,7 +89,7 @@ voice:
   # Hold STT commit across a short pause so mid-sentence cuts can reopen Nemo.
   reopen_ms: 300
   # Utterance energy gate (nova_hailo.audio_gate.accept_utterance)
-  gate_min_rms: 0.016
+  gate_min_rms: 0.010
   gate_min_peak: 0.045
   gate_min_sec: 0.40
   gate_min_speech_frac: 0.15

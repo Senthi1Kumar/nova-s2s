@@ -13,8 +13,13 @@ import numpy as np
 # Web / noisy rooms: reject below this after DC removal (pre-boost).
 # Slightly looser than first pass — Silero owns turn boundaries; this is a
 # last-line filter against hush / HVAC that slipped past VAD.
-DEFAULT_MIN_RMS = 0.016
+DEFAULT_MIN_RMS = 0.010
 DEFAULT_MIN_PEAK = 0.045
+# A soft talker far from the mic averages under min_rms but still has clear
+# speech peaks over a good share of frames; HVAC and road hush do not.
+RESCUE_MIN_RMS = 0.008
+RESCUE_MIN_PEAK = 0.05
+RESCUE_MIN_SPEECH_FRAC = 0.12
 DEFAULT_MIN_SEC = 0.40
 DEFAULT_MAX_SEC = 8.0
 DEFAULT_MIN_SPEECH_FRAC = 0.15
@@ -45,6 +50,14 @@ def utterance_stats(audio: np.ndarray, sample_rate: int = 16000) -> dict[str, An
     }
 
 
+def _quiet_speech(st: dict[str, Any]) -> bool:
+    return (
+        st["rms"] >= RESCUE_MIN_RMS
+        and st["peak"] >= RESCUE_MIN_PEAK
+        and st["speech_frac"] >= RESCUE_MIN_SPEECH_FRAC
+    )
+
+
 def accept_utterance(
     audio: np.ndarray,
     *,
@@ -61,7 +74,7 @@ def accept_utterance(
         return False, f"too_short({st['sec']:.2f}s)", st
     if st["sec"] > max_sec and st["rms"] < min_rms * 1.5:
         return False, f"long_quiet({st['sec']:.1f}s,rms={st['rms']})", st
-    if st["rms"] < min_rms:
+    if st["rms"] < min_rms and not _quiet_speech(st):
         return False, f"low_rms({st['rms']})", st
     if st["peak"] < min_peak:
         return False, f"low_peak({st['peak']})", st

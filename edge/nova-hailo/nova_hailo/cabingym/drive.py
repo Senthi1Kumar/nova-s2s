@@ -426,6 +426,7 @@ class NavFeed:
         self._route = pts
         self._leg_ends_km = ends
         self._geometry = "straight" if "straight" in geometries else (geometries[0] if geometries else "")
+        self.cabin.route_points = list(pts)
         self.drive.follow(pts)
 
     def _ends_along(self, route: list[LatLon], stops: list[LatLon]) -> list[float]:
@@ -450,6 +451,7 @@ class NavFeed:
         self._geometry = plan.geometry
         # plan.remaining only reads the plan. SimDrive.step calls it under the drive lock.
         self.drive.remaining_fn = plan.remaining
+        self.cabin.route_points = list(self._route)
         self.drive.follow(self._route)
         secs, km = plan.remaining(0.0)
         self.store.set_targets({
@@ -460,6 +462,7 @@ class NavFeed:
     def _clear_route(self) -> None:
         self._key = None
         self._route = []
+        self.cabin.route_points = []
         self._geometry = ""
         self._stops = []
         self._leg_ends_km = []

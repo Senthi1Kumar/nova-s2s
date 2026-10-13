@@ -102,6 +102,29 @@ def _limit_kph(raw: Any) -> float | None:
     return speed
 
 
+# Lead before a maneuver that gives a driver time to act without a second,
+# closer prompt for the same turn.
+APPROACH_LEAD_M = 250.0
+
+
+def spoken_prompts(prompts: list[dict[str, Any]], step_m: float) -> list[tuple[float, str]]:
+    """At most two prompts per step: the one that opens it ("Drive north on Main
+    St") and the approach to its maneuver nearest APPROACH_LEAD_M. Mapbox sends
+    two or three countdowns per turn; each one spoken closed the mic again."""
+    items = [(float(p.get("distanceAlongGeometry") or 0.0), str(p.get("announcement") or ""))
+             for p in prompts]
+    items = [(a, t) for a, t in items if t]
+    if len(items) <= 1:
+        return items
+    items.sort(key=lambda it: -it[0])
+    keep: list[tuple[float, str]] = []
+    if step_m > 0 and items[0][0] >= 0.85 * step_m:
+        keep.append(items.pop(0))
+    if items:
+        keep.append(min(items, key=lambda it: abs(it[0] - APPROACH_LEAD_M)))
+    return keep
+
+
 def plan_from_mapbox(body: dict[str, Any]) -> RoutePlan:
     route = (body.get("routes") or [{}])[0]
     legs = list(route.get("legs") or [])
@@ -154,12 +177,11 @@ def plan_from_mapbox(body: dict[str, Any]) -> RoutePlan:
                 "start_km": step_m / 1000.0,
             })
             end_m = step_m + dist_m
-            for prompt in step.get("voiceInstructions") or []:
-                along = float(prompt.get("distanceAlongGeometry") or 0.0)
+            for along, text in spoken_prompts(step.get("voiceInstructions") or [], dist_m):
                 voice.append({
                     "at_km": (end_m - along) / 1000.0,
                     "until_km": end_m / 1000.0,
-                    "text": str(prompt.get("announcement") or ""),
+                    "text": text,
                 })
             step_m = end_m
     alternatives = [

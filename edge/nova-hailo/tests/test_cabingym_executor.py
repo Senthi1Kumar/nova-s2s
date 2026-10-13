@@ -142,3 +142,16 @@ def test_a_confirmation_waits_long_enough_for_the_question_to_be_heard_and_answe
     assert ex.pending is not None
     t[0] = 31.0
     assert ex.pending is None
+
+
+def test_one_side_ac_is_not_switched_for_everyone():
+    from nova_hailo.cabingym import catalog as cat
+    from nova_hailo.cabingym.executor import VehicleExecutor
+    from nova_hailo.cabingym.router_regex import route_vehicle_regex
+    from nova_hailo.cabingym.runtime import CabinEnv
+
+    cabin = CabinEnv()
+    cabin.store.set_targets({cat.AC: True})
+    out = VehicleExecutor(cabin).run(route_vehicle_regex("turn off the passenger side AC", cabin))
+    assert out["status"] == "clarify" and "whole cabin" in out["speak"]
+    assert cabin.store.get(cat.AC) is True

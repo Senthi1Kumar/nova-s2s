@@ -106,14 +106,14 @@ def test_route_current_time_is_host_clock_not_llm():
     assert meeting is None or meeting.intent is not Intent.GET_DATETIME
 
     now = datetime(2026, 9, 15, 22, 39, tzinfo=ZoneInfo("Asia/Kolkata"))
-    speak = speak_local_time(now=now)
+    speak = speak_local_time(now=now, tz_name="Asia/Kolkata")
     assert "10:39 PM" in speak
     assert "IST" in speak
     broker = ToolBroker(profile)
     out = broker.execute(route("what time is it", profile))
     assert out["ok"] is True
     assert out["name"] == "get_datetime"
-    assert "IST" in out["speak"]
+    assert "Pacific time" in out["speak"]   # the simulated drive starts in Palo Alto
 
 
 def test_capability_profile_none_defaults_to_oem_readonly():

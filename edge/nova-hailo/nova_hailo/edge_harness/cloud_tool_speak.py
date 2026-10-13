@@ -37,6 +37,49 @@ _AMOUNT_RE = re.compile(
 )
 
 
+# A spoken claim that the car or the route changed. Only a vehicle tool that
+# wrote this turn may say it; after a web search alone the model narrated
+# "I've added a stop at Don Giovanni" and the cockpit showed nothing.
+_CLAIM_RE = re.compile(
+    r"\b(?:i(?:'ve|\s+have)|i\s+just|i'll|i\s+will|i'm)\s+(?:just\s+|now\s+|gone\s+ahead\s+and\s+)?"
+    r"(?:added|add|set|turned|turn|switched|switch|opened|open|closed|close|started|start|changed|"
+    r"adjusted|increased|decreased|lowered|raised|locked|unlocked|rerouted|routed|navigating|"
+    r"updated|dimmed|brightened|cancell?ed|stopped)\b"
+    r"|\b(?:added|adding)\s+(?:a\s+|the\s+|your\s+)?stop\b"
+    r"|\b(?:now\s+)?(?:navigating|heading|routing)\s+(?:you\s+)?to\b"
+    r"|\bis\s+now\s+(?:on|off|set|open|closed|at)\b",
+    re.I,
+)
+CLAIM_WITHOUT_ACTION_SPEAK = "I haven't changed anything in the car yet."
+
+# Asked to change something, as opposed to asked about something.
+_ACTION_ASK_RE = re.compile(
+    r"\b(add|set|turn|switch|open|close|start|change|adjust|increase|decrease|lower|raise|"
+    r"lock|unlock|navigate|take\s+me|drive\s+(?:me\s+)?to|go\s+to|stop\s+at|reroute|"
+    r"cancel|dim|brighten|play|call)\b",
+    re.I,
+)
+
+
+def claims_vehicle_action(text: str) -> bool:
+    """True when a spoken line says the car or the route was changed."""
+    return bool(_CLAIM_RE.search(text or ""))
+
+
+def asks_for_action(text: str) -> bool:
+    """True when the driver asked for a change ("find X and add a stop")."""
+    return bool(_ACTION_ASK_RE.search(text or ""))
+
+
+def vehicle_acted(out: dict[str, Any] | None) -> bool:
+    """True when a vehicle tool carried the request out (a change, or an honest
+    no-op such as a fan already at that speed); its own line may then claim it."""
+    if not isinstance(out, dict):
+        return False
+    result = out.get("result")
+    return out.get("status") == "success" or bool(isinstance(result, dict) and result.get("diff"))
+
+
 # Vehicle executor statuses that already are the line the driver should hear.
 # "declined" is the status string; "decline" is the route-outcome kind.
 _VEHICLE_FINAL_STATUS = frozenset({

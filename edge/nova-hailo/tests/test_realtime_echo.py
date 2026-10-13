@@ -167,3 +167,117 @@ def test_an_answer_to_a_pending_confirmation_is_never_taken_for_echo():
     s.pipeline.history.add("change the drive mode to eco", "Switch to eco mode while driving?")
     say(s, "Switch it.")
     assert s.pipeline.llm_calls == ["Switch it."]
+
+
+# ---- Follow-ups during a route -------------------------------------------------
+# Utterances a Pi session dropped while a route played: route prompts are not
+# conversation, a soft voice is not noise, and a request that only reuses Nova's
+# words is not her echo.
+
+import pytest  # noqa: E402
+
+from nova_hailo.audio_gate import _quiet_speech, accept_utterance  # noqa: E402
+from nova_hailo.web.realtime_session import _transcript_is_echo  # noqa: E402
+
+GUIDANCE = "In 300 metres, turn right onto Castro Street."
+
+
+@pytest.mark.parametrize(("user", "nova"), [
+    ("Yes, switch the dry mode to sport mode.", "Switch to sport mode while driving?"),
+    ("Can you down the ambient light brightness to thirty percent.", "Ambient light set to purple."),
+    ("Hey, decrease the ambient light percent to thirty.", "Ambient light set to purple."),
+])
+def test_a_request_that_reuses_the_last_answers_words_is_not_echo(user, nova):
+    assert _transcript_is_echo(user, nova) is False
+
+
+@pytest.mark.parametrize("st", [
+    {"sec": 4.48, "rms": 0.01412, "peak": 0.0974, "speech_frac": 0.443},
+    {"sec": 7.728, "rms": 0.01462, "peak": 0.13087, "speech_frac": 0.401},
+    {"sec": 6.144, "rms": 0.01521, "peak": 0.09153, "speech_frac": 0.441},
+    {"sec": 2.432, "rms": 0.01474, "peak": 0.09232, "speech_frac": 0.358},
+    {"sec": 1.856, "rms": 0.01403, "peak": 0.09562, "speech_frac": 0.246},
+    {"sec": 1.792, "rms": 0.01355, "peak": 0.10008, "speech_frac": 0.22},
+    {"sec": 3.936, "rms": 0.01292, "peak": 0.11576, "speech_frac": 0.275},
+    {"sec": 4.08, "rms": 0.009, "peak": 0.05207, "speech_frac": 0.125},
+])
+def test_soft_speech_the_pi_rejected_now_counts_as_speech(st):
+    assert _quiet_speech(st)
+
+
+def test_quiet_noise_is_still_rejected_whatever_the_configured_floor():
+    noise = np.random.default_rng(0).standard_normal(16000).astype(np.float32) * 0.008
+    ok, reason, _ = accept_utterance(noise, min_rms=0.016)
+    assert not ok and "low_rms" in reason
+
+
+def test_soft_speech_passes_a_strict_configured_floor():
+    t = np.arange(32000, dtype=np.float32) / 16000.0
+    env = np.sin(2 * np.pi * 3 * t) * 0.5 + 0.5
+    # Voiced pulses: a speech-like crest (peak 0.1 over rms 0.014), as logged.
+    soft = (np.sin(2 * np.pi * 120 * t) ** 63 * env ** 2 * 0.1).astype(np.float32)
+    ok, reason, st = accept_utterance(soft, min_rms=0.016)
+    assert st["rms"] < 0.016 and ok, (reason, st)
+
+
+def _route_session():
+    s = _session()
+    s.echo_suspect_s = 1.5
+    p = s.pipeline
+    pending = [GUIDANCE]
+    p.nav_feed = SimpleNamespace(guidance_waiting=lambda: bool(pending),
+                                 take_guidance=lambda: pending.pop(0) if pending else None)
+    calls = []
+    plain = p._speak_tool_line
+
+    def speak(line, **kw):
+        calls.append(kw)
+        if p.on_audio_pcm is not None:
+            p.on_audio_pcm(np.zeros(1600, dtype=np.float32), 16000)
+        return plain(line, **kw)
+
+    p._speak_tool_line = speak
+    return s, calls
+
+
+def test_a_route_prompt_stays_out_of_history():
+    s, calls = _route_session()
+    s.pipeline.history.add("take me to Mountain View", "Starting the route to Mountain View.")
+    assert s._speak_nav_guidance() is True
+    assert calls[0]["add_history"] is False
+    assert s.pipeline.history._turns[-1].assistant == "Starting the route to Mountain View."
+    assert s._audible_kind == "guidance"
+
+
+def test_talking_over_a_route_prompt_is_a_turn_and_stops_the_prompt():
+    s, _ = _route_session()
+    s._speak_nav_guidance()
+    s._client_playing = True
+    say(s, "Turn right on Castro Street?", echo_suspect=True)
+    assert s.pipeline.llm_calls == ["Turn right on Castro Street?"]
+    cancels = [m for m in s._sent if m.get("type") == "playback.cancel"]
+    assert cancels and cancels[-1]["reason"] == "user_turn"
+    assert s._audible_kind == "answer"
+
+
+def test_the_prompt_heard_back_is_still_dropped():
+    s, _ = _route_session()
+    s._speak_nav_guidance()
+    say(s, "in 300 metres turn right onto castro street", echo_suspect=True)
+    assert s.pipeline.llm_calls == [] and skipped(s) == ["tts_echo"]
+
+
+def test_a_rephrase_well_after_the_answer_is_kept():
+    s = _session()
+    say(s, "set the temperature to 23")
+    # Not a suspect: spoken well after playback, so the last answer is no reference.
+    say(s, "driver side to 23 degrees and passenger to 21", echo_suspect=False)
+    assert len(s.pipeline.llm_calls) == 2
+
+
+def test_a_quiet_utterance_is_rejected_without_a_spoken_line():
+    s = _session()
+    s.gate_min_rms, s.gate_min_peak, s.gate_min_sec, s.gate_min_speech_frac = 0.016, 0.045, 0.4, 0.15
+    quiet = np.random.default_rng(1).standard_normal(16000).astype(np.float32) * 0.004
+    s._run_turn_blocking(quiet)
+    assert s.pipeline.spoken_lines == [] and skipped(s) == ["low_energy"]

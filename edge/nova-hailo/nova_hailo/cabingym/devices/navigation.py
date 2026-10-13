@@ -5,7 +5,8 @@ from typing import Any
 
 from nova_hailo.cabingym import catalog as c
 from nova_hailo.cabingym.devices.base import (
-    Api, ApiContext, ApiResult, clarify, device, done, fmt_minutes, p_enum, p_place,
+    Api, ApiContext, ApiResult, clarify, device, done, fmt_minutes, fmt_num, p_bool, p_enum,
+    p_place, p_value,
 )
 from nova_hailo.cabingym.nav import Place, haversine_km
 
@@ -69,18 +70,47 @@ def _eta(ctx: ApiContext, args: dict[str, Any]) -> ApiResult:
 
 
 def _find_nearby(ctx: ApiContext, args: dict[str, Any]) -> ApiResult:
+    """Places of a kind near the car, near a named place, or along the road ahead,
+    optionally within a distance or a driving time. Results become Nav.LastResults,
+    so "add the second one as a stop" works next."""
     cat = args["category"]
+    label = CATEGORY_LABEL[cat]
     here = _here(ctx)
-    results = ctx.nav.search(cat, here, category=cat)[:3]
+    along = bool(args.get("along_route"))
+    if along and len(ctx.route_ahead) < 2:
+        return clarify(f"You're not on a route. Want the nearest {label} instead?")
+    center = here
+    where = ""
+    if along:
+        where = " on your route"
+    elif args.get("near"):
+        center = Place.from_dict(args["near"])
+        where = f" near {center.name}"
+    within_km = args.get("within_km")
+    within_min = args.get("within_min")
+    limit = 8 if within_km or within_min else 3
+    found = ctx.nav.search(cat, center, category=cat, along_route=along,
+                           route=ctx.route_ahead if along else (), limit=limit)
+    if within_km:
+        found = [p for p in found if haversine_km(here, p) <= float(within_km)]
+    minutes: list[float | None] = []
+    if within_min and found:
+        minutes = ctx.nav.drive_minutes(here, found)
+        kept = [(p, m) for p, m in zip(found, minutes) if m is not None and m <= float(within_min)]
+        found, minutes = [p for p, _ in kept], [m for _, m in kept]
+    results = found[:3]
     if not results:
-        return done(f"I couldn't find a {CATEGORY_LABEL[cat]} nearby.", {c.NAV_RESULTS: ()})
+        limit_text = (f" within {fmt_num(float(within_min))} minutes" if within_min else
+                      f" within {fmt_num(float(within_km))} kilometres" if within_km else "")
+        return done(f"I couldn't find a {label}{where or ' nearby'}{limit_text}.", {c.NAV_RESULTS: ()})
     first = results[0]
-    return done(
-        f"The closest {CATEGORY_LABEL[cat]} is {first.name}, "
-        f"{haversine_km(here, first):.1f} kilometres away.",
-        {c.NAV_RESULTS: tuple(p.to_dict() for p in results)},
-        data=[p.to_dict() for p in results],
-    )
+    away = (f"about {fmt_minutes(minutes[0])} away" if minutes else
+            f"{haversine_km(here, first):.1f} kilometres away")
+    speak = f"The closest {label}{where} is {first.name}, {away}."
+    if len(results) > 1:
+        speak += " Also " + " and ".join(p.name for p in results[1:]) + "."
+    return done(speak, {c.NAV_RESULTS: tuple(p.to_dict() for p in results)},
+                data=[p.to_dict() for p in results])
 
 
 _NAV_WRITES = (c.NAV_ACTIVE, c.NAV_DEST, c.NAV_ETA, c.NAV_DIST, c.NAV_DEST_LAT, c.NAV_DEST_LON,
@@ -104,12 +134,21 @@ DEVICE = device(
             patterns=(r"\b(add\s+(a\s+)?(new\s+)?stop|stop\s+(off\s+)?at|(swing|pull)\s+by)\b",
                       r"\bpick\s+up\s+(?!(the\s+)?(call|phone)\b)\w+.*\bat\b",
                       r"\bdrop\s+(\w+\s+){0,2}off\b.*\bat\b|\bdrop\s+off\b.*\bat\b")),
-        Api("find_nearby", "find a nearby place such as a charger, gas, parking or coffee",
+        Api("find_nearby",
+            "find places such as a charger, gas, parking, coffee or a restaurant: near the car, "
+            "near a named town, or along the current route; optionally within a distance or a "
+            "driving time. Use this, not web search, to find a place to stop",
             _find_nearby,
-            params={"category": p_enum(CATEGORIES, desc="Kind of place", synonyms=CATEGORY_SYNONYMS)},
+            params={"category": p_enum(CATEGORIES, desc="Kind of place", synonyms=CATEGORY_SYNONYMS),
+                    "along_route": p_bool("Search along the current route (on the way)",
+                                          parser="along_route", default=False),
+                    "near": p_place("A town or place to search around instead of the car"),
+                    "within_km": p_value("within_km", "Only places within this many kilometres", 0.1, 300),
+                    "within_min": p_value("within_min", "Only places within this many minutes' drive",
+                                          1, 180)},
             required=("category",), writes=(c.NAV_RESULTS,), needs_live_nav=True,
             patterns=(r"^(?=.*\b(nearest|closest|nearby|near\s+(me|here|us)|around\s+here|"
-                      r"on\s+(the|my)\s+way|along\s+the\s+route)\b)(?=.*\b(charg\w*|gas|petrol|fuel|"
+                      r"on\s+(the|my|our)\s+way|along\s+the\s+route|within)\b)(?=.*\b(charg\w*|gas|petrol|fuel|"
                       r"parking|coffee|caf[eé]|restaurant|food|eat|restroom|bathroom|toilet)\b)",)),
         Api("navigate_to",
             "start navigation to a place; if speech misheard the name, pass the place "

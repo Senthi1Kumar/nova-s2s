@@ -124,3 +124,19 @@ def test_a_straight_plan_estimates_from_cruise_speed():
     assert plan.geometry == "straight" and plan.steps == [] and plan.congestion == ""
     assert plan.duration_s == pytest.approx(plan.distance_m / 1000 / 60 * 3600, rel=0.01)
     assert len(plan.leg_ends_km) == 2
+
+
+def test_one_approach_prompt_per_maneuver():
+    from nova_hailo.cabingym.directions import spoken_prompts
+
+    turn = [{"distanceAlongGeometry": 1600.0, "announcement": "In 1 mile, turn right onto Castro Street"},
+            {"distanceAlongGeometry": 300.0, "announcement": "In 300 metres, turn right onto Castro Street"},
+            {"distanceAlongGeometry": 40.0, "announcement": "Turn right onto Castro Street"}]
+    # The 1 mile prompt opens this 1.6 km step; one approach prompt follows it.
+    assert [t for _, t in spoken_prompts(turn, 1600.0)] == [
+        "In 1 mile, turn right onto Castro Street", "In 300 metres, turn right onto Castro Street"]
+    # On a long step the countdown is not the opener: only the approach is kept.
+    assert [t for _, t in spoken_prompts(turn, 5000.0)] == ["In 300 metres, turn right onto Castro Street"]
+    assert spoken_prompts([{"distanceAlongGeometry": 30.0, "announcement": "Turn left"}], 30.0) == [
+        (30.0, "Turn left")]
+    assert spoken_prompts([{"distanceAlongGeometry": 30.0, "announcement": ""}], 30.0) == []

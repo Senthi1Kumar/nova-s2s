@@ -84,6 +84,10 @@ class HistoryTurn:
     tool_summary: str | None = None
 
 
+EARLIER_KEEP = 4
+EARLIER_CHARS = 100
+
+
 class ConversationHistory:
     """Keep at most ``max_turns`` accepted user/assistant pairs."""
 
@@ -103,10 +107,14 @@ class ConversationHistory:
             self._turns = deque(maxlen=0)
         # Question whose reply was dropped as a refusal; replayed once.
         self._unanswered: str | None = None
+        # Requests from turns that left the window, folded into one line instead
+        # of being forgotten ("you asked for a stop in Mountain View").
+        self._earlier: deque[str] = deque(maxlen=EARLIER_KEEP)
 
     def clear(self) -> None:
         self._turns.clear()
         self._unanswered = None
+        self._earlier.clear()
 
     def add(
         self,
@@ -155,6 +163,8 @@ class ConversationHistory:
         ts = (tool_summary or "").strip()
         if ts and _norm(ts)[:120] in _norm(a):
             ts = ""
+        if self._turns.maxlen and len(self._turns) == self._turns.maxlen:
+            self._earlier.append(self._turns[0].user[:EARLIER_CHARS])
         self._turns.append(
             HistoryTurn(user=u[:240], assistant=a[:240], tool_summary=(ts or None))
         )
@@ -168,6 +178,7 @@ class ConversationHistory:
         tool_result_speak: str | None = None,
         no_think: bool = False,
         now: datetime | None = None,
+        state_note: str | None = None,
     ) -> list[dict]:
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         for turn in self._turns:
@@ -195,6 +206,12 @@ class ConversationHistory:
             if self._clock() - self._unanswered_at <= self.unanswered_ttl_s:
                 ut = f"(Earlier question you could not answer: {self._unanswered})\n{ut}"
             self._unanswered = None
+        if ut and self._earlier:
+            ut = "(Earlier in this drive the driver asked: " + "; ".join(self._earlier) + ")\n" + ut
+        if ut and state_note:
+            # The car and the trip as they are now, rebuilt every turn: current
+            # where history is stale, and never stored, so it cannot age out.
+            ut = f"(Car now: {state_note.strip()})\n{ut}"
         ut = f"(Right now it is {stamp}.)\n{ut}" if ut else ut
         if no_think and "/no_think" not in ut.lower():
             ut = ut + "\n/no_think"

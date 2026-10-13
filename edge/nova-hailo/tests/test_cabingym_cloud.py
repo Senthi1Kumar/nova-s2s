@@ -390,3 +390,29 @@ def test_a_supplied_place_that_search_misses_is_not_an_empty_destination():
     assert missed.speak == "I couldn't find Palo Alto Art Center."
     empty = cloud_call("vehicle_navigation", {"action": "navigate_to"}, cabin)
     assert empty.speak == "Where would you like to go?"
+
+
+def test_the_exact_landmark_beats_a_nearer_shop_named_after_it():
+    from nova_hailo.cabingym.nav import MapboxNav, Place
+
+    def fetch(path, params):
+        return {"features": [_point("Golden Gate Bridge Bike Rentals", -122.42, 37.80),
+                             _point("Golden Gate Bridge", -122.4783, 37.8199)]}
+
+    here = Place("here", 37.79, -122.40)
+    hits = MapboxNav("pk.secret", fetch=fetch).search("the Golden Gate Bridge", here)
+    assert [p.name for p in hits] == ["Golden Gate Bridge"]
+
+
+def test_a_name_with_its_town_is_scored_by_the_name():
+    from nova_hailo.cabingym.nav import MapboxNav, Place
+
+    queries = []
+
+    def fetch(path, params):
+        queries.append(params["q"])
+        return {"features": [_point("Dar", -121.98, 37.226), _point("Los Gatos", -121.97, 37.23)]}
+
+    hits = MapboxNav("pk.secret", fetch=fetch).search("Dar, Los Gatos", Place("here", 37.4419, -122.1430))
+    assert [p.name for p in hits] == ["Dar"]
+    assert queries[0] == "Dar, Los Gatos"     # searched whole, so the map knows which Dar

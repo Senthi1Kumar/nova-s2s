@@ -19,7 +19,10 @@ from typing import Any, Callable, Protocol
 logger = logging.getLogger(__name__)
 
 # Search Box text search returns coordinates in one call. Geocoding v6 has no POI type.
-_SEARCH_BASE = "https://api.mapbox.com/search/searchbox/v1"
+_API_BASE = "https://api.mapbox.com"
+_SEARCH_BASE = _API_BASE + "/search/searchbox/v1"
+_MATRIX_PATH = "/directions-matrix/v1/mapbox/driving-traffic"
+_MATRIX_MAX = 10   # coordinates per driving-traffic matrix request
 _FORWARD_TYPES = "poi,place,locality,address,street,neighborhood,city"
 # Canonical ids from Search Box /list/category. Not a list of destinations.
 _CATEGORY_IDS = {
@@ -71,14 +74,27 @@ class Route:
     stops: tuple[Place, ...]
 
 
+LatLon = tuple[float, float]
+
+
 class NavProvider(Protocol):
     is_live: bool
 
     def search(
-        self, query: str, near: Place, category: str | None = None, along_route: bool = False
+        self, query: str, near: Place, category: str | None = None, along_route: bool = False,
+        *, route: tuple[LatLon, ...] = (), limit: int | None = None,
     ) -> list[Place]: ...
 
     def route(self, origin: Place, stops: list[Place]) -> Route: ...
+
+    def drive_minutes(self, origin: Place, places: list[Place]) -> list[float | None]: ...
+
+
+# A place this far from the road ahead is not "on the way" (offline fixture only;
+# Mapbox measures the real detour with time_deviation).
+_ON_ROUTE_KM = 1.5
+# Minutes of detour Search Box allows for a place found along the route.
+ROUTE_DETOUR_MIN = 10
 
 
 def haversine_km(a: Place, b: Place) -> float:
@@ -120,10 +136,14 @@ class FixtureNav:
         self.speed_kmh = speed_kmh
 
     def search(
-        self, query: str, near: Place, category: str | None = None, along_route: bool = False
+        self, query: str, near: Place, category: str | None = None, along_route: bool = False,
+        *, route: tuple[LatLon, ...] = (), limit: int | None = None,
     ) -> list[Place]:
         if category:
             hits = [p for p in self.pois if p.category == category]
+            if route:
+                hits = [p for p in hits
+                        if min(haversine_km(p, Place("", a, b)) for a, b in route) <= _ON_ROUTE_KM]
             return sorted(hits, key=lambda p: haversine_km(near, p))
         words = _words(query) - _STOPWORDS
 
@@ -133,6 +153,9 @@ class FixtureNav:
         # The place named outright ("Blue Door Coffee") before the nearest of its kind.
         hits = [p for p in self.pois if matched(p)]
         return sorted(hits, key=lambda p: (-matched(p), haversine_km(near, p)))
+
+    def drive_minutes(self, origin: Place, places: list[Place]) -> list[float | None]:
+        return [round(haversine_km(origin, p) * _ROAD_FACTOR / self.speed_kmh * 60.0, 1) for p in places]
 
     def route(self, origin: Place, stops: list[Place]) -> Route:
         dist = 0.0
@@ -228,6 +251,20 @@ def _without_locality(query: str) -> str:
             break
         text = name
     return text
+
+
+def _name_part(query: str) -> str:
+    """The name to score results by: "Dar, Los Gatos" is the place "Dar" in Los Gatos.
+
+    Unlike the search form, a one-word name is split from its town here. Searching
+    keeps "Paris, Texas" whole; scoring the results by "Paris" finds the same city.
+    """
+    text = re.sub(r"\s+", " ", (query or "").strip())
+    match = re.match(r"^(?P<name>[^,]+?)\s*,\s*(?P<where>[^,]+)$", text)
+    if match is None:
+        return _without_locality(text)
+    name, where = match.group("name").strip(), match.group("where").strip()
+    return name if name and 1 <= len(where.split()) <= 4 else text
 
 
 def _query_forms(query: str) -> list[str]:
@@ -372,7 +409,10 @@ def _best_place(query: str, places: list[Place], near: Place, floor: float) -> P
         return None
     best = max(row[0] for row in scored)
     ties = [row for row in scored if row[0] >= best - _TIE_MARGIN]
-    ties.sort(key=lambda row: (row[1], -row[0]))
+    # The place with exactly the name said beats a nearer one that only starts
+    # with it: "Golden Gate Bridge", not "Golden Gate Bridge Bike Rentals".
+    said = _alnum(re.sub(r"^\s*(the|a|an)\s+", "", query or "", flags=re.I))
+    ties.sort(key=lambda row: (_alnum(row[2].name) != said, row[1], -row[0]))
     return ties[0][2]
 
 
@@ -409,11 +449,12 @@ class MapboxNav:
         self._fallback = FixtureNav()
 
     def search(
-        self, query: str, near: Place, category: str | None = None, along_route: bool = False
+        self, query: str, near: Place, category: str | None = None, along_route: bool = False,
+        *, route: tuple[LatLon, ...] = (), limit: int | None = None,
     ) -> list[Place]:
-        del along_route
+        del along_route  # the route itself says where to look
         if category:
-            return self._by_category(category, near)
+            return self._by_category(category, near, route=route, limit=limit)
         heard = (query or "").strip()
         if not heard:
             return []
@@ -459,19 +500,20 @@ class MapboxNav:
     def _ranked(self, query: str, near: Place) -> list[Place]:
         forms = _query_forms(query)
         primary = forms[0]
+        name = _name_part(query)
         # An exact wide hit is the place (a nearby town, or the name itself).
         wide = self._forward(primary, near, _bbox(near, _WIDE_KM))
-        exact = _best_place(primary, wide, near, _EXACT_SCORE)
+        exact = _best_place(name, wide, near, _EXACT_SCORE)
         if exact is not None:
             return [exact]
         tight = self._forward(primary, near, _bbox(near, _TIGHT_KM))
         # The shorter name stays inside the tight box. A far street must not outrank a local POI.
         extra = self._forward(forms[1], near, _bbox(near, _TIGHT_KM)) if len(forms) > 1 else []
-        hit = _best_place(primary, [*wide, *tight, *extra], near, _LOCAL_SCORE)
+        hit = _best_place(name, [*wide, *tight, *extra], near, _LOCAL_SCORE)
         if hit is not None:
             return [hit]
         far = self._forward(primary, near, None)
-        hit = _best_place(primary, far, near, _GLOBAL_SCORE)
+        hit = _best_place(name, far, near, _GLOBAL_SCORE)
         return [hit] if hit is not None else []
 
     def _local_exact(self, query: str, near: Place) -> list[Place]:
@@ -491,23 +533,54 @@ class MapboxNav:
             return []
         return [name for name in clean_place_corrections(raw) if _alnum(name) != _alnum(query)]
 
-    def _by_category(self, category: str, near: Place) -> list[Place]:
+    def _by_category(
+        self, category: str, near: Place, *, route: tuple[LatLon, ...] = (), limit: int | None = None,
+    ) -> list[Place]:
         canonical = _CATEGORY_IDS.get(category)
         if canonical:
-            payload = self._call(
-                f"/category/{canonical}",
-                {
-                    "proximity": f"{near.lon:.6f},{near.lat:.6f}",
-                    "limit": 25,
-                    "language": "en",
-                    "access_token": self._token,
-                },
-            )
+            params: dict[str, Any] = {
+                "proximity": f"{near.lon:.6f},{near.lat:.6f}",
+                "limit": 25,
+                "language": "en",
+                "access_token": self._token,
+            }
+            params.update(self._route_params(route))
+            payload = self._call(f"/category/{canonical}", params)
         else:
-            payload = self._call("/forward", self._forward_params(category, near, _bbox(near, _WIDE_KM), poi=True))
+            params = self._forward_params(category, near, None if route else _bbox(near, _WIDE_KM), poi=True)
+            params.update(self._route_params(route))
+            payload = self._call("/forward", params)
         places = _places_from(payload, category)
         places.sort(key=lambda place: haversine_km(near, place))
-        return places[: self._limit]
+        return places[: limit or self._limit]
+
+    @staticmethod
+    def _route_params(route: tuple[LatLon, ...]) -> dict[str, Any]:
+        """Search Box along a route: places within ROUTE_DETOUR_MIN of driving off it."""
+        if len(route) < 2:
+            return {}
+        from nova_hailo.cabingym.drive import encode_polyline
+
+        return {
+            "route": encode_polyline(list(route), 6),
+            "route_geometry": "polyline6",
+            "sar_type": "isochrone",
+            "time_deviation": ROUTE_DETOUR_MIN,
+        }
+
+    def drive_minutes(self, origin: Place, places: list[Place]) -> list[float | None]:
+        """Driving minutes with traffic from ``origin`` to each place (Matrix API, one call).
+        None for a place the matrix could not reach; straight-line estimates if the call fails."""
+        if not places:
+            return []
+        places = places[:_MATRIX_MAX - 1]
+        coords = ";".join(f"{p.lon:.6f},{p.lat:.6f}" for p in [origin, *places])
+        payload = self._call(f"{_MATRIX_PATH}/{coords}",
+                             {"sources": "0", "annotations": "duration", "access_token": self._token})
+        rows = payload.get("durations") if isinstance(payload, dict) else None
+        if not rows or not isinstance(rows[0], list) or len(rows[0]) != len(places) + 1:
+            return self._fallback.drive_minutes(origin, places)
+        return [None if d is None else round(float(d) / 60.0, 1) for d in rows[0][1:]]
 
     def _forward(self, query: str, near: Place, bbox: str | None) -> list[Place]:
         return _places_from(self._call("/forward", self._forward_params(query, near, bbox, poi=False)), None)
@@ -539,7 +612,8 @@ class MapboxNav:
             return self._fetch_fn(path, params)
         import httpx
 
-        response = httpx.get(_SEARCH_BASE + path, params=params, timeout=self._timeout)
+        base = _API_BASE if path.startswith(_MATRIX_PATH) else _SEARCH_BASE
+        response = httpx.get(base + path, params=params, timeout=self._timeout)
         response.raise_for_status()
         body = response.json()
         return body if isinstance(body, dict) else {}

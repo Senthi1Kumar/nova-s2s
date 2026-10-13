@@ -317,3 +317,39 @@ def split_clauses(text: str) -> list[str]:
     if tail.strip():
         parts.append(tail.strip())
     return parts
+
+
+_ALONG_ROUTE = re.compile(
+    r"\b(on\s+(the|our|my)\s+way|along\s+(the|our|my)\s+(route|way)|en\s+route|on\s+the\s+route|"
+    r"(up\s+)?ahead\s+of\s+us|on\s+our\s+route)\b", re.I)
+_LIMIT = r"(?:within|in|under|less\s+than|no\s+more\s+than|at\s+most)\s+"
+_KM_SPAN = re.compile(_LIMIT + r"(?P<n>[\w.\- ]+?)\s*(?P<u>km|kms|kilomet(?:er|re)s?|miles?|mi)\b", re.I)
+_MIN_SPAN = re.compile(
+    _LIMIT + r"(?P<n>[\w.\- ]+?)\s*(?P<u>min(?:ute)?s?|hours?|hrs?)\b"
+    r"|(?P<n2>[\w.\-]+)[\s-]*(?P<u2>min(?:ute)?s?)\s+(?:drive|away)\b", re.I)
+KM_PER_MILE = 1.609344
+
+
+def parse_along_route(text: str) -> bool | None:
+    """True for "on the way", "along the route"; None when not said (not False)."""
+    return True if _ALONG_ROUTE.search(text or "") else None
+
+
+def parse_within_km(text: str) -> dict[str, float] | None:
+    m = _KM_SPAN.search(text or "")
+    n = parse_number(m.group("n")) if m else None
+    if not n or n <= 0:
+        return None
+    km = n * KM_PER_MILE if m.group("u").lower().startswith("mi") else n
+    return {"within_km": round(km, 2)}
+
+
+def parse_within_min(text: str) -> dict[str, float] | None:
+    m = _MIN_SPAN.search(text or "")
+    if not m:
+        return None
+    n = parse_number(m.group("n") or m.group("n2") or "")
+    unit = (m.group("u") or m.group("u2") or "").lower()
+    if not n or n <= 0:
+        return None
+    return {"within_min": n * 60 if unit.startswith(("hour", "hr")) else n}

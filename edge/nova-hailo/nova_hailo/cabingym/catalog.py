@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from nova_hailo.cabingym.timezone import track_timezone
 from nova_hailo.cabingym.vss import Signal, VssStore
 
 C = "Vehicle.Cabin."
@@ -112,6 +113,7 @@ HEADING = "Vehicle.CurrentLocation.Heading"
 GPS_FIX = f"{P}Location.GpsFix"
 GPS_SATS = f"{P}Location.Satellites"
 PLACE = f"{P}Location.Place"
+TIMEZONE = f"{P}Location.TimeZone"
 SIM_AREA = "Palo Alto"
 ODOMETER = "Vehicle.TraveledDistance"
 BATTERY_V = "Vehicle.LowVoltageBattery.CurrentVoltage"
@@ -222,6 +224,7 @@ def _signals() -> tuple[Signal, ...]:
         _sen(GPS_FIX, "bool", False, scored=False, description="a real GPS has a fix"),
         _sen(GPS_SATS, "int", 0, min=0, max=64, scored=False),
         _sen(PLACE, "str", SIM_AREA, scored=False, description="area name for the position"),
+        _sen(TIMEZONE, "str", "America/Los_Angeles", scored=False, description="IANA zone of the position"),
         _sen(ODOMETER, "float", 12000.0, unit="km", min=0, max=2000000),
         _sen(BATTERY_V, "float", 12.6, unit="V", min=0, max=20),
         _sen(OUTSIDE_TEMP, "float", 18.0, unit="celsius", min=-50, max=60),
@@ -257,7 +260,7 @@ ALIASES: dict[str, str] = {
     "missed": MISSED, "last_dialed": LAST_DIALED, "speed": SPEED, "gear": GEAR,
     "range": RANGE, "soc": SOC, "fuel": FUEL, "rpm": RPM, "ect": ECT, "lat": LAT,
     "lon": LON, "heading": HEADING, "gps.fix": GPS_FIX, "gps.sats": GPS_SATS,
-    "place": PLACE, "odometer": ODOMETER, "battery_v": BATTERY_V,
+    "place": PLACE, "timezone": TIMEZONE, "odometer": ODOMETER, "battery_v": BATTERY_V,
     "outside.temp": OUTSIDE_TEMP, "connectivity": CONNECTIVITY, "brightness": BRIGHTNESS,
     "drive_mode": DRIVE_MODE,
 }
@@ -312,6 +315,7 @@ def build_store(profile: str = "ev_demo") -> VssStore:
     prof = get_profile(profile)
     store = VssStore(signals_for(prof.powertrain))
     store.apply(prof.overrides)
+    track_timezone(store, LAT, LON, TIMEZONE)
     return store
 
 

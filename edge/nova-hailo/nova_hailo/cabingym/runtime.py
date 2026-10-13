@@ -6,6 +6,7 @@ Callers: cabingym.executor, .env, .router_*, nova_hailo.tools.oem_tools.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from typing import Any
 
 from nova_hailo.cabingym import catalog as c
@@ -43,6 +44,26 @@ def parse_places(conf: Any) -> dict[str, tuple[float, float]]:
         out[str(name)] = (lat, lon)
     return out
 
+
+ROUTE_AHEAD_POINTS = 60
+
+
+def route_ahead(points: list[tuple[float, float]], lat: float, lon: float,
+                max_points: int = ROUTE_AHEAD_POINTS) -> tuple[tuple[float, float], ...]:
+    """The planned road from the point nearest the car to its end, thinned to
+    ``max_points`` (a search request carries it in the URL)."""
+    if len(points) < 2:
+        return ()
+    near = min(range(len(points)), key=lambda i: (points[i][0] - lat) ** 2 + (points[i][1] - lon) ** 2)
+    ahead = points[near:]
+    if len(ahead) < 2:
+        return ()
+    if len(ahead) > max_points:
+        step = (len(ahead) - 1) / (max_points - 1)
+        ahead = [ahead[round(i * step)] for i in range(max_points)]
+    return tuple((float(a), float(b)) for a, b in ahead)
+
+
 class CabinEnv:
     def __init__(
         self,
@@ -69,6 +90,18 @@ class CabinEnv:
         # when a follow-up names a value but not a zone.
         self.focus: dict[str, Any] | None = None
         self.dialog: list[dict[str, str]] = []
+        # The last few cabin changes (driver-facing actuators only), newest last,
+        # for the agent's per-turn context note.
+        self.recent_changes: deque[tuple[str, Any]] = deque(maxlen=3)
+        # The planned road as (lat, lon), set by the drive feed; empty when not navigating.
+        self.route_points: list[tuple[float, float]] = []
+        self.store.subscribe(self._note_changes)
+
+    def _note_changes(self, changes: list[Any]) -> None:
+        for ch in changes:
+            sig = self.store.signal(ch.path)
+            if sig.kind == "actuator" and sig.scored:
+                self.recent_changes.append((ch.path, ch.after))
 
     @property
     def hybrid(self) -> bool:
@@ -80,7 +113,9 @@ class CabinEnv:
         return bool(self.nav.is_live) or not self.live
 
     def context(self) -> ApiContext:
-        return ApiContext(self.store.snapshot(), self.nav, self.profile.powertrain, self.hybrid)
+        snap = self.store.snapshot()
+        return ApiContext(snap, self.nav, self.profile.powertrain, self.hybrid,
+                          route_ahead=route_ahead(self.route_points, snap[c.LAT], snap[c.LON]))
 
     def configure_site(self, places: Any = None, *, area: str | None = None) -> None:
         """Live site from config: saved places by name (``start`` is where the simulated

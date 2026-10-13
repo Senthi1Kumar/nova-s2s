@@ -5,6 +5,10 @@ On-device voice stack. STT, tools, and TTS run **on the Pi**. Chat LLM is
 **Groq** (default provider) or OpenRouter. A client (Qt HMI or browser) only
 streams mic PCM in and TTS PCM out.
 
+> **New Pi, CabinEnv demo (voice + cockpit display):** follow [QUICKSTART.md](QUICKSTART.md):
+> `scripts/setup_pi.sh` once, then `scripts/run_cabinenv.sh`. The rest of this page is the
+> pipeline reference.
+
 ```mermaid
 flowchart LR
   subgraph CLIENT["HMI or browser on this Pi"]
@@ -95,6 +99,9 @@ HMI switch. Leave it unset for Local Hailo (the demo default).
 `NOVA_LLM_PROVIDER` overrides `llm.cloud_provider` for one run.
 
 ## Clone and run (on the Pi)
+
+This is the older Qt HMI flow on the `share/nova-hailo-poc-v002` branch. For the CabinEnv demo use
+[QUICKSTART.md](QUICKSTART.md).
 
 ```bash
 git clone -b share/nova-hailo-poc-v002 https://github.com/Senthi1Kumar/nova-s2s.git

@@ -5,7 +5,7 @@ from typing import Any
 
 from nova_hailo.cabingym import catalog as c
 from nova_hailo.cabingym.devices.base import (
-    ZONE_LABEL, Api, ApiContext, ApiResult, clamp, device, done, fmt_num,
+    ZONE_LABEL, Api, ApiContext, ApiResult, clamp, clarify, device, done, fmt_num,
     p_bool, p_delta, p_enum, p_value, p_zone, resolve_value,
 )
 
@@ -50,6 +50,18 @@ def _flag(path: str, on_text: str, off_text: str):
     return handler
 
 
+def _set_ac(ctx: ApiContext, args: dict[str, Any]) -> ApiResult:
+    """The A/C is one switch for the cabin. Asked for one side, say so rather
+    than switch it for everyone: "passenger AC off" turned off the driver's too."""
+    zone = args.get("zone", "all")
+    on = bool(args.get("on", True))
+    if zone != "all":
+        verb = "on" if on else "off"
+        return clarify(f"The A/C is for the whole cabin, not one side. Turn it {verb} for everyone, "
+                       f"or change the {ZONE_LABEL[zone].lower()} temperature instead?")
+    return done("Air conditioning on." if on else "Air conditioning off.", {c.AC: on})
+
+
 def _set_defrost(ctx: ApiContext, args: dict[str, Any]) -> ApiResult:
     rear = args.get("target", "front") == "rear"
     on = bool(args.get("on", True))
@@ -88,9 +100,10 @@ DEVICE = device(
         Api("sync_zones", "match the passenger temperature to the driver's", _sync_zones,
             writes=(c.hvac_temp("Passenger"), c.HVAC_SYNC),
             patterns=(r"\b(sync|synchroni[sz]e|match)\b.*\b(zones?|sides?|temp\w*|climate|passenger)\b",)),
-        Api("set_ac", "turn the air conditioning on or off",
-            _flag(c.AC, "Air conditioning on.", "Air conditioning off."),
-            params={"on": p_bool("A/C on", default=True)}, writes=(c.AC,),
+        Api("set_ac", "turn the air conditioning on or off (one switch for the whole cabin)",
+            _set_ac,
+            params={"on": p_bool("A/C on", default=True), "zone": p_zone(ZONES, "all")},
+            writes=(c.AC,),
             patterns=(r"\b(a\.?c\.?|a/c|air\s*con(ditioning)?)\b",)),
         Api("set_fan", "change the fan speed", _set_fan,
             params={"zone": p_zone(ZONES, "all"),

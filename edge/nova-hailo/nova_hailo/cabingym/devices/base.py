@@ -16,6 +16,7 @@ class ApiContext:
     nav: Any
     powertrain: str
     hybrid: bool = False
+    route_ahead: tuple[tuple[float, float], ...] = ()   # (lat, lon) from the car to the destination
 
 
 @dataclass

@@ -40,10 +40,12 @@ NUMERIC_PARSERS: dict[str, Callable[[str], Mapping[str, Any] | None]] = {
     "fan_level": lambda t: s.parse_level(t, 6, 3),
     "seat_level": lambda t: s.parse_level(t, 3, 2),
     "count": _count,
+    "within_km": s.parse_within_km,
+    "within_min": s.parse_within_min,
 }
 BOOL_PARSERS: dict[str, Callable[[str], bool | None]] = {
     "on_off": s.parse_on_off, "lock": s.parse_lock, "fold": s.parse_fold,
-    "recirc": s.parse_recirc, "mute": s.parse_mute,
+    "recirc": s.parse_recirc, "mute": s.parse_mute, "along_route": s.parse_along_route,
 }
 SPAN_PARSERS: dict[str, Callable[[str], str | None]] = {
     "message": s.extract_message, "media": s.extract_media_query,
@@ -111,6 +113,13 @@ _PLACE_TAIL = re.compile(
     r"to\s+(?:pick|drop)\b|right\s+now|please)\b.*$", re.I)
 
 
+# "the second one" names a place from the last search (Nav.LastResults).
+_ORDINALS = {"first": 0, "1st": 0, "closest": 0, "nearest": 0, "second": 1, "2nd": 1,
+             "third": 2, "3rd": 2, "last": -1}
+_ORDINAL = re.compile(r"\b(first|1st|closest|nearest|second|2nd|third|3rd|last)\s+(one|option|place|result)\b",
+                      re.I)
+
+
 def resolve_place(text: str, cabin: CabinEnv) -> tuple[dict[str, Any] | None, str]:
     snap = cabin.store.snapshot()
     cands = place_candidates(snap)
@@ -118,8 +127,11 @@ def resolve_place(text: str, cabin: CabinEnv) -> tuple[dict[str, Any] | None, st
     if hit is not None:
         return next(p for n, p in cands if n == hit), "entity"
     results = snap.get(c.NAV_RESULTS) or ()
-    if results and re.search(r"\b(first|closest|nearest)\s+one\b", text, re.I):
-        return _place(results[0]), "entity"
+    pick = _ORDINAL.search(text) if results else None
+    if pick is not None:
+        index = _ORDINALS[pick.group(1).lower()]
+        if index < len(results) or index == -1:
+            return _place(results[index]), "entity"
     m = _PLACE_SPAN.search(text)
     if m and cabin.allow_poi_search:
         query = _PLACE_TAIL.sub("", m.group("q")).strip() or m.group("q")
