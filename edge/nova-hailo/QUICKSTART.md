@@ -17,7 +17,7 @@ control by voice.
 **A. New Pi:**
 
 ```bash
-git clone -b feat/livekit-agent-m1 https://github.com/Senthi1Kumar/nova-s2s.git
+git clone https://github.com/Senthi1Kumar/nova-s2s.git
 cd nova-s2s/edge/nova-hailo
 ```
 
@@ -28,7 +28,8 @@ cd nova-s2s/edge/nova-hailo
 cd ~/nova-s2s                 # where you cloned it before
 git status                    # if it lists modified files, run: git stash
 git fetch origin
-git switch feat/livekit-agent-m1
+git switch main
+git pull
 cd edge/nova-hailo
 ```
 

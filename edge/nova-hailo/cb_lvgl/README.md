@@ -12,21 +12,16 @@ Design: `.docs/CabinGym/2026-10-07-cb-lvgl-design.md`, live data: `.docs/CabinGy
 
 ## Where the demo lives
 
-This repository is one git repo with two worktrees (two checkouts, two branches):
-
-| Checkout | Branch | What it is |
-|---|---|---|
-| repo root | `feat/livekit-agent-m1` | Nova pipeline: speech, cabin tools, Mapbox place search, `/v1/observe` |
-| `.claude/worktrees/cb-lvgl` | `cb-lvgl` | This cockpit only |
-
-A worktree is a second folder on another branch. Commits in one folder do not include files that exist only in the other. Push the pipeline from the root checkout and the cockpit from the worktree. Do not copy `cb_lvgl/` into the pipeline checkout, and do not commit the pipeline copies that sometimes sit in the worktree (`nova_hailo/cabingym/`, `pipeline.py`).
+Branch `main` holds both halves: the Nova pipeline in `edge/nova-hailo` (speech, cabin tools, Mapbox place
+search, `/v1/observe`) and this cockpit in `edge/nova-hailo/cb_lvgl`. A new Pi follows nova-hailo's
+[QUICKSTART.md](../QUICKSTART.md).
 
 Targets that are built and run: an x64 Linux laptop (SDL, software renderer) and a Raspberry Pi 5 (arm64). The `gpu` renderer needs X11. MapLibre packages are per architecture (`linux-gnu-x64-egl`, `linux-gnu-arm64-egl`) and are not committed (`.deps/` is ignored).
 
 ## Run the cabin demo
 
 Pipeline on the Pi, cockpit on the laptop. The Pi demo tree is
-`~/repos/test_nova_repo/nova-s2s/edge/nova-hailo` (branch `feat/livekit-agent-m1`). Copy `.env.example` to `.env` on the Pi and set `MAPBOX_API_KEY` (and the LLM key the pipeline already uses). Do not commit `.env`.
+`~/repos/test_nova_repo/nova-s2s/edge/nova-hailo` (branch `main`). Copy `.env.example` to `.env` on the Pi and set `MAPBOX_API_KEY` (and the LLM key the pipeline already uses). Do not commit `.env`.
 
 ```bash
 # Pi
