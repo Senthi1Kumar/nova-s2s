@@ -1,0 +1,7 @@
+build*/
+.deps/
+.cache/
+compile_commands.json
+!tests/fixtures/*.jsonl
+*.log
+*.ppm
