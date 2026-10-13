@@ -6,6 +6,7 @@
 #include "cb_model.h"
 #include "cb_theme.h"
 #include "live/json.h"
+#include "live/nav_state.h"
 #include "live/ws.h"
 #include "map/map_view.h"
 #include "screens/cockpit.h"
@@ -18,9 +19,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ROUTE_MAX 6000
+#define STOPS_MAX 8
 #define CARDS_MAX 6
 #define TOAST_MS 7000
 
@@ -61,6 +64,15 @@ static struct {
 static turn_buf_t s_turn[2];
 static int s_turn_i;
 static double s_route[ROUTE_MAX][2];
+static char s_congestion[ROUTE_MAX];
+
+/* Turn-by-turn: the route's steps and progress, its stops for the map pins and the "via" line. */
+static nav_state_t s_nav;
+static double s_nav_total_m;
+static char s_via[200];
+static char s_stop_names[STOPS_MAX][96], s_dest_name[96];
+static route_stop_t s_stops[STOPS_MAX], s_dest;
+static int s_n_stops;
 
 /* ---------- helpers ---------- */
 
@@ -148,14 +160,17 @@ static int32_t clampi(double v, int32_t lo, int32_t hi)
     return (int32_t)(r < lo ? lo : r > hi ? hi : r);
 }
 
+/* The turn-by-turn card from the latest route, progress frame and 1 Hz ETA / distance deltas. */
 static void nav_labels(void)
 {
-    cockpit_t *c = ck();
-    if(!c->nav_eta) return;
-    lv_label_set_text_fmt(c->nav_eta, "%d min", (int)lround(L.nav_eta));
-    char d[32];
-    snprintf(d, sizeof d, "%.1f km", L.nav_dist);
-    lv_label_set_text(c->nav_dist, d);
+    if(!s_nav.active) return;
+    s_nav.eta_min = L.nav_eta;
+    s_nav.distance_km = L.nav_dist;
+    nav_banner_t b;
+    nav_banner(&s_nav, false, (long)time(NULL), &b);
+    double left = s_nav.has_progress ? s_nav.remaining_m : L.nav_dist * 1000.0;
+    int permille = s_nav_total_m > 0 ? (int)lround(1000.0 * (1.0 - left / s_nav_total_m)) : 0;
+    cockpit_set_nav(&b, s_via, permille);
 }
 
 /* One VSS path onto the cabin model; unknown paths and wrong types are ignored. */
@@ -527,32 +542,56 @@ int live_polyline6(const char *s, double (*ll)[2], int cap)
     return n;
 }
 
+/* Remaining stops in order, for the map pins and the banner's "via" line. */
+static void nav_stops(const cbj_t *f)
+{
+    s_n_stops = 0;
+    s_via[0] = '\0';
+    const cbj_t *stops = cbj_get(f, "stops");
+    for(const cbj_t *st = stops ? stops->child : NULL; st && s_n_stops < STOPS_MAX; st = st->next) {
+        const cbj_t *lat = cbj_get(st, "lat"), *lon = cbj_get(st, "lon");
+        if(!lat || !lon) continue;
+        int i = s_n_stops++;
+        snprintf(s_stop_names[i], sizeof s_stop_names[i], "%s", cbj_str(cbj_get(st, "name"), "Stop"));
+        s_stops[i] = (route_stop_t){ s_stop_names[i], cbj_num(lat, 0), cbj_num(lon, 0) };
+        size_t len = strlen(s_via);
+        snprintf(s_via + len, sizeof s_via - len, "%s%s", i ? " \xC2\xB7 " : "", s_stop_names[i]);
+    }
+}
+
 static void on_nav(const cbj_t *f)
 {
     cockpit_t *c = ck();
+    bool was = L.nav_active;
     L.nav_active = cbj_bool(cbj_get(f, "active"), false);
     L.pos_dirty = true;
     flush_position();
+    nav_state_from_frame(&s_nav, f);
     if(!L.nav_active) {
-        if(c->nav_card) lv_obj_set_hidden(c->nav_card, true);
-        if(c->map) map_view_set_route(c->map, NULL, 0);
+        cockpit_set_nav(NULL, NULL, 0);
+        if(c->map) {
+            map_view_set_route(c->map, NULL, 0, NULL);
+            map_view_set_stops(c->map, NULL, 0, NULL);
+            map_view_set_nav(c->map, false);
+        }
         return;
     }
-    L.nav_eta = cbj_num(cbj_get(f, "eta_min"), 0);
-    L.nav_dist = cbj_num(cbj_get(f, "distance_km"), 0);
-    if(c->nav_card) {
-        const char *name = cbj_str(cbj_get(cbj_get(f, "destination"), "name"), "Destination");
-        char t[96];
-        snprintf(t, sizeof t, "%s", name);
-        if(t[0] >= 'a' && t[0] <= 'z') t[0] = (char)(t[0] - 32);
-        lv_label_set_text(c->nav_title, t);
-        nav_labels();
-        lv_obj_set_hidden(c->nav_card, false);
-    }
+    L.nav_eta = s_nav.eta_min;
+    L.nav_dist = s_nav.distance_km;
+    s_nav_total_m = s_nav.distance_m > 0 ? s_nav.distance_m : s_nav.distance_km * 1000.0;
+    nav_stops(f);
+    const cbj_t *dest = cbj_get(f, "destination");
+    snprintf(s_dest_name, sizeof s_dest_name, "%s", s_nav.dest);
+    bool have_dest = cbj_get(dest, "lat") && cbj_get(dest, "lon");
+    s_dest = (route_stop_t){ s_dest_name, cbj_num(cbj_get(dest, "lat"), 0), cbj_num(cbj_get(dest, "lon"), 0) };
+    snprintf(s_congestion, sizeof s_congestion, "%s", cbj_str(cbj_get(f, "congestion"), ""));
+    nav_labels();
     int n = live_polyline6(cbj_str(cbj_get(f, "route"), ""), s_route, ROUTE_MAX);
     if(c->map) {
-        map_view_set_route(c->map, (const double (*)[2])s_route, n);
-        map_view_set_follow(c->map, true);
+        if(!was) map_view_set_follow(c->map, true);   /* a new trip starts on the car */
+        map_view_set_nav(c->map, true);
+        map_view_set_route(c->map, (const double (*)[2])s_route, n, s_congestion[0] ? s_congestion : NULL);
+        map_view_set_stops(c->map, s_stops, s_n_stops, have_dest ? &s_dest : NULL);
     }
 }
 
@@ -590,6 +629,10 @@ static void dispatch(const cbj_t *f)
     else if(!strcmp(type, "nova.agent_trace")) on_trace(f);
     else if(!strcmp(type, "nova.card")) on_card(f);
     else if(!strcmp(type, "nova.nav")) on_nav(f);
+    else if(!strcmp(type, "nova.nav.progress")) {
+        nav_state_progress(&s_nav, f);
+        nav_labels();
+    }
     else if(!strcmp(type, "nova.settings")) {
         live_llm_t l;
         if(s_llm_cb && llm_from(cbj_get(f, "llm"), &l)) s_llm_cb(&l);

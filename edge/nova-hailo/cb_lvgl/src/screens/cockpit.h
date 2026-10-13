@@ -1,4 +1,5 @@
 #pragma once
+#include "live/nav_state.h"
 #include "lvgl.h"
 #include <stdbool.h>
 
@@ -14,8 +15,7 @@ typedef struct {
     lv_obj_t *dock_mid;    /* Nova bar slot, centred in the dock */
     lv_obj_t *map;         /* map_view on the Map page */
     lv_obj_t *cards;       /* answer card stack on the Nova page (newest first) */
-    lv_obj_t *nav_card;    /* map overlay: destination, ETA, distance (hidden until navigation is active) */
-    lv_obj_t *nav_title, *nav_eta, *nav_dist;
+    lv_obj_t *nav_card;    /* map overlay: the next maneuver and the trip (hidden until navigation is active) */
     lv_obj_t *src_chip;    /* map overlay: position source (GPS / SIM / none) */
     lv_obj_t *link_chip;   /* status strip: pipeline link (Live / Replay / Simulated / Offline) */
     lv_obj_t *place;       /* status strip: where the car is (reverse-geocoded place, else coordinates) */
@@ -31,3 +31,6 @@ cockpit_t *cockpit_create_v2(lv_obj_t *panel, const cockpit_hooks_t *hooks);
 cockpit_t *cockpit(void);
 void cockpit_show_page(int idx);   /* 0 Map, 1 Media, 2 Nova */
 void cockpit_set_chip(lv_obj_t *chip, const char *text, lv_color_t dot);
+/* The turn-by-turn card over the map: maneuver arrow, distance to it, instruction, destination, "via" stops, the
+   trip line and how much of the route is behind. NULL hides it. */
+void cockpit_set_nav(const nav_banner_t *b, const char *via, int progress_permille);

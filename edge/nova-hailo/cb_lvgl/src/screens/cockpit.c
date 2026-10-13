@@ -19,6 +19,10 @@
 static cockpit_t s_ck;
 static cockpit_hooks_t s_hooks;
 static lv_obj_t *s_tv, *s_pager_btn[3], *s_clock;
+static lv_obj_t *s_nav_icon, *s_nav_turn, *s_nav_instr, *s_nav_dest, *s_nav_via, *s_nav_trip, *s_nav_bar;
+static nav_maneuver_t s_nav_kind = NAV_M_STRAIGHT;
+static lv_obj_t *s_compass_btn;
+static double s_bearing;
 
 cockpit_t *cockpit(void) { return &s_ck; }
 
@@ -154,7 +158,45 @@ static void draw_moon(lv_layer_t *layer, float cx, float cy, lv_color_t c)
 }
 
 /* Icons our fonts lack, drawn in place: the recenter target and the play / pause glyph. */
-typedef enum { ICON_RECENTER, ICON_MEDIA, ICON_THEME } icon_t;
+typedef enum { ICON_RECENTER, ICON_MEDIA, ICON_THEME, ICON_COMPASS, ICON_OVERVIEW } icon_t;
+
+static void tri(lv_layer_t *layer, lv_color_t c, lv_opa_t opa, float x0, float y0, float x1, float y1, float x2, float y2)
+{
+    lv_draw_triangle_dsc_t t;
+    lv_draw_triangle_dsc_init(&t);
+    t.color = c;
+    t.opa = opa;
+    t.p[0] = (lv_point_precise_t){ x0, y0 };
+    t.p[1] = (lv_point_precise_t){ x1, y1 };
+    t.p[2] = (lv_point_precise_t){ x2, y2 };
+    lv_draw_triangle(layer, &t);
+}
+
+/* The compass needle points to north on screen (red), whatever the map's bearing. */
+static void draw_compass(lv_layer_t *layer, float cx, float cy)
+{
+    float r = (float)(-s_bearing * M_PI / 180.0), dx = sinf(r), dy = -cosf(r), px = cosf(r), py = sinf(r);
+    tri(layer, lv_color_hex(0xe8553d), LV_OPA_COVER, cx + 15 * dx, cy + 15 * dy, cx + 5 * px, cy + 5 * py, cx - 5 * px, cy - 5 * py);
+    tri(layer, cb_col(CB_TEXT_HI), 180, cx - 15 * dx, cy - 15 * dy, cx + 5 * px, cy + 5 * py, cx - 5 * px, cy - 5 * py);
+}
+
+/* "Whole route": four corner brackets. */
+static void draw_overview(lv_layer_t *layer, float cx, float cy, lv_color_t c)
+{
+    lv_draw_line_dsc_t ln;
+    lv_draw_line_dsc_init(&ln);
+    ln.color = c;
+    ln.width = 3;
+    ln.round_start = ln.round_end = 1;
+    for(int i = 0; i < 4; i++) {
+        float sx = i & 1 ? 1.0f : -1.0f, sy = i & 2 ? 1.0f : -1.0f;
+        ln.p1 = (lv_point_precise_t){ cx + sx * 12, cy + sy * 5 };
+        ln.p2 = (lv_point_precise_t){ cx + sx * 12, cy + sy * 12 };
+        lv_draw_line(layer, &ln);
+        ln.p1 = (lv_point_precise_t){ cx + sx * 5, cy + sy * 12 };
+        lv_draw_line(layer, &ln);
+    }
+}
 
 static void icon_draw(lv_event_t *e)
 {
@@ -164,6 +206,14 @@ static void icon_draw(lv_event_t *e)
     lv_obj_get_coords(o, &a);
     int32_t cx = a.x1 + lv_area_get_width(&a) / 2, cy = a.y1 + lv_area_get_height(&a) / 2;
     lv_color_t c = cb_col(CB_TEXT_HI);
+    if((icon_t)(intptr_t)lv_event_get_user_data(e) == ICON_COMPASS) {
+        draw_compass(layer, (float)cx, (float)cy);
+        return;
+    }
+    if((icon_t)(intptr_t)lv_event_get_user_data(e) == ICON_OVERVIEW) {
+        draw_overview(layer, (float)cx, (float)cy, c);
+        return;
+    }
     if((icon_t)(intptr_t)lv_event_get_user_data(e) == ICON_THEME) {   /* the mode a tap switches to: sun or moon */
         bool night = map_view_night(s_ck.map);
         lv_draw_arc_dsc_t arc;
@@ -259,7 +309,141 @@ static lv_obj_t *round_btn(lv_obj_t *parent, const char *sym, int32_t d, lv_even
 }
 
 static void zoom_click(lv_event_t *e) { map_view_zoom(s_ck.map, lv_event_get_user_data(e) ? 2.0 : 0.5); }
-static void recenter_click(lv_event_t *e) { LV_UNUSED(e); map_view_set_follow(s_ck.map, true); }
+static void recenter_click(lv_event_t *e) { LV_UNUSED(e); map_view_recenter(s_ck.map); }
+static void compass_click(lv_event_t *e) { LV_UNUSED(e); map_view_north_up(s_ck.map); }
+static void overview_click(lv_event_t *e) { LV_UNUSED(e); map_view_overview(s_ck.map); }
+
+static lv_obj_t *icon_btn(lv_obj_t *parent, icon_t icon, lv_event_cb_t cb)
+{
+    lv_obj_t *b = glass(parent, 16);
+    lv_obj_set_size(b, 56, 56);
+    lv_obj_set_clickable(b, true);
+    lv_obj_set_style_bg_opa(b, 60, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(b, icon_draw, LV_EVENT_DRAW_MAIN_END, (void *)(intptr_t)icon);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+    return b;
+}
+
+static void compass_poll(lv_timer_t *t)   /* redraw the needle only when the map turned */
+{
+    LV_UNUSED(t);
+    double b = map_view_bearing(s_ck.map);
+    if(fabs(b - s_bearing) < 0.5) return;
+    s_bearing = b;
+    lv_obj_invalidate(s_compass_btn);
+}
+
+/* The next maneuver as an arrow: a shaft from below, bent by the turn's angle, or a U-turn, a roundabout ring,
+   or a target for the arrival. */
+static void maneuver_draw(lv_event_t *e)
+{
+    lv_obj_t *o = lv_event_get_target_obj(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    float cx = (float)(a.x1 + a.x2) / 2.0f, cy = (float)(a.y1 + a.y2) / 2.0f;
+    lv_color_t c = cb_col(CB_TEXT_HI);
+    lv_draw_line_dsc_t ln;
+    lv_draw_line_dsc_init(&ln);
+    ln.color = c;
+    ln.width = 7;
+    ln.round_start = ln.round_end = 1;
+    lv_draw_arc_dsc_t arc;
+    lv_draw_arc_dsc_init(&arc);
+    arc.color = c;
+    arc.width = 6;
+    if(s_nav_kind == NAV_M_ARRIVE) {
+        arc.center = (lv_point_t){ (int32_t)cx, (int32_t)cy };
+        arc.radius = 16;
+        arc.start_angle = 0;
+        arc.end_angle = 360;
+        lv_draw_arc(layer, &arc);
+        lv_draw_rect_dsc_t r;
+        lv_draw_rect_dsc_init(&r);
+        r.bg_color = cb_col(CB_CYAN);
+        r.radius = LV_RADIUS_CIRCLE;
+        lv_area_t dot = { (int32_t)cx - 6, (int32_t)cy - 6, (int32_t)cx + 6, (int32_t)cy + 6 };
+        lv_draw_rect(layer, &r, &dot);
+        return;
+    }
+    if(s_nav_kind == NAV_M_UTURN) {
+        ln.p1 = (lv_point_precise_t){ cx + 9, cy + 22 };
+        ln.p2 = (lv_point_precise_t){ cx + 9, cy - 6 };
+        lv_draw_line(layer, &ln);
+        arc.center = (lv_point_t){ (int32_t)cx, (int32_t)cy - 6 };
+        arc.radius = 12;
+        arc.start_angle = 180;
+        arc.end_angle = 360;
+        arc.width = 7;
+        lv_draw_arc(layer, &arc);
+        ln.p1 = (lv_point_precise_t){ cx - 9, cy - 6 };
+        ln.p2 = (lv_point_precise_t){ cx - 9, cy + 6 };
+        lv_draw_line(layer, &ln);
+        tri(layer, c, LV_OPA_COVER, cx - 9, cy + 20, cx - 17, cy + 6, cx - 1, cy + 6);
+        return;
+    }
+    if(s_nav_kind == NAV_M_ROUNDABOUT) {
+        arc.center = (lv_point_t){ (int32_t)cx, (int32_t)cy };
+        arc.radius = 11;
+        arc.start_angle = 0;
+        arc.end_angle = 360;
+        arc.width = 5;
+        lv_draw_arc(layer, &arc);
+        ln.p1 = (lv_point_precise_t){ cx, cy + 24 };
+        ln.p2 = (lv_point_precise_t){ cx, cy + 11 };
+        lv_draw_line(layer, &ln);
+        ln.p1 = (lv_point_precise_t){ cx + 8, cy - 8 };
+        ln.p2 = (lv_point_precise_t){ cx + 15, cy - 15 };
+        lv_draw_line(layer, &ln);
+        tri(layer, c, LV_OPA_COVER, cx + 23, cy - 23, cx + 9, cy - 19, cx + 19, cy - 9);
+        return;
+    }
+    static const float k_deg[NAV_M_COUNT] = { [NAV_M_SLIGHT_LEFT] = -45, [NAV_M_LEFT] = -90, [NAV_M_SHARP_LEFT] = -135,
+                                              [NAV_M_SLIGHT_RIGHT] = 45, [NAV_M_RIGHT] = 90, [NAV_M_SHARP_RIGHT] = 135 };
+    float th = k_deg[s_nav_kind] * (float)M_PI / 180.0f, dx = sinf(th), dy = -cosf(th);
+    bool straight = th == 0.0f;
+    float my = straight ? cy - 8 : cy + 2;
+    ln.p1 = (lv_point_precise_t){ cx, cy + 24 };
+    ln.p2 = (lv_point_precise_t){ cx, my };
+    lv_draw_line(layer, &ln);
+    float ex = cx, ey = my;
+    if(!straight) {
+        ex = cx + 16 * dx, ey = my + 16 * dy;
+        ln.p1 = (lv_point_precise_t){ cx, my };
+        ln.p2 = (lv_point_precise_t){ ex, ey };
+        lv_draw_line(layer, &ln);
+    }
+    float px = -dy, py = dx;   /* across the arrow */
+    tri(layer, c, LV_OPA_COVER, ex + 12 * dx, ey + 12 * dy, ex + 9 * px, ey + 9 * py, ex - 9 * px, ey - 9 * py);
+}
+
+void cockpit_set_nav(const nav_banner_t *b, const char *via, int progress_permille)
+{
+    if(!s_ck.nav_card) return;
+    if(!b) {
+        lv_obj_set_hidden(s_ck.nav_card, true);
+        return;
+    }
+    lv_obj_set_hidden(lv_obj_get_parent(s_nav_icon), !b->turn);
+    if(b->turn) {
+        if(s_nav_kind != b->kind) {
+            s_nav_kind = b->kind;
+            lv_obj_invalidate(s_nav_icon);
+        }
+        lv_label_set_text(s_nav_turn, b->turn_dist);
+        lv_label_set_text(s_nav_instr, b->instruction);
+    }
+    char t[112];
+    snprintf(t, sizeof t, "%s", b->dest[0] ? b->dest : "Destination");
+    if(t[0] >= 'a' && t[0] <= 'z') t[0] = (char)(t[0] - 32);
+    lv_label_set_text(s_nav_dest, t);
+    lv_obj_set_hidden(s_nav_via, !(via && *via));
+    if(via && *via) lv_label_set_text_fmt(s_nav_via, "via %s", via);
+    lv_label_set_text(s_nav_trip, b->trip);
+    lv_bar_set_value(s_nav_bar, progress_permille < 0 ? 0 : progress_permille > 1000 ? 1000 : progress_permille,
+                     LV_ANIM_OFF);
+    lv_obj_set_hidden(s_ck.nav_card, false);
+}
 
 static lv_obj_t *overlay_card(lv_obj_t *parent, int32_t w)
 {
@@ -284,6 +468,9 @@ static void map_page(lv_obj_t *tile, int32_t w, int32_t h)
     round_btn(ctl, "+", 56, zoom_click, (void *)1);
     round_btn(ctl, "\xE2\x88\x92", 56, zoom_click, NULL);
     round_btn(ctl, NULL, 56, recenter_click, NULL);
+    icon_btn(ctl, ICON_OVERVIEW, overview_click);
+    s_compass_btn = icon_btn(ctl, ICON_COMPASS, compass_click);
+    lv_timer_create(compass_poll, 100, NULL);
     s_theme_btn = glass(ctl, 16);
     lv_obj_set_size(s_theme_btn, 56, 56);
     lv_obj_set_clickable(s_theme_btn, true);
@@ -296,17 +483,32 @@ static void map_page(lv_obj_t *tile, int32_t w, int32_t h)
     lv_obj_set_style_bg_opa(s_ck.src_chip, 215, 0);
     lv_obj_align(s_ck.src_chip, LV_ALIGN_TOP_RIGHT, -24, 76);
 
-    s_ck.nav_card = overlay_card(tile, 440);
+    s_ck.nav_card = overlay_card(tile, 480);
     lv_obj_align(s_ck.nav_card, LV_ALIGN_TOP_LEFT, 24, 76);
-    lv_obj_t *k = ui_label(s_ck.nav_card, "NAVIGATING TO", CB_F_LABEL, CB_TEXT_LO);
-    lv_obj_set_style_text_letter_space(k, 2, 0);
-    s_ck.nav_title = ui_label_line(s_ck.nav_card, "", CB_F_TITLE, CB_TEXT_HI);
-    lv_obj_t *r = ui_row(s_ck.nav_card, 28);
-    s_ck.nav_eta = ui_label(r, "", CB_F_TEMP, CB_CYAN);
-    s_ck.nav_dist = ui_label(r, "", CB_F_TEMP, CB_TEXT_HI);
+    lv_obj_t *turn = ui_row(s_ck.nav_card, 16);
+    s_nav_icon = ui_plain(turn);
+    lv_obj_set_size(s_nav_icon, 64, 64);
+    lv_obj_add_event_cb(s_nav_icon, maneuver_draw, LV_EVENT_DRAW_MAIN_END, NULL);
+    lv_obj_t *tc = ui_col(turn, 2);
+    lv_obj_set_width(tc, 0);
+    lv_obj_set_flex_grow(tc, 1);
+    s_nav_turn = ui_label(tc, "", CB_F_TEMP, CB_CYAN);
+    s_nav_instr = ui_label(tc, "", CB_F_VALUE, CB_TEXT_HI);
+    lv_obj_set_width(s_nav_instr, lv_pct(100));
+    lv_label_set_long_mode(s_nav_instr, LV_LABEL_LONG_MODE_WRAP);
+    s_nav_dest = ui_label_line(s_ck.nav_card, "", CB_F_BODY, CB_TEXT_HI);
+    s_nav_via = ui_label_line(s_ck.nav_card, "", CB_F_LABEL, CB_TEXT_MID);
+    s_nav_trip = ui_label(s_ck.nav_card, "", CB_F_BODY, CB_TEXT_2);
+    s_nav_bar = lv_bar_create(s_ck.nav_card);
+    lv_obj_set_size(s_nav_bar, lv_pct(100), 4);
+    lv_bar_set_range(s_nav_bar, 0, 1000);
+    lv_obj_set_style_bg_color(s_nav_bar, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_nav_bar, 30, 0);
+    lv_obj_set_style_bg_color(s_nav_bar, cb_col(CB_CYAN), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s_nav_bar, LV_OPA_COVER, LV_PART_INDICATOR);
 
     s_ck.toast = overlay_card(tile, 520);
-    lv_obj_align(s_ck.toast, LV_ALIGN_BOTTOM_LEFT, 24, -24);
+    lv_obj_align(s_ck.toast, LV_ALIGN_BOTTOM_LEFT, 24, -44);   /* clear of the Mapbox wordmark */
 }
 
 static lv_obj_t *page_col(lv_obj_t *tile, int32_t pad)
