@@ -617,3 +617,21 @@ def test_real_echoes_are_still_caught():
         "Sure, it's warm in Delhi today, around 33 degrees in the afternoon with a "
         "light chance of rain.",
     ) is True
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("aec,trust,server,allowed", [
+    (None, False, False, False),   # no claim: the server's setting decides
+    (None, False, True, True),
+    (True, False, False, False),   # an untrusted "I cancel echo" no longer opens the gate
+    (True, False, True, True),
+    (True, True, False, True),     # trusted, as before
+    (False, False, True, False),   # "no canceller" always closes it
+    (False, True, True, False),
+])
+def test_barge_policy_matrix(aec, trust, server, allowed):
+    s = _session()
+    s._client_aec, s.trust_client_aec, s.barge_in_while_speaking = aec, trust, server
+    assert s._barge_allowed() is allowed

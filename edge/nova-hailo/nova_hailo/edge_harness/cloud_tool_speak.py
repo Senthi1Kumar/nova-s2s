@@ -37,17 +37,28 @@ _AMOUNT_RE = re.compile(
 )
 
 
-def tool_result_is_final(out: dict[str, Any] | None) -> bool:
-    """True when ToolBroker already composed the voice line (numeric/stock).
+# Vehicle executor statuses that already are the line the driver should hear.
+# "declined" is the status string; "decline" is the route-outcome kind.
+_VEHICLE_FINAL_STATUS = frozenset({
+    "success", "clarify", "decline", "declined", "confirm", "refused", "error",
+})
 
-    ``answer_from_hits`` sets ``result.numeric`` and ``needs_summary`` False
-    for stock/crypto quotes. News and calendar stay False so Groq can rewrite.
+
+def tool_result_is_final(out: dict[str, Any] | None) -> bool:
+    """True when the host already composed the voice line.
+
+    Numeric/stock quotes are final. A vehicle result is final too: the cloud
+    model picked the tool, and a second round was rewriting "Where would you
+    like to go?" into "heading there now". News and calendar stay open so the
+    model can rewrite them.
     """
     if not isinstance(out, dict):
         return False
     speak = str(out.get("speak") or "").strip()
     if not speak:
         return False
+    if out.get("name") == "vehicle" and str(out.get("status") or "") in _VEHICLE_FINAL_STATUS:
+        return True
     result = out.get("result")
     if not isinstance(result, dict) or not result.get("numeric"):
         return False
@@ -55,6 +66,38 @@ def tool_result_is_final(out: dict[str, Any] | None) -> bool:
     # "couldn't find a number" line for every follow-up in the thread
     # ("Why is it?", "Can you search?") instead of answering them.
     return not result.get("numeric_miss")
+
+
+def tool_log_detail(name: str, args: dict[str, Any] | None, out: dict[str, Any] | None) -> str:
+    """One log fragment. Vehicle calls print action and slots; other tools print query.
+
+    A grounded destination is a place dict. The log keeps the name, not the coordinates.
+    """
+    out = out or {}
+    args = dict(args or {})
+    vehicle = str(name).startswith("vehicle_") or out.get("name") == "vehicle"
+    if not vehicle:
+        query = str(args.get("query") or "")
+        return f"query={query[:120]!r}"
+    result = out.get("result")
+    trace = (result.get("trace") if isinstance(result, dict) else {}) or {}
+    calls = trace.get("calls") or []
+    if calls and isinstance(calls[0], dict):
+        action = str(calls[0].get("api") or "")
+        slots = dict(calls[0].get("args") or {})
+    else:
+        slots = args
+        action = str(slots.get("action") or trace.get("action") or "")
+    parts: list[str] = []
+    for key in ("destination", "zone", "value", "category", "delta", "on"):
+        if key not in slots or slots[key] in ("", None):
+            continue
+        val = slots[key]
+        if isinstance(val, dict):
+            val = val.get("name", val)
+        parts.append(f"{key}={str(val)[:80]!r}")
+    extra = (" " + " ".join(parts)) if parts else ""
+    return f"action={action!r}{extra} status={out.get('status')}"
 
 
 def resolve_cloud_followup_speak(

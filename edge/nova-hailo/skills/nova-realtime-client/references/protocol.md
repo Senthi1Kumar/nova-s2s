@@ -157,3 +157,284 @@ For a screen or LED: `IDLE` sleeping · `ARMED`/`LISTENING` listening ·
 ## Not yet (v2)
 
 Access from outside the home network (a secure bridge to the Pi), per-device keys, WebRTC transport.
+
+## Vehicle events (CabinGym)
+
+Sent only when the backend has the `vehicle` tool enabled. Clients that do
+not know these types ignore them.
+
+`nova.vehicle` — vehicle state. The first one after `session.created` has
+`seq: 0` and a full `snapshot`; later ones carry only `changed` paths.
+
+```json
+{"type": "nova.vehicle", "seq": 0, "profile": "ev_demo", "adapter": "sim",
+ "snapshot": {"Vehicle.Speed": {"value": 0.0, "source": "sim"}}}
+{"type": "nova.vehicle", "seq": 12, "changed": {"Vehicle.Cabin.Sunroof.Position": 100}}
+```
+
+`source` is `sim`, `obd`, `gps` or `kuksa`. A value whose source is `sim`
+while `adapter` is not `sim` is simulated and must be labelled as such.
+
+`nova.agent_trace` — how one turn's vehicle request was routed and gated.
+
+```json
+{"type": "nova.agent_trace", "generation_id": 17, "router": "jev",
+ "latency_ms": {"stage1": 118, "stage2": 131},
+ "stage1": {"hvac": 0.94, "phone": 0.91},
+ "calls": [{"device": "hvac", "api": "set_temperature", "args": {"zone": "driver", "delta": 1},
+            "grounding": {"zone": "enum", "delta": "parser"}, "status": "success",
+            "gate": {"verdict": "execute", "reason": null}}],
+ "gate": ["execute"],
+ "diff": [{"path": "Vehicle.Cabin.HVAC.Station.Row1.Driver.Temperature", "before": 20.0, "after": 21.0}],
+ "speak": "Driver side set to 21 degrees."}
+```
+
+`router` is `jev`, `regex`, `cloud` or `backend`; `gate` items are `execute`,
+`confirm_first`, `refuse`, `clarify`, `decline`, `cancelled` or `error`.
+
+Delegated turns (multi-step requests handed to the backend agent) produce two
+`nova.agent_trace` events with `router: "backend"`:
+
+1. When the turn is delegated, in that turn's generation: one call with
+   `device: "delegate"`, `api: "plan"`, `args: {"objective": "<what the user asked>"}`
+   and a status/verdict of `accepted`, `offline` (no backend reachable) or
+   `busy` (another plan is still running); `diff` is empty and `speak` is what
+   Nova said ("On it. I'll tell you when that's done.").
+2. When the result is spoken, in the generation that speaks it: the calls the
+   backend actually ran (same row shape as a direct turn), their verdicts, the
+   combined `diff`, and `speak` = the spoken result. If the backend stopped for a
+   confirmation, `gate` ends with `confirm_first` and `speak` is the question.
+
+## Read-only observer (`/v1/observe`)
+
+A display that only shows what is happening (the LVGL cabin UI, a dashboard)
+connects to `/v1/observe` instead of `/v1/realtime`. It takes no session lease,
+so it runs alongside the HMI that owns the microphone and speaker, and it
+sends nothing: the server ignores anything an observer writes. Same token
+check as `/v1/realtime` (`?token=` or `Authorization: Bearer`).
+
+The stream starts with `{"type": "observe.hello", "protocol": "nova-observe/1",
+"session_active": false}`, the latest `nova.fsm`, a full `nova.vehicle` snapshot
+(`seq: 0`) when the vehicle tool is enabled and the latest `nova.nav` /
+`nova.agent_trace`, then live events: `observe.session {"active": true|false}`
+when a voice session starts or ends, every `nova.*` event of the active session, `session.armed`, the
+`input_audio_buffer.speech_*` events, user and Nova transcripts
+(`conversation.item.input_audio_transcription.*`,
+`response.audio_transcript.*`) and `response.done`. Vehicle changes arrive as
+`nova.vehicle` deltas even when no voice session is connected; their `seq`
+counts from 1 per server start. Audio is never mirrored. An observer that
+falls behind loses its oldest events rather than slowing the voice session.
+
+An online caller (the LiveKit door, e.g. nova-connect in a browser) is mirrored
+the same way, with `session_id: "livekit"`: `observe.session`, `nova.fsm` (state
+only: `IDLE` while the wake gate is closed, `LISTENING`, `THINKING` from the
+final transcript until the pipeline turn ends, `SPEAKING` while Nova's audio
+plays), the final user transcript
+(`conversation.item.input_audio_transcription.completed`),
+`response.audio_transcript.done`, `nova.agent_trace`, `nova.card`,
+`nova.tool_status` and `nova.turn_metrics`. Its `generation_id`s are its own,
+counting from 1 per caller; there are no transcript deltas.
+
+## Cards (`nova.card`)
+
+A card is what a display shows next to the spoken reply: short lines a driver
+can glance at, plus items when there is a list. Sent in the turn's generation
+right after `response.audio_transcript.done`, and when a background result
+(research, a delegated plan, an announcement) is spoken. Plain car actions get
+no card; their `nova.agent_trace` already says what changed.
+
+```json
+{"type": "nova.card", "generation_id": 21, "kind": "answer",
+ "title": "who won the match yesterday?", "lines": ["India won by 6 wickets."], "items": []}
+{"type": "nova.card", "generation_id": 22, "kind": "results", "title": "Nearby",
+ "lines": ["Hilltop Cafe is closest."], "items": [{"title": "Hilltop Cafe", "sub": "coffee"}]}
+```
+
+`kind`: `answer` (web search, calendar/email/Drive, research, a delegated
+plan: title `Planning`, then `Done` or `Needs your answer` with one item per
+call `{"title": "lights · set_hazards", "sub": "success"}`, or an announcement:
+title `Reminder`), `route` (navigation; title = destination), `results`
+(places found), `list` (media). At most four `lines`.
+
+## Navigation (`nova.nav`) and the simulated drive
+
+With `cabingym.sim_drive.enabled`, the server drives a simulated car along real
+road geometry when navigation is active, streaming `Vehicle.Speed`,
+`Vehicle.Powertrain.Transmission.SelectedGear`, `Vehicle.CurrentLocation.{Latitude,Longitude,Heading}`,
+`Vehicle.TraveledDistance` and charge (`…StateOfCharge.Displayed`, `Vehicle.Powertrain.Range`)
+at 5 Hz as ordinary `nova.vehicle` deltas, plus the remaining
+`…Nav.DistanceKm` / `…Nav.EtaMin` once a second. Source is `sim`; a real GPS
+or OBD feeder overrides it (`source` `gps` / `obd`). Parked means no deltas.
+
+`nova.nav` (on `/v1/observe`, and replayed to an observer that joins late)
+describes the route whenever navigation starts, changes or ends:
+
+```json
+{"type": "nova.nav", "active": true,
+ "destination": {"name": "work", "lat": 37.4847, "lon": -122.1477},
+ "route": "<encoded polyline, precision 6>", "geometry": "osm",
+ "eta_min": 7.6, "distance_km": 6.33,
+ "pois": [{"n": 1, "name": "Hilltop Cafe", "lat": 37.443, "lon": -122.158,
+           "category": "coffee", "distance_m": 420, "eta_min": 0.5}]}
+```
+
+`geometry` is `osm` (baked road geometry), `mapbox` (live router, needs `MAPBOX_API_KEY`) / `osrm` (live router, no key) or
+`straight` (no route service reachable). When navigation ends, `active` is
+false and `route` is empty.
+
+### Real GPS
+
+With `cabingym.gps.enabled` (`device`, default `/dev/ttyUSB0`; `baud`, default
+9600), the server reads an NMEA receiver (RMC, GGA, VTG). Three signals describe it:
+
+| Path | Type | Meaning |
+|---|---|---|
+| `Vehicle.Private.Nova.Location.GpsFix` | bool | the receiver has a fix (RMC `A` or GGA quality ≥ 1) |
+| `Vehicle.Private.Nova.Location.Satellites` | int | satellites in use (GGA) |
+| `Vehicle.Private.Nova.Location.Place` | string | area name, e.g. `"Indiranagar, Bengaluru"`; `"Palo Alto"` (the simulated area) until a fix |
+
+With a fix and the car parked, `Vehicle.CurrentLocation.{Latitude,Longitude,Heading}`
+and `Vehicle.Speed` come from the receiver (`source` `gps`) and the simulated
+drive cannot overwrite them. While the simulated drive plays a route it owns
+position and speed (`source` `sim`), so the map puck and the speedometer stay in
+step; the route starts at the real position, and on arrival the next sentence
+(within a second) brings the real position back. `Place` is reverse-geocoded
+with Mapbox (`MAPBOX_API_KEY`) at most once per 60 s and only after moving
+500 m; a failed lookup keeps the last name. When the fix is lost (indoors,
+unplugged, 3 s of silence), `GpsFix` turns false, the position keeps its last
+value and goes back to `source` `sim`, and the simulated drive continues from
+there. Deltas carry values only, so a display shows a GPS/SIM chip from
+`GpsFix`, not from per-path sources.
+
+Saved places default to Palo Alto. A site elsewhere is set in config:
+
+```yaml
+cabingym:
+  area: Bengaluru            # Place until the first fix
+  places:                    # [lat, lon] or {lat, lon}; overrides by name
+    start: [12.9716, 77.5946]  # where the simulated car begins (not a saved place)
+    home: [12.9784, 77.6408]
+    work: [12.9352, 77.6245]
+```
+
+These feed `…Nav.SavedPlaces` ("take me home"), the autoplay route and
+"where am I". With a fix, "where am I" answers with `Place`.
+
+## Touchscreen writes (`POST /v1/vehicle/set`)
+
+A display changes the car the same way a voice command does: through the
+device API and its safety gate. Same transport check as `/v1/realtime`
+(loopback needs no token).
+
+```
+POST /v1/vehicle/set   {"path": "Vehicle.Cabin.HVAC.Station.Row1.Driver.Temperature", "value": 19}
+                       {"alias": "hvac.driver.temp", "value": 19}
+200  {"ok": true, "status": "success", "speak": "Driver side set to 19 degrees.", "trace": {...}, "seq": 412}
+200  {"ok": false, "error": "refused", ...}
+```
+
+Always HTTP 200; check `ok`. `error` is one of `missing_path`, `missing_value`,
+`unknown_path`, `not_writable` (a sensor), `unsupported` (no touch control for
+that actuator), `bad_value`, `refused` (safety gate), `needs_confirmation`,
+`vehicle_disabled`, `bad_json`. `seq` is the `nova.vehicle` seq after the
+write; the change itself arrives as a normal delta. Writable: driver/passenger
+temperature, fan, seat heating, the four windows, door locks, sunroof,
+sunshade, volume.
+
+Event policy: a touch is silent context (the backend planner sees the recent
+touchscreen events). Setting the driver temperature to 19 °C or below is
+announced at the next quiet moment ("…that's quite cool. Want me to turn on
+your seat heating?"), and a spoken "yes" turns the driver seat heating on.
+
+## LLM settings (`GET` / `POST /v1/settings`)
+
+Which language model answers, for a display's settings panel. Same transport
+auth as every HTTP route (loopback, or the token from elsewhere).
+
+`GET /v1/settings`:
+
+```json
+{"llm": {"provider": "openrouter", "model": "openai/gpt-oss-120b",
+         "failover": true, "failover_ready": true,
+         "providers": [
+           {"id": "openrouter", "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "..."], "ok": true},
+           {"id": "groq", "models": ["openai/gpt-oss-120b", "..."], "ok": true},
+           {"id": "cerebras", "models": ["gpt-oss-120b", "..."], "ok": false},
+           {"id": "local", "models": ["qwen2", "..."], "ok": true}]}}
+```
+
+`provider` is the chosen one; `ok` says whether it can be picked (an API key
+for a cloud, the Hailo NPU for `local`). `failover` is the switch;
+`failover_ready` is true when a second cloud provider actually stands by (its
+key is set): on a rate limit (429), a 5xx, a timeout or a dropped
+connection, the turn is answered by the other one (groq ⇄ openrouter) instead of
+failing, as long as nothing was spoken yet, and the failed provider is skipped
+for 60 s. Such a turn's `nova.turn_metrics` has `llm.failover`, e.g.
+`"groq→openrouter (429)"`; `provider` does not change.
+
+`POST /v1/settings` with `{"llm": {"provider": "groq", "model": "openai/gpt-oss-120b", "failover": true}}`
+(`model` and `failover` optional; for `local`, `model` is a HEF alias) always answers 200:
+`{"ok": true, "settings": {"llm": {...}}}`, or
+`{"ok": false, "error": "unknown_provider" | "missing_llm" | "<reason>", "settings": {...}}`
+with the LLM unchanged. A switch to `local` loads a HEF and takes seconds. The
+choice is saved and survives a restart (it wins over `llm.cloud_provider` and
+`llm.failover`).
+
+Observers get `{"type": "nova.settings", "llm": {...}}` on `/v1/observe` at
+start-up and after every change, and the latest is replayed to one that joins
+late, also when the switch came from a nova-connect page over LiveKit. A
+`/v1/realtime` client's `nova.settings` carries the same `llm` object next to
+the older flat fields.
+
+## Mic mute, wake and cancel (`/v1/session`)
+
+For a display's mic, orb and × buttons. Same transport auth as every HTTP route;
+every call answers 200, with `ok: false` and an `error` when refused.
+
+| Call | Body | Answer |
+|---|---|---|
+| `GET /v1/session` | | `{"muted": false, "source": null, "state": "LISTENING"}` |
+| `POST /v1/session/mute` | `{"muted": true, "source": "cockpit"}` | `{"ok": true, "muted": true}` |
+| `POST /v1/session/arm` | `{}` | `{"ok": true}`, or `{"ok": false, "error": "mic_muted" \| "no_session"}` |
+| `POST /v1/session/cancel` | `{}` | `{"ok": true}` |
+
+- **Mute** turns the microphone off and nothing else: what Nova is saying finishes. While
+  muted, no audio reaches the wake word, the VAD or speech recognition, and what the user
+  was half-way through saying is dropped. Mute belongs to the cabin, not to one
+  connection: it survives a client reconnecting and resets when the server restarts.
+- **Arm** opens the mic for a turn as the wake word would (`wake.detected` with
+  `source: "cockpit"`), interrupting Nova if she is speaking.
+- **Cancel** (×) stops the reply (`response.done` cancelled, reason `ui_cancel`, and
+  `playback.cancel`) and puts the session in `IDLE`.
+- `state` is the voice session's FSM state, or `IDLE` when no session is connected.
+
+`{"type": "nova.mic", "muted": true, "source": "cockpit"}` goes to `/v1/observe` on every
+change and is replayed to an observer that joins later. A `/v1/realtime` client receives
+it after `session.created` and on every change, and should stop streaming its microphone
+while muted. A client can mute the cabin itself with `session.update`
+`{"input": {"muted": true}}` (source `client`). While muted, `session.arm`, `ptt.down` and
+`input_audio_buffer.arm` answer `error` with `type: "mic_muted"`.
+
+An online caller (LiveKit) follows the same mute: speech input pauses while
+muted, a wake word or tap is ignored until unmute, and the page gets `nova.mic` on
+its data channel. The page can mute the cabin itself with
+`{"type": "nova.mic.set", "muted": true}` (source `livekit`; a non-boolean answers
+`error` `bad_muted`). Cancel aborts the reply and closes the wake window.
+
+### Nova's own voice
+
+The speaker reaches the microphone. Besides the mic gate while Nova is audible
+(plus `voice.echo_tail_ms`), the server keeps these defences (config `voice.*`):
+
+| Setting | Default | Effect |
+|---|---|---|
+| `trust_client_aec` (env `NOVA_HAILO_TRUST_CLIENT_AEC`) | `false` | A client's `input.echo_cancellation: true` no longer opens the gate during playback; `false` still closes it. Interrupt with the wake word, × or mute. |
+| `echo_suspect_s` | `1.5` | Speech that starts while Nova is audible, within this long after, or right after a barge-in is an echo suspect. |
+| `fail_closed_cooldown_s` | `6` | The "could you say that again?" line is spoken at most once per window, and never for a suspect. |
+| `dedupe_user_s` | `8` | The same request again within this window after it was answered is dropped. |
+
+A transcript whose word pairs mostly (≥ 60 %) come from what Nova said in the last
+20 s (her last 8 clauses, interrupted ones included) is dropped as echo
+(`response.done` skipped, reason `tts_echo`; a repeat: reason `duplicate`). A suspect
+turn never leaves an "unanswered question" for the next prompt, and that question
+is offered once only, within `context.unanswered_ttl_s` (60 s).

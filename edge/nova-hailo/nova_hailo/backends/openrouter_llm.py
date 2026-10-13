@@ -83,6 +83,18 @@ PROVIDERS: dict[str, tuple[str, tuple[str, ...], str]] = {
 }
 
 
+# Models that cannot run with reasoning disabled: OpenRouter answers
+# {"enabled": false} with HTTP 400 "Reasoning is mandatory".
+_REASONING_REQUIRED = ("openai/gpt-oss-",)
+
+
+def _default_reasoning(model: str | None) -> dict[str, Any]:
+    """Reasoning off for voice latency, or the lowest effort where it cannot be off."""
+    if str(model or "").startswith(_REASONING_REQUIRED):
+        return {"effort": "low"}
+    return {"enabled": False}
+
+
 def resolve_or_model(name: str | None) -> str:
     raw = (name or "").strip() or DEFAULT_MODEL
     key = raw.lower()
@@ -129,7 +141,11 @@ class OpenRouterLLM:
         provider: str | None = None,
         service_tier: str | None = None,
         reasoning_effort: str | None = "low",
+        openrouter_reasoning: dict[str, Any] | None = None,
     ):
+        # OpenRouter's reasoning block. Off by default for voice latency; models that
+        # cannot run without reasoning (gpt-oss) pass e.g. {"effort": "low"}.
+        self.openrouter_reasoning = openrouter_reasoning
         self.service_tier = (service_tier or "").strip().lower() or None
         # gpt-oss reasons before answering, and reasoning tokens are billed
         # against max_tokens. At an 80-token voice cap the model spent the
@@ -235,7 +251,7 @@ class OpenRouterLLM:
             # definitions already sit ahead of the per-turn user text.
             payload["service_tier"] = self.service_tier
         if self.provider == "openrouter":
-            payload["reasoning"] = {"enabled": False}
+            payload["reasoning"] = self.openrouter_reasoning or _default_reasoning(self.model)
             payload["session_id"] = sid
             if self.fallback_models:
                 # OpenRouter tries these in order if the primary errors or is
@@ -338,6 +354,53 @@ class OpenRouterLLM:
         text = "".join(parts).strip()
         self.last_metrics = metrics
         return text, metrics
+
+    def complete_line(self, prompt: str, *, max_tokens: int = 24,
+                      first_line: bool = True) -> str | None:
+        """One short non-streaming line (or all of them). None on any failure. Used to
+        repair a heard place name."""
+        text = (prompt or "").strip()
+        if not text or not self.api_key:
+            return None
+        cap = max(1, int(max_tokens))
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": text}],
+            "stream": False,
+            "max_tokens": cap,
+            "temperature": 0,
+        }
+        if self.provider == "groq":
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
+        elif self.provider == "openrouter":
+            payload["reasoning"] = _default_reasoning(self.model)
+        if str(self.model or "").startswith(_REASONING_REQUIRED):
+            # Reasoning tokens count against the cap; 24 left gpt-oss no room to answer.
+            key = "max_completion_tokens" if "max_completion_tokens" in payload else "max_tokens"
+            payload[key] = max(int(payload[key]), 256)
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if self.provider == "openrouter":
+            headers["HTTP-Referer"] = "https://github.com/Senthi1Kumar/nova-s2s"
+            headers["X-Title"] = "Nova Hailo"
+        try:
+            resp = self._client.post(
+                self.url, headers=headers, json=payload,
+                timeout=httpx.Timeout(4.0, connect=CONNECT_TIMEOUT_S),
+            )
+            if resp.status_code >= 400:
+                return None
+            body = resp.json()
+            content = str(
+                (((body.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+            ).strip()
+            if not content:
+                return None
+            return (content.splitlines()[0].strip() if first_line else content) or None
+        except Exception:
+            return None
 
     def parse_tool(self, raw: str):
         del raw

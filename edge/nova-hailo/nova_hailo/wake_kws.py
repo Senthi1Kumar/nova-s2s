@@ -1,6 +1,7 @@
 """Optional wake-word (KWS) for OEM demo — PTT remains the fail-safe.
 
-Callers: nova_hailo.web.realtime_session when wake.kws_enabled.
+Callers: nova_hailo.web.realtime_session (LAN) and nova_hailo.lk.door (online),
+both via WakeWordDetector.from_config so the two doors share one wake.* reading.
 Engines: openwakeword (default) or legacy micro_kws.
 """
 from __future__ import annotations
@@ -16,6 +17,18 @@ logger = logging.getLogger("nova_hailo.kws")
 
 class WakeWordDetector:
     """Returns no detections when model unavailable (fail-open to PTT)."""
+
+    @classmethod
+    def from_config(cls, cfg) -> WakeWordDetector:
+        return cls(
+            enabled=bool(cfg.get("wake", "kws_enabled", default=False)),
+            engine=str(cfg.get("wake", "kws_engine", default="openwakeword") or "openwakeword"),
+            threshold=float(cfg.get("wake", "kws_threshold", default=0.15) or 0.15),
+            model_path=cfg.get("wake", "kws_model"),
+            consecutive_hits=int(cfg.get("wake", "kws_consecutive_hits", default=1) or 1),
+            cooldown_s=float(cfg.get("wake", "kws_cooldown_s", default=1.5) or 1.5),
+            barge_threshold=float(cfg.get("wake", "kws_barge_threshold", default=0.10) or 0.10),
+        )
 
     def __init__(
         self,

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from nova_hailo.cabingym.cloud_tools import PREFIX as VEHICLE_PREFIX
+from nova_hailo.cabingym.cloud_tools import vehicle_tool_schemas
 from nova_hailo.edge_harness.policy import CapabilityProfile
 from nova_hailo.edge_harness.types import Intent
 
@@ -90,7 +92,9 @@ _CLOUD_TOOLS: dict[str, dict[str, Any]] = {
 }
 
 
-def openai_tools_for_profile(profile: CapabilityProfile | None) -> list[dict[str, Any]]:
+def openai_tools_for_profile(
+    profile: CapabilityProfile | None, vehicle_devices: Any = None
+) -> list[dict[str, Any]]:
     """Allowlisted function tools in OpenAI chat.completions shape."""
     enabled = profile.enabled if profile is not None else frozenset()
     out: list[dict[str, Any]] = []
@@ -119,11 +123,15 @@ def openai_tools_for_profile(profile: CapabilityProfile | None) -> list[dict[str
                 },
             }
         )
+    if vehicle_devices and profile is not None and profile.allows("vehicle"):
+        out.extend(vehicle_tool_schemas(vehicle_devices))
     return out
 
 
 def tool_call_kwargs(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     """Map model arguments onto OemToolGateway.execute(**kwargs)."""
+    if name.startswith(VEHICLE_PREFIX):
+        return dict(arguments or {})
     args = dict(arguments or {})
     kwargs: dict[str, Any] = {"query": str(args.get("query") or "")}
     if name == "research_status":

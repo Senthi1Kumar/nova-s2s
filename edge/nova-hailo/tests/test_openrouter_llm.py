@@ -209,6 +209,34 @@ def _capture_client(seen: dict) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def test_complete_line_is_one_non_streaming_line_and_hides_failures():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Los Gatos\nignore"}}]})
+
+    llm = OpenRouterLLM(
+        api_key="sk-test", model="qwen/qwen3.8-flash",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert llm.complete_line("where", max_tokens=24) == "Los Gatos"
+    body = seen["body"]
+    assert body["stream"] is False
+    assert body["temperature"] == 0
+    assert body["max_tokens"] == 24
+    assert body["reasoning"] == {"enabled": False}
+
+    def fail(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "no"})
+
+    down = OpenRouterLLM(
+        api_key="sk-test", model="qwen/qwen3.8-flash",
+        client=httpx.Client(transport=httpx.MockTransport(fail)),
+    )
+    assert down.complete_line("where") is None
+
+
 def test_groq_payload_omits_openrouter_routing_fields():
     seen: dict = {}
     llm = OpenRouterLLM(
@@ -298,3 +326,52 @@ def test_http_error_names_the_provider():
         assert "OpenRouter" not in str(exc)
     else:
         raise AssertionError("expected RuntimeError")
+
+
+def test_openrouter_reasoning_stays_off_by_default_and_can_be_set():
+    seen: dict = {}
+    OpenRouterLLM(api_key="k", model="x/y", provider="openrouter",
+                  client=_capture_client(seen)).generate([{"role": "user", "content": "hi"}])
+    assert seen["body"]["reasoning"] == {"enabled": False}
+    OpenRouterLLM(api_key="k", model="openai/gpt-oss-120b", provider="openrouter",
+                  openrouter_reasoning={"effort": "low"},
+                  client=_capture_client(seen)).generate([{"role": "user", "content": "hi"}])
+    assert seen["body"]["reasoning"] == {"effort": "low"}
+
+
+def test_gpt_oss_on_openrouter_reasons_at_low_effort_since_it_cannot_turn_reasoning_off():
+    # OpenRouter answers {"enabled": false} for gpt-oss with HTTP 400 "Reasoning is mandatory".
+    seen: dict = {}
+    for model in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
+        OpenRouterLLM(api_key="k", model=model, provider="openrouter",
+                      client=_capture_client(seen)).generate([{"role": "user", "content": "hi"}])
+        assert seen["body"]["reasoning"] == {"effort": "low"}, model
+
+
+def test_a_reasoning_model_gets_room_to_answer_a_one_line_completion():
+    # gpt-oss spends its reasoning inside max_tokens: 24 left no answer, so a heard
+    # place name was never corrected.
+    seen: dict = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Bullis Charter School"}}]})
+
+    llm = OpenRouterLLM(api_key="k", model="openai/gpt-oss-120b", provider="openrouter",
+                        client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert llm.complete_line("which place?", max_tokens=24) == "Bullis Charter School"
+    assert seen["body"]["max_tokens"] >= 256 and seen["body"]["reasoning"] == {"effort": "low"}
+    plain = OpenRouterLLM(api_key="k", model="deepseek/deepseek-v4-flash-0731", provider="openrouter",
+                          client=httpx.Client(transport=httpx.MockTransport(handler)))
+    plain.complete_line("which place?", max_tokens=24)
+    assert seen["body"]["max_tokens"] == 24
+
+
+def test_a_completion_can_keep_every_line():
+    def handler(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A\nB\nC"}}]})
+
+    llm = OpenRouterLLM(api_key="k", model="x/y", provider="openrouter",
+                        client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert llm.complete_line("q") == "A"
+    assert llm.complete_line("q", first_line=False) == "A\nB\nC"

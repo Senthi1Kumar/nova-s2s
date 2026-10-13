@@ -34,6 +34,19 @@ from nova_hailo.metrics import Timer, TurnMetrics
 from nova_hailo.pipeline import NovaPipeline
 from nova_hailo.session_log import current as session_log_current
 from nova_hailo.web.dtln import DEFAULT_STRENGTH, create_dtln
+from nova_hailo.web import settings_ops
+from nova_hailo.cabingym.events import vehicle_delta_event, vehicle_snapshot_event
+from nova_hailo.web.cards import delivery_card_events, turn_card
+from nova_hailo.web.observe import HUB as OBSERVERS
+from nova_hailo.cabingym.confirm import parse_confirmation
+from nova_hailo.web.echo_guard import EchoGuard, fold_words
+from nova_hailo.web.session_control import CONTROL
+from nova_hailo.web.research_speech import delivery_trace_events, research_announcement
+from nova_hailo.web.settings_ops import (
+    google_connect_payload as _google_connect_payload,
+    google_disconnect_payload as _google_disconnect_payload,
+    integrations_snapshot as _integrations_snapshot,
+)
 from nova_hailo.pvad_optional import OptionalFireRedPVAD
 from nova_hailo.session_fsm import SessionFSM, SessionState, TurnTerminal
 from nova_hailo.voice_loop import prepare_for_whisper
@@ -203,6 +216,7 @@ class PendingUtterance:
     kind: str = "overlap"  # barge_in | overlap
     speech_stopped_at: float | None = None
     turn_revision: int = 0
+    echo_suspect: bool = False
 
 
 def _concat_audio(left: np.ndarray | None, right: np.ndarray) -> np.ndarray:
@@ -212,81 +226,20 @@ def _concat_audio(left: np.ndarray | None, right: np.ndarray) -> np.ndarray:
     return np.concatenate([np.asarray(left, dtype=np.float32).reshape(-1), right_a])
 
 
-def _integrations_snapshot() -> dict[str, Any]:
-    """Read-only Google + connector status for the QML driver face.
-
-    The QML driver face only ever shows this, never configures it (that stays
-    in the browser settings UI), so a stale or missing value must never block
-    a turn. Each lookup is independently wrapped: a failure in one must not
-    take out the other, and any failure falls back to a disconnected/empty
-    state rather than raising.
-    """
-    google = {"connected": False, "needs_reauth": False}
-    try:
-        from nova_hailo.google_oauth import integration_status
-
-        status = integration_status() or {}
-        needs_reauth = bool(status.get("needs_reauth"))
-        google = {
-            "connected": bool(status.get("authenticated")) and not needs_reauth,
-            "needs_reauth": needs_reauth,
-        }
-    except Exception:
-        pass
-
-    connectors = {"enabled": 0, "tools": 0}
-    try:
-        from nova_hailo.connectors.registry import list_connectors, total_enabled_tools
-
-        enabled = sum(1 for c in (list_connectors() or []) if c.get("enabled"))
-        connectors = {"enabled": enabled, "tools": int(total_enabled_tools() or 0)}
-    except Exception:
-        pass
-
-    return {"google": google, "connectors": connectors}
-
-
-def _google_connect_payload() -> dict[str, Any]:
-    """Kick off (or resume) the Google OAuth flow for a websocket client.
-
-    Read-only from the QML driver face's perspective: it only ever receives
-    this reply and opens ``auth_url`` in a real browser -- an OAuth consent
-    screen cannot render usefully on the driver display. Mirrors the REST
-    ``/integrations/google/auth/start`` handler in web/app.py so both
-    surfaces share one behavior. Any failure to start the flow degrades to
-    an error reply instead of raising into the WS reader loop.
-    """
-    from nova_hailo.google_oauth import begin_ui_oauth_flow
-
-    try:
-        result = begin_ui_oauth_flow() or {}
-    except Exception as exc:  # noqa: BLE001
-        return {"type": "nova.google.auth_url", "auth_url": None, "error": str(exc)}
-    return {
-        "type": "nova.google.auth_url",
-        "auth_url": result.get("auth_url"),
-        "status": result.get("status"),
-    }
-
-
-def _google_disconnect_payload() -> dict[str, Any]:
-    """Forget stored refresh tokens locally (does not revoke at Google).
-
-    Mirrors the REST ``/integrations/google/disconnect`` handler. Never
-    raises: a corrupt or unreadable token store just means there was nothing
-    to forget.
-    """
-    from nova_hailo.google_oauth import GoogleTokenProvider
-
-    try:
-        GoogleTokenProvider().store.clear()
-    except Exception:
-        pass
-    return {"type": "nova.google.disconnected"}
-
-
 class RealtimeSession:
     """Generation-safe realtime session with explicit FSM + bounded pending queue."""
+
+    # Mic mute, display arm and × cancel (web.session_control); the mute is the cabin's.
+    control = CONTROL
+    # Echo defences (config voice.*); class values are the defaults.
+    trust_client_aec = False
+    echo_suspect_s = 1.5
+    fail_closed_cooldown_s = 6.0
+    dedupe_user_s = 8.0
+    _last_audible_mono = 0.0
+    _last_barge_mono = 0.0
+    _utterance_started_mono: float | None = None
+    _last_user_turn: tuple[str, float] | None = None
 
     def __init__(
         self,
@@ -332,17 +285,7 @@ class RealtimeSession:
             wake_mode = wake_mode_env
         else:
             wake_mode = str(cfg.get("wake", "mode", default="ptt") or "ptt").lower()
-        self.wake = WakeWordDetector(
-            enabled=bool(cfg.get("wake", "kws_enabled", default=False)),
-            engine=str(cfg.get("wake", "kws_engine", default="openwakeword") or "openwakeword"),
-            threshold=float(cfg.get("wake", "kws_threshold", default=0.15) or 0.15),
-            model_path=cfg.get("wake", "kws_model"),
-            consecutive_hits=int(cfg.get("wake", "kws_consecutive_hits", default=1) or 1),
-            cooldown_s=float(cfg.get("wake", "kws_cooldown_s", default=1.5) or 1.5),
-            barge_threshold=float(
-                cfg.get("wake", "kws_barge_threshold", default=0.10) or 0.10
-            ),
-        )
+        self.wake = WakeWordDetector.from_config(cfg)
         self.gate_on_wake = wake_mode == "kws" and self.wake.available
         if hasattr(self.fsm, "_expire_listening"):
             self.fsm._expire_listening = self.gate_on_wake
@@ -386,6 +329,16 @@ class RealtimeSession:
             flush=True,
         )
         self.echo_tail_ms = int(cfgv.get("voice", "echo_tail_ms", default=400) or 400)
+        trust_env = (os.environ.get("NOVA_HAILO_TRUST_CLIENT_AEC") or "").strip().lower()
+        self.trust_client_aec = (
+            trust_env in {"1", "true", "yes", "on"} if trust_env
+            else bool(cfgv.get("voice", "trust_client_aec", default=False))
+        )
+        self.echo_suspect_s = float(cfgv.get("voice", "echo_suspect_s", default=1.5) or 0.0)
+        self.fail_closed_cooldown_s = float(
+            cfgv.get("voice", "fail_closed_cooldown_s", default=6.0) or 0.0)
+        self.dedupe_user_s = float(cfgv.get("voice", "dedupe_user_s", default=8.0) or 0.0)
+        self.echo_guard = EchoGuard()
         self._echo_until = 0.0
         self._echo_logged = False
         self._client_playing = False
@@ -432,18 +385,73 @@ class RealtimeSession:
         self._uplink_log_at: float = 0.0
         self._wake_peak: float = 0.0
 
-    async def send(self, event: dict[str, Any]):
+    async def send(self, event: dict[str, Any], mirror: bool = True):
         if self._closed or self.ws.client_state != WebSocketState.CONNECTED:
             return
+        if mirror:
+            OBSERVERS.publish_session_event(event)  # displays on /v1/observe see it too
         try:
             await self.ws.send_text(json.dumps(event))
         except Exception:
             pass
 
-    def _schedule_send(self, event: dict[str, Any]):
+    def _on_vehicle_changes(self, changes) -> None:
+        """VssStore listener; may run on a worker thread, so hop to the loop."""
+        self._vehicle_seq += 1
+        self._schedule_send(vehicle_delta_event(changes, self._vehicle_seq))
+
+    def _schedule_send(self, event: dict[str, Any], mirror: bool = True):
         if self._closed:
             return
-        asyncio.run_coroutine_threadsafe(self.send(event), self.loop)
+        coro = self.send(event) if mirror else self.send(event, mirror=False)
+        asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    # ---- mute / arm / cancel from displays (web.session_control) -------------
+
+    def control_mute(self, muted: bool) -> None:
+        self._call_on_loop(self._apply_mute, bool(muted))
+
+    def control_arm(self) -> None:
+        self._call_on_loop(self._on_wake_hit, "cockpit")
+
+    def control_cancel(self) -> None:
+        self._call_on_loop(self._cancel_from_control)
+
+    def control_state(self) -> str:
+        return self.fsm.state.value
+
+    def _call_on_loop(self, fn: Any, *args: Any) -> None:
+        loop = getattr(self, "loop", None)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if loop is None or running is loop or not loop.is_running():
+            fn(*args)
+        else:
+            loop.call_soon_threadsafe(fn, *args)
+
+    def _apply_mute(self, muted: bool) -> None:
+        """Mic off (or on). What Nova is saying finishes; what the user was half-way
+        through saying is dropped, so unmuting starts clean."""
+        if muted:
+            self._speech_started_mono = None
+            if hasattr(self.vad, "reset"):
+                self.vad.reset()
+            self._utterance_audio = None
+            self._turn_revision = 0
+            self._cancel_reopen()
+            loop = getattr(self, "loop", None)
+            if loop is not None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._abort_nemo_stream(), loop)
+        print(f"[mic] {'muted' if muted else 'unmuted'} by {self.control.source}", flush=True)
+        # Only this session's client: the control already told /v1/observe.
+        self._schedule_send({"type": "nova.mic", "muted": muted, "source": self.control.source},
+                            mirror=False)
+
+    def _cancel_from_control(self) -> None:
+        self._barge_in(reason="ui_cancel")
+        self.fsm.force_idle()
 
     async def _send_error(self, err_type: str, message: str) -> None:
         # Protocol errors keep the socket open: a device with one bad frame
@@ -508,15 +516,11 @@ class RealtimeSession:
         }
 
     def _settings_payload(self) -> dict[str, Any]:
-        snap = {}
-        fn = getattr(self.pipeline, "llm_settings_snapshot", None)
-        if fn is not None:
-            try:
-                snap = fn() or {}
-            except Exception:
-                snap = {}
+        snap = dict(settings_ops.llm_snapshot(self.pipeline))
         snap.update(self._voice_snapshot())
         snap.update(_integrations_snapshot())
+        # The provider/model shape displays read (GET /v1/settings), next to the HMI's flat keys.
+        snap["llm"] = settings_ops.llm_settings(self.pipeline)
         return snap
 
     def _apply_voice_settings(self, payload: dict[str, Any]) -> None:
@@ -535,35 +539,15 @@ class RealtimeSession:
             print(f"[dtln] mix={self.ns.strength}", flush=True)
 
     async def _apply_llm_settings_bg(self, payload: dict[str, Any]) -> None:
-        apply = getattr(self.pipeline, "apply_llm_settings", None)
-        if apply is None:
-            await self.send(
-                {
-                    "type": "nova.llm_status",
-                    "status": "error",
-                    "error": "llm settings not supported",
-                }
-            )
-            return
-        try:
-            snap = await asyncio.to_thread(
-                lambda: apply(
-                    mode=payload.get("mode"),
-                    local_hef=payload.get("local_hef"),
-                    or_model=payload.get("or_model"),
-                )
-            )
+        snap, status = await settings_ops.apply_llm_settings(self.pipeline, payload)
+        if snap is not None:
             await self.send(
                 {
                     "type": "nova.settings",
                     **{**snap, **self._voice_snapshot(), **_integrations_snapshot()},
                 }
             )
-            await self.send({"type": "nova.llm_status", "status": "ready"})
-        except Exception as exc:  # noqa: BLE001
-            await self.send(
-                {"type": "nova.llm_status", "status": "error", "error": str(exc)}
-            )
+        await self.send(status)
 
     def _on_fsm_change(self, snapshot: dict[str, Any]) -> None:
         """Push every FSM transition to the browser (driver orb + /dashboard)."""
@@ -595,7 +579,11 @@ class RealtimeSession:
         """
         if self._closed:
             return
-        if not self._research_backlog and not self.pipeline.pending_research():
+        if (
+            not self._research_backlog
+            and not self.pipeline.pending_research()
+            and not self._nav_guidance_waiting()
+        ):
             return  # cheap peek; avoids a thread spawn on every idle tick
 
         def blocked(why: str) -> None:
@@ -625,6 +613,7 @@ class RealtimeSession:
                 # Backlog first, so an interrupted delivery resumes in order.
                 queue = self._research_backlog + self.pipeline.drain_finished_research()
                 self._research_backlog = []
+                had_research = bool(queue)
                 while queue:
                     if self._closed or self.pipeline.abort_event.is_set():
                         break
@@ -645,6 +634,9 @@ class RealtimeSession:
                 # Whatever we could not say now is kept, not dropped: the user
                 # asked for this research and a later quiet tick will deliver it.
                 self._research_backlog = queue
+                # A route prompt waits until a tick that has nothing else to say.
+                if not had_research and not queue:
+                    self._speak_nav_guidance()
             finally:
                 self._turn_lock.release()
 
@@ -660,20 +652,13 @@ class RealtimeSession:
         interrupts it correctly. Gating instead uses ``pipeline.gen_guard``
         directly, the same primitive ``on_abort()`` invalidates on barge-in.
         """
-        speak = str(item.get("speak") or "").strip()
-        if not speak:
+        prefixed = research_announcement(item)
+        if not prefixed:
             return False
-        # Name the question being answered. A result can land several turns
-        # after it was asked, and "that research you asked for" is
-        # indistinguishable from a wrong answer to whatever was just said.
-        asked = " ".join(str(item.get("user_text") or "").split())[:80].rstrip(" ,.?!")
-        prefixed = (
-            f"About your question on {asked} — {speak}"
-            if asked
-            else f"About that research you asked for — {speak}"
-        )
         self.pipeline.begin_turn()  # clear abort/barge-in/gen_guard before speaking
         my_gen = self.pipeline.gen_guard.generation_id
+        for event in delivery_trace_events(item, my_gen) + delivery_card_events(item, my_gen):
+            self._schedule_send(event)  # a delegated result's calls, shown as it is spoken
 
         def on_pcm(chunk: np.ndarray, sample_rate: int) -> None:
             if not self.pipeline.gen_guard.is_live(my_gen):
@@ -690,6 +675,7 @@ class RealtimeSession:
             self._send_audio(chunk, sample_rate, my_gen)
 
         def on_clause(text: str) -> None:
+            self._guard().spoken(text)
             if not self.pipeline.gen_guard.is_live(my_gen):
                 return
             self._schedule_send(
@@ -758,6 +744,104 @@ class RealtimeSession:
             self.pipeline.on_validated_clause = None
             self.pipeline.on_research_status = None
             self.pipeline.on_tool_status = None
+            self.pipeline.on_agent_trace = None
+            self.pipeline.on_token = None
+
+    def _nav_guidance_waiting(self) -> bool:
+        feed = getattr(self.pipeline, "nav_feed", None)
+        waiting = getattr(feed, "guidance_waiting", None)
+        return bool(waiting and waiting())
+
+    def _speak_nav_guidance(self) -> bool:
+        """Speak one route prompt. Mute does not stop this; a live turn does."""
+        feed = getattr(self.pipeline, "nav_feed", None)
+        take = getattr(feed, "take_guidance", None)
+        if take is None or not self._nav_guidance_waiting():
+            return False
+        if (
+            self.fsm.state not in _RESEARCH_QUIET_STATES
+            or self.pipeline.abort_event.is_set()
+            or self.pipeline.tts.is_speaking
+        ):
+            return False
+        line = take()
+        if not line:
+            return False
+        self.pipeline.begin_turn()
+        my_gen = self.pipeline.gen_guard.generation_id
+
+        def on_pcm(chunk: np.ndarray, sample_rate: int) -> None:
+            if not self.pipeline.gen_guard.is_live(my_gen):
+                return
+            dur = len(np.asarray(chunk).reshape(-1)) / float(max(sample_rate, 1))
+            now_m = time.monotonic()
+            self._echo_until = min(
+                max(self._echo_until, now_m) + dur, now_m + self.echo_max_ms / 1000.0
+            )
+            self._send_audio(chunk, sample_rate, my_gen)
+
+        def on_clause(text: str) -> None:
+            self._guard().spoken(text)
+            if not self.pipeline.gen_guard.is_live(my_gen):
+                return
+            self._schedule_send(
+                {
+                    "type": "response.audio_transcript.delta",
+                    "delta": text,
+                    "generation_id": my_gen,
+                }
+            )
+
+        self.pipeline.on_audio_pcm = on_pcm
+        self.pipeline.on_validated_clause = on_clause
+        self.pipeline.on_research_status = None
+        self.pipeline.on_token = None
+        try:
+            if (
+                self.fsm.state not in _RESEARCH_QUIET_STATES
+                or self.pipeline.abort_event.is_set()
+            ):
+                return False
+            tm = TurnMetrics(generation_id=my_gen, notes=["nav_guidance"])
+            result = self.pipeline._speak_tool_line(
+                line,
+                wall0=time.perf_counter(),
+                metrics=tm,
+                user_text="",
+                auth_decision="n/a",
+                tool_name="navigation",
+                record_session=False,
+                add_history=True,
+            )
+            if not self.pipeline.gen_guard.is_live(my_gen):
+                return False
+            self._schedule_send(
+                {
+                    "type": "response.audio_transcript.done",
+                    "transcript": line,
+                    "generation_id": my_gen,
+                }
+            )
+            out = result.metrics.to_dict()
+            self.bench.add_turn(out)
+            self._schedule_send({"type": "nova.turn_metrics", **out})
+            self._schedule_send(
+                {
+                    "type": "response.done",
+                    "response": {
+                        "id": "resp_" + uuid.uuid4().hex[:10],
+                        "status": "completed",
+                        "metadata": {"nav_guidance": True, "generation_id": my_gen},
+                    },
+                }
+            )
+            return True
+        finally:
+            self.pipeline.on_audio_pcm = None
+            self.pipeline.on_validated_clause = None
+            self.pipeline.on_research_status = None
+            self.pipeline.on_tool_status = None
+            self.pipeline.on_agent_trace = None
             self.pipeline.on_token = None
 
     async def _research_tick(self) -> None:
@@ -802,9 +886,17 @@ class RealtimeSession:
         except Exception:
             greeting = ""
         await self.send(self._session_created_payload(greeting))
-        snap = getattr(self.pipeline, "llm_settings_snapshot", None)
-        if snap is not None:
-            await self.send({"type": "nova.settings", **snap(), **_integrations_snapshot()})
+        self._vehicle_seq = 0
+        self._vehicle_unsub = None
+        cabin = getattr(getattr(self.pipeline, "oem_gateway", None), "cabin", None)
+        if cabin is not None:
+            await self.send(vehicle_snapshot_event(cabin))
+            self._vehicle_unsub = cabin.store.subscribe(self._on_vehicle_changes)
+        if getattr(self.pipeline, "llm_settings_snapshot", None) is not None:
+            await self.send({"type": "nova.settings", **self._settings_payload()})
+        await self.send({"type": "nova.mic", "muted": self.control.muted,
+                         "source": self.control.source}, mirror=False)
+        self._control_unregister = self.control.register(self)
         # Explicit first paint for clients that only listen for nova.fsm
         await self.send(
             {
@@ -823,6 +915,13 @@ class RealtimeSession:
             pass
         finally:
             self._closed = True
+            unregister = getattr(self, "_control_unregister", None)
+            if unregister is not None:
+                unregister()
+            unsub = getattr(self, "_vehicle_unsub", None)
+            if unsub is not None:
+                unsub()
+                self._vehicle_unsub = None
             task = self._research_task
             self._research_task = None
             if task is not None:
@@ -853,9 +952,12 @@ class RealtimeSession:
         loop.call_later(delay + 0.05, self._release_speaking_if_quiet)
 
     def _barge_allowed(self) -> bool:
-        # A client that declared its echo capability is the authority on
-        # whether its mic can hear the user over Nova's own playback.
+        # A client that says it has no echo canceller always closes the gate. One
+        # that claims a canceller is believed only with voice.trust_client_aec:
+        # a laptop "AEC" that did not cancel let Nova's voice fire tools and turns.
         aec = getattr(self, "_client_aec", None)
+        if aec is True and not getattr(self, "trust_client_aec", False):
+            aec = None
         if aec is None:
             return bool(self.barge_in_while_speaking)
         return bool(aec)
@@ -891,6 +993,10 @@ class RealtimeSession:
             return False
         inp = inp or {}
         out = out or {}
+        muted = inp.get("muted")
+        if muted is not None and not isinstance(muted, bool):
+            await self._send_error("invalid_session_update", "input.muted must be true or false")
+            return
         wake = inp.get("wake")
         if wake is not None:
             if wake not in ("server", "device"):
@@ -927,6 +1033,8 @@ class RealtimeSession:
             self._client_aec = aec
         if rate is not None:
             self._output_rate = int(rate)
+        if muted is not None:
+            self.control.set_muted(muted, "client")
         return True
 
     async def _dispatch_frame(self, message: dict[str, Any]) -> bool:
@@ -973,6 +1081,9 @@ class RealtimeSession:
             if thr is not None:
                 self.vad.set_threshold(float(thr))
             if session.get("arm") or session.get("ptt"):
+                if self.control.muted:
+                    await self._send_error("mic_muted", "the microphone is muted")
+                    return
                 if self.gate_on_wake:
                     if not self._logged_ignore_auto_arm:
                         print(
@@ -992,8 +1103,8 @@ class RealtimeSession:
             return
 
         if mtype == "nova.settings.set":
-            payload = msg.get("settings") if isinstance(msg.get("settings"), dict) else msg
-            voice_only = payload.get("mode") is None and payload.get("or_model") is None
+            payload = settings_ops.settings_body(msg)
+            voice_only = not settings_ops.changes_llm(payload)
             self._apply_voice_settings(payload)
             if voice_only:
                 await self.send({"type": "nova.settings", **self._settings_payload()})
@@ -1018,6 +1129,9 @@ class RealtimeSession:
             return
 
         if mtype in {"input_audio_buffer.arm", "ptt.down", "session.arm"}:
+            if self.control.muted:
+                await self._send_error("mic_muted", "the microphone is muted")
+                return
             self._ptt_armed = True
             if self._wake_source == "device":
                 # The device's wake word is this session's wake event: same
@@ -1059,6 +1173,7 @@ class RealtimeSession:
             )
             self._client_playing = bool(decision["client_playing"])
             self._echo_until = float(decision["echo_until"])
+            self._last_audible_mono = time.monotonic()
             print("[play] playback.stopped", flush=True)
             self._schedule_speaking_release()
             ctx = self.fsm.current
@@ -1102,6 +1217,8 @@ class RealtimeSession:
 
     async def _on_uplink_pcm(self, pcm: bytes) -> None:
         """One chunk of mic PCM16 from any transport (JSON append or binary frame)."""
+        if self.control.muted:
+            return  # mic off: nothing reaches the wake word, the VAD or STT
         self._uplink_frames += 1
         now_m = time.monotonic()
         # Never expire the follow-up window under a user who is mid-sentence:
@@ -1115,6 +1232,8 @@ class RealtimeSession:
             or bool(self.pipeline.tts.is_speaking)
             or bool(getattr(self, "_client_playing", False))
         )
+        if audible:
+            self._last_audible_mono = now_m
         wake_thr = self.wake.barge_threshold if audible else None
         # No server scoring when the device owns the wake word, and none while
         # a no-AEC device plays Nova's voice ("...ask Nova..." would self-wake).
@@ -1227,6 +1346,7 @@ class RealtimeSession:
                     self._turn_revision += 1
                     await self._start_nemo_stream(reuse=True)
                 else:
+                    self._utterance_started_mono = time.monotonic()
                     await self._start_nemo_stream(reuse=False)
                     if should_interrupt_on_user_speech(
                         fsm_state=self.fsm.state,
@@ -1293,6 +1413,7 @@ class RealtimeSession:
         )
 
     def _barge_in(self, reason: str, *, abort_nemo: bool = True):
+        self._last_barge_mono = time.monotonic()
         t0 = time.perf_counter()
         ctx = self.fsm.interrupt(reason=reason)
         t_llm0 = time.perf_counter()
@@ -1343,6 +1464,41 @@ class RealtimeSession:
             }
         )
 
+    def _guard(self) -> EchoGuard:
+        guard = self.__dict__.get("echo_guard")
+        if guard is None:
+            guard = self.echo_guard = EchoGuard()
+        return guard
+
+    def _confirmation_pending(self) -> bool:
+        vehicle = getattr(getattr(self.pipeline, "oem_gateway", None), "vehicle", None)
+        return getattr(vehicle, "pending", None) is not None
+
+    def _skip_turn(self, generation_id: int, reason: str) -> None:
+        """End a turn that must not reach the model (echo, repeat), without a word."""
+        self.fsm.complete(generation_id, TurnTerminal.REJECTED, metadata={"skip": reason})
+        self._schedule_send(
+            {
+                "type": "response.done",
+                "response": {
+                    "id": self._response_id,
+                    "status": "completed",
+                    "metadata": {"skipped": True, "reason": reason,
+                                 "generation_id": generation_id},
+                },
+            }
+        )
+
+    def _echo_suspect(self, started: float | None) -> bool:
+        """Speech that began while Nova was audible, within ``echo_suspect_s`` after,
+        or right after a barge-in, may be her own voice: it gets no fail-closed reply
+        and cannot seed the next prompt."""
+        if started is None or self.echo_suspect_s <= 0:
+            return False
+        if self._last_audible_mono and started - self._last_audible_mono < self.echo_suspect_s:
+            return True
+        return 0.0 <= started - self._last_barge_mono < self.echo_suspect_s
+
     def _cancel_reopen(self) -> None:
         task = self._reopen_task
         self._reopen_task = None
@@ -1364,6 +1520,7 @@ class RealtimeSession:
             else "overlap"
         )
         delay_s = max(0.0, self.reopen_ms / 1000.0)
+        echo_suspect = self._echo_suspect(self._utterance_started_mono)
 
         async def _commit():
             try:
@@ -1384,6 +1541,7 @@ class RealtimeSession:
                 speech_stopped_at=speech_stopped_at,
                 kind=kind,
                 turn_revision=revision,
+                echo_suspect=echo_suspect,
             )
 
         if delay_s <= 0:
@@ -1580,6 +1738,7 @@ class RealtimeSession:
         *,
         reason: str,
         metrics_extra: dict | None = None,
+        echo_suspect: bool = False,
     ) -> None:
         """Speak a fixed fallback when gate/STT fails — never silent, never LLM.
 
@@ -1589,9 +1748,12 @@ class RealtimeSession:
         """
         print(f"[asr] fail_closed reason={reason}")
         now_m = time.monotonic()
-        on_cooldown = not should_speak_fail_closed(
-            self._last_fail_closed_mono, now_m, FAIL_CLOSED_COOLDOWN_S
+        # Never for a suspect: the line itself echoes back and loops. Never twice
+        # within the cooldown either.
+        on_cooldown = echo_suspect or not should_speak_fail_closed(
+            self._last_fail_closed_mono, now_m, self.fail_closed_cooldown_s
         )
+        silent_reason = "echo_suspect" if echo_suspect else "fail_closed_cooldown"
 
         metrics: dict[str, Any] = dict(metrics_extra or {})
         notes = list(metrics.get("notes") or [])
@@ -1604,10 +1766,10 @@ class RealtimeSession:
         metrics["fail_closed"] = True
 
         if on_cooldown:
-            if "fail_closed_cooldown" not in notes:
-                notes.append("fail_closed_cooldown")
+            if silent_reason not in notes:
+                notes.append(silent_reason)
             metrics["notes"] = notes
-            metrics["reason"] = "fail_closed_cooldown"
+            metrics["reason"] = silent_reason
             self.bench.add_turn(metrics)
             self.fsm.complete(
                 generation_id,
@@ -1624,7 +1786,7 @@ class RealtimeSession:
                         "metadata": {
                             "skipped": True,
                             "fail_closed": True,
-                            "reason": "fail_closed_cooldown",
+                            "reason": silent_reason,
                             "original_reason": reason,
                             "generation_id": generation_id,
                         },
@@ -1656,6 +1818,7 @@ class RealtimeSession:
             self._send_audio(chunk, sample_rate, generation_id)
 
         def on_clause(text: str):
+            self._guard().spoken(text)
             if not self.fsm.is_current(generation_id):
                 return
             self._schedule_send(
@@ -1745,6 +1908,7 @@ class RealtimeSession:
             self.pipeline.on_validated_clause = None
             self.pipeline.on_research_status = None
             self.pipeline.on_tool_status = None
+            self.pipeline.on_agent_trace = None
             self.pipeline.on_token = None
 
     def _pop_fresh_pending(self) -> PendingUtterance | None:
@@ -1776,6 +1940,7 @@ class RealtimeSession:
         speech_stopped_at: float | None = None,
         kind: str = "overlap",
         turn_revision: int = 0,
+        echo_suspect: bool = False,
     ):
         # Overlap (echo/backlog while a turn is in flight without interrupt)
         # is dropped. Barge-in audio captured during INTERRUPTING must wait
@@ -1787,6 +1952,7 @@ class RealtimeSession:
             kind=kind,
             speech_stopped_at=speech_stopped_at,
             turn_revision=turn_revision,
+            echo_suspect=echo_suspect,
         )
         interrupting = self.fsm.state == SessionState.INTERRUPTING or kind == "barge_in"
         busy = self.fsm.state in {
@@ -1811,6 +1977,7 @@ class RealtimeSession:
                     nemo_result=item.nemo_result,
                     speech_stopped_at=item.speech_stopped_at,
                     turn_revision=item.turn_revision,
+                    echo_suspect=item.echo_suspect,
                 )
             finally:
                 self._turn_lock.release()
@@ -1825,6 +1992,7 @@ class RealtimeSession:
                 speech_stopped_at=nxt.speech_stopped_at,
                 kind=nxt.kind,
                 turn_revision=nxt.turn_revision,
+                echo_suspect=nxt.echo_suspect,
             )
 
         threading.Thread(target=worker, daemon=True, name="realtime-turn").start()
@@ -1836,6 +2004,7 @@ class RealtimeSession:
         *,
         speech_stopped_at: float | None = None,
         turn_revision: int = 0,
+        echo_suspect: bool = False,
     ):
         self.pipeline.begin_turn()
         self._first_audio_ack_at = None
@@ -1868,6 +2037,7 @@ class RealtimeSession:
                 generation_id,
                 reason=str(reason),
                 metrics_extra={"reason": reason, **st},
+                echo_suspect=echo_suspect,
             )
             return
 
@@ -1970,6 +2140,7 @@ class RealtimeSession:
                         f"stt_path={stt_path}",
                     ],
                 },
+                echo_suspect=echo_suspect,
             )
             return
 
@@ -1980,19 +2151,20 @@ class RealtimeSession:
                 last_speak = str(hist._turns[-1].assistant or "")
             except Exception:
                 last_speak = ""
-        if _transcript_is_echo(transcript, last_speak):
+        guard = self._guard()
+        # "Switch it." answering "Switch to eco mode?" shares the question's words;
+        # with a question pending, a yes or no is an answer, not an echo.
+        answering = self._confirmation_pending() and parse_confirmation(transcript) is not None
+        if not answering and (guard.is_echo(transcript)
+                              or _transcript_is_echo(transcript, last_speak)):
             print(f"[asr] skip TTS-echo transcript: {transcript!r}", flush=True)
-            self.fsm.complete(generation_id, TurnTerminal.REJECTED, metadata={"echo": True})
-            self._schedule_send(
-                {
-                    "type": "response.done",
-                    "response": {
-                        "id": self._response_id,
-                        "status": "completed",
-                        "metadata": {"skipped": True, "reason": "tts_echo", "generation_id": generation_id},
-                    },
-                }
-            )
+            self._skip_turn(generation_id, "tts_echo")
+            return
+        said = " ".join(fold_words(transcript))
+        last = self._last_user_turn
+        if last and said == last[0] and time.monotonic() - last[1] < self.dedupe_user_s:
+            print(f"[asr] skip repeated turn: {transcript!r}", flush=True)
+            self._skip_turn(generation_id, "duplicate")
             return
 
         self.fsm.set_thinking(generation_id)
@@ -2016,6 +2188,7 @@ class RealtimeSession:
             self._send_audio(chunk, sample_rate, generation_id)
 
         def on_clause(text: str):
+            guard.spoken(text)  # synthesized, so at least partly audible
             if not self.fsm.is_current(generation_id):
                 return
             self._schedule_send(
@@ -2054,18 +2227,34 @@ class RealtimeSession:
         self.pipeline.on_audio_pcm = on_pcm
         self.pipeline.on_validated_clause = on_clause
         self.pipeline.on_research_status = on_research_status
+        turn_trace: dict[str, dict] = {}
+
+        def on_agent_trace(payload: dict):
+            if not self.fsm.is_current(generation_id):
+                return
+            turn_trace["last"] = payload  # the turn's card reads it (route, results, media)
+            self._schedule_send(
+                {"type": "nova.agent_trace", "generation_id": generation_id, **payload}
+            )
+
         self.pipeline.on_tool_status = on_tool_status
+        self.pipeline.on_agent_trace = on_agent_trace
         self.pipeline.on_token = None
         try:
             if not self.fsm.is_current(generation_id):
                 return
-            result = self.pipeline.run_text_turn(
-                transcript,
-                stt_ms=stt_ms,
-                wall0=wall0,
-                record_session=True,
-                begin=False,
-            )
+            # A suspect turn may be Nova's own voice: it must not seed the next prompt.
+            self.pipeline.turn_trusted = not echo_suspect
+            try:
+                result = self.pipeline.run_text_turn(
+                    transcript,
+                    stt_ms=stt_ms,
+                    wall0=wall0,
+                    record_session=True,
+                    begin=False,
+                )
+            finally:
+                self.pipeline.turn_trusted = True
             if not self.fsm.is_current(generation_id):
                 return
             result.metrics.stt_load_ms = load_ms
@@ -2125,10 +2314,16 @@ class RealtimeSession:
                         "generation_id": generation_id,
                     }
                 )
+                card = turn_card(transcript, result.assistant_text, result.tool_name,
+                                 trace=turn_trace.get("last"))
+                if card is not None:
+                    self._schedule_send({"type": "nova.card", "generation_id": generation_id, **card})
 
             self.bench.add_turn(metrics)
             terminal = TurnTerminal.CANCELLED if cancelled else TurnTerminal.COMPLETED
             self.fsm.complete(generation_id, terminal, metadata=metrics)
+            if not cancelled:
+                self._last_user_turn = (said, time.monotonic())
             slog = session_log_current()
             if slog is not None:
                 llm = getattr(self.pipeline, "llm", None)
@@ -2182,5 +2377,6 @@ class RealtimeSession:
             self.pipeline.on_validated_clause = None
             self.pipeline.on_research_status = None
             self.pipeline.on_tool_status = None
+            self.pipeline.on_agent_trace = None
             self.pipeline.on_token = None
             self.pvad.reset()

@@ -281,6 +281,7 @@ def test_echo_false_skips_wake_scoring_while_audible():
 def test_echo_true_allows_voice_barge_in():
     s = _device_session(vad_events=[("speech_started", None)])
     s.barge_in_while_speaking = False
+    s.trust_client_aec = True  # opt-in (voice.trust_client_aec); off by default
     _update(s, {"input": {"echo_cancellation": True}})
     s.fsm.arm()
     s.fsm.begin_listen()
@@ -293,6 +294,7 @@ def test_echo_true_allows_voice_barge_in():
 def test_echo_true_client_cancel_barges_in_despite_server_default():
     s = _device_session()
     s.barge_in_while_speaking = False
+    s.trust_client_aec = True  # opt-in (voice.trust_client_aec); off by default
     _update(s, {"input": {"echo_cancellation": True}})
     s._client_playing = True
     s._echo_until = 10**12  # deep inside the echo window
@@ -468,7 +470,7 @@ def test_new_connection_starts_a_new_conversation():
         async def receive(self):
             return {"type": "websocket.disconnect", "code": 1000}
 
-    async def _send(ev):
+    async def _send(ev, mirror=True):
         events.append(ev.get("type"))
 
     s.ws = _WS()
@@ -480,3 +482,12 @@ def test_new_connection_starts_a_new_conversation():
     assert p._native_seeded is False          # the on-device model is re-seeded next turn
     assert "auth.reset" in events             # no payment confirmation carries over
     assert events.index("llm.clear") < events.index("session.created")
+
+
+
+def test_an_untrusted_echo_claim_keeps_the_mic_gated_while_nova_speaks():
+    s = _device_session(vad_events=[("speech_started", None)])
+    s.barge_in_while_speaking = False
+    s.trust_client_aec = False
+    s._client_aec = True
+    assert s._barge_allowed() is False

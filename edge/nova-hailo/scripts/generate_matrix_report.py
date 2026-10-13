@@ -27,6 +27,22 @@ def table(rows: list[list[str]]) -> str:
     return "\n".join([header, sep, *body])
 
 
+def _tail(d: dict[str, Any] | None) -> float | None:
+    """The latency figure to rank on: p95, falling back to p50.
+
+    summarize_latency always emits p95 for a non-empty sample, so the fallback
+    only fires on rows that predate it or that carry no latency block at all.
+    Returning p50 there keeps such a row rankable instead of silently scoring
+    it as zero, which would float it to the top.
+    """
+    if not d:
+        return None
+    v = d.get("p95")
+    if v is None:
+        v = d.get("p50")
+    return None if v is None else float(v)
+
+
 def latest_run_dir() -> Path:
     root = ROOT / "logs" / "model-matrix"
     runs = [p for p in root.glob("*") if p.is_dir() and (p / "summary.json").exists()]
@@ -97,14 +113,18 @@ def main() -> int:
         if not rows:
             winner_lines.append(f"- {comp}: no measured rows in this run")
             continue
-        # prefer highest response_contract_pass_rate / lowest latency mean when present
+        # prefer highest response_contract_pass_rate / lowest latency when present
         def score(c):
             q = c.get("quality") or {}
             lat = c.get("latency") or {}
             contract = q.get("response_contract_pass_rate")
             wer_mean = ((q.get("wer") or {}).get("mean"))
-            first = ((lat.get("first_pcm_ms") or {}).get("p50"))
-            ttft = ((lat.get("ttft_ms") or {}).get("p50"))
+            # Rank on the tail, not the median. A candidate with an excellent
+            # p50 and a four-second p95 wins on p50 and loses the demo: what
+            # an audience notices is the turn that hangs, not the nineteen
+            # that didn't.
+            first = _tail(lat.get("first_pcm_ms"))
+            ttft = _tail(lat.get("ttft_ms"))
             return (
                 0 if contract is None else -float(contract),
                 0 if wer_mean is None else float(wer_mean),
@@ -169,19 +189,32 @@ def main() -> int:
             table(exec_table_rows),
             "",
         ]
-        parts = []
-        floor = 0.0
+        parts, tail_parts = [], []
+        floor = tail_floor = 0.0
         for comp, key in (("asr", "infer_ms"), ("llm", "ttft_ms"), ("tts", "first_pcm_ms")):
-            b = best_by_comp.get(comp)
-            p50 = ((b or {}).get("latency", {}).get(key) or {}).get("p50")
+            d = ((best_by_comp.get(comp) or {}).get("latency", {}).get(key)) or {}
+            p50, p95 = d.get("p50"), d.get("p95")
             if p50 is not None:
                 parts.append(f"{comp} {p50}")
                 floor += float(p50)
+            if p95 is not None:
+                tail_parts.append(f"{comp} {p95}")
+                tail_floor += float(p95)
         if len(parts) == 3:
             exec_block += [
                 f"Warm component-sum lower bound: {' + '.join(parts)} ≈ **{floor:.0f} ms** "
                 "before VAD endpointing, transport, and playback — a floor, not an E2E TTFA "
                 "measurement. E2E audible TTFA requires the voice replay pass.",
+                "",
+            ]
+        if len(tail_parts) == 3:
+            # The p50 floor is what we quote; the p95 floor is what a live
+            # audience actually experiences on a bad turn. Quoting only the
+            # first has let tail regressions ship unnoticed.
+            exec_block += [
+                f"Tail (p95) component sum: {' + '.join(tail_parts)} ≈ **{tail_floor:.0f} ms** "
+                f"— {tail_floor - floor:.0f} ms worse than the p50 floor above. Budget "
+                "against this number, not the median.",
                 "",
             ]
     else:

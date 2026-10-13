@@ -6,7 +6,9 @@ Schema: HistoryTurn{user,assistant,tool_summary}; messages list[{role,content}]
 from __future__ import annotations
 
 import re
+import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -85,8 +87,17 @@ class HistoryTurn:
 class ConversationHistory:
     """Keep at most ``max_turns`` accepted user/assistant pairs."""
 
-    def __init__(self, max_turns: int = 2):
+    def __init__(
+        self,
+        max_turns: int = 2,
+        *,
+        unanswered_ttl_s: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.max_turns = max(0, int(max_turns))
+        self.unanswered_ttl_s = float(unanswered_ttl_s)
+        self._clock = clock
+        self._unanswered_at = 0.0
         self._turns: deque[HistoryTurn] = deque(maxlen=self.max_turns or 1)
         if self.max_turns <= 0:
             self._turns = deque(maxlen=0)
@@ -103,6 +114,7 @@ class ConversationHistory:
         assistant: str,
         *,
         tool_summary: str | None = None,
+        trusted: bool = True,
     ) -> None:
         u = (user or "").strip()
         a = (assistant or "").strip()
@@ -119,8 +131,11 @@ class ConversationHistory:
         # model refuse the next (unrelated) turn too.
         if _is_refusal(key):
             # Drop the reply, keep the question: without it the next turn's
-            # "Why is it?" / "search for it" has nothing to refer to.
-            self._unanswered = u[:240]
+            # "Why is it?" / "search for it" has nothing to refer to. Not when
+            # the "question" may have been Nova's own voice heard back.
+            if trusted:
+                self._unanswered = u[:240]
+                self._unanswered_at = self._clock()
             return
         # Reject a reply that carries an entity forward from the previous reply
         # when the current question never mentioned it. A wrong "NVIDIA's stock
@@ -175,8 +190,11 @@ class ConversationHistory:
         stamp = format_clock_stamp(now)
         if ut and self._unanswered:
             # Beside the question, like the clock: context for resolving "it",
-            # not a stored exchange the model could echo back.
-            ut = f"(Earlier question you could not answer: {self._unanswered})\n{ut}"
+            # not a stored exchange the model could echo back. Offered once, and
+            # only while it is recent.
+            if self._clock() - self._unanswered_at <= self.unanswered_ttl_s:
+                ut = f"(Earlier question you could not answer: {self._unanswered})\n{ut}"
+            self._unanswered = None
         ut = f"(Right now it is {stamp}.)\n{ut}" if ut else ut
         if no_think and "/no_think" not in ut.lower():
             ut = ut + "\n/no_think"
@@ -190,3 +208,7 @@ class ConversationHistory:
 
     def __len__(self) -> int:
         return len(self._turns)
+
+    def pairs(self) -> list[dict[str, str]]:
+        """Recent user and assistant lines, oldest first."""
+        return [{"user": turn.user, "assistant": turn.assistant} for turn in self._turns]

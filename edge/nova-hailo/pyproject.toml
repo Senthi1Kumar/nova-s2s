@@ -50,6 +50,16 @@ bench-search = ["exa-py"]
 # Jev semantic router (optional). Regex remains the fallback without this extra.
 #   uv sync --extra typesafe
 typesafe = ["typesafe-sdk"]
+# LiveKit agent worker (optional). The Pi registers outbound with an SFU, so a
+# roaming device is reachable without an inbound port while every model stays
+# on-device. /v1/realtime is unaffected and keeps serving LAN clients.
+# Resolves against our pinned sounddevice==0.5.1; only onnxruntime moves.
+# Pinned exactly: the TTS/STT base classes we subclass are not a stable API.
+#   uv sync --extra livekit
+livekit = [
+    "livekit-agents==1.8.3",
+    "livekit-plugins-silero",
+]
 
 [project.scripts]
 nova-hailo = "main:main"
@@ -60,6 +70,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["nova_hailo*"]
+
+[tool.setuptools.package-data]
+"nova_hailo.cabingym" = ["tasks/*.jsonl", "routes/*.json"]
 
 [tool.uv]
 # hailo_platform / pyhailort come from system packages (apt)

@@ -30,6 +30,7 @@ class Intent(str, Enum):
     CREATE_CALENDAR_EVENT = "create_calendar_event"
     DELETE_CALENDAR_EVENT = "delete_calendar_event"
     SEND_EMAIL = "send_email"
+    VEHICLE = "vehicle"
 
 
 @dataclass(frozen=True)

@@ -186,10 +186,71 @@ def _resample_mono(audio: np.ndarray, src_sr: int, dst_sr: int = 16000) -> np.nd
     return np.interp(x_new, xp, x).astype(np.float32)
 
 
-def run_vad_candidate(candidate: dict[str, Any], cases: list[dict[str, Any]], rng: random.Random) -> list[CaseResult]:
+def _vad_case_audio(row: dict[str, Any]) -> tuple[np.ndarray, bool, float]:
+    """Real recorded audio (record_vad_corpus.py) if the row has one, else a
+    synthetic tone (original desk-harness behavior). Returns
+    (int16 PCM samples, is_live, duration_ms)."""
+    audio_path = row.get("audio_path")
+    if audio_path:
+        wav_path = (CORPUS / audio_path) if not Path(audio_path).is_absolute() else Path(audio_path)
+        if wav_path.is_file():
+            import soundfile as sf
+
+            data, sr = sf.read(str(wav_path), dtype="float32")
+            if data.ndim > 1:
+                data = data.mean(axis=1)
+            if sr != 16000:
+                data = _resample_mono(data, sr, 16000)
+            pcm16 = np.clip(data * 32767.0, -32768, 32767).astype(np.int16)
+            return pcm16, True, len(pcm16) / 16000.0 * 1000.0
+    expected = row["kind"] == "speech"
+    duration_ms = int(row.get("duration_ms") or row.get("duration_target_s", 4.0) * 1000)
+    return _pcm16_tone(duration_ms, speech=expected), False, float(duration_ms)
+
+
+def _feed_and_track(seg, pcm16: np.ndarray, chunk_ms: int = 30) -> tuple[list, bool, float | None, float]:
+    """Feed audio in small chunks (so we can tell *when* speech_started fires,
+    not just *whether*), plus a silence tail to force endpoint. Returns
+    (all_events, detected, audio_time_s_of_first_speech_started, wall_ms)."""
     import time as _time
 
+    chunk_samples = int(16000 * chunk_ms / 1000)
+    all_events: list = []
+    detected = False
+    detect_audio_time: float | None = None
+    fed = 0
+    t0 = _time.perf_counter()
+    for i in range(0, len(pcm16), chunk_samples):
+        block = pcm16[i : i + chunk_samples]
+        events = seg.feed(block.tobytes())
+        all_events += events
+        fed += len(block)
+        if not detected and any(str(e[0]) == "speech_started" for e in events):
+            detected = True
+            detect_audio_time = fed / 16000.0
+    tail_events = seg.feed(_pcm16_tone(400, speech=False).tobytes())
+    all_events += tail_events
+    if not detected and any(str(e[0]) == "speech_started" for e in tail_events):
+        detected = True
+        detect_audio_time = fed / 16000.0
+    wall_ms = (_time.perf_counter() - t0) * 1000.0
+    return all_events, detected, detect_audio_time, wall_ms
 
+
+def _vad_detection_latency_ms(
+    row: dict[str, Any], is_live: bool, detect_audio_time: float | None, wall_ms: float
+) -> float | None:
+    """Ground-truth-relative latency for live recordings (audio-time of the
+    speech_started event minus the RMS-based speech_onset_s marker); falls
+    back to wall-clock processing time for synthetic tones -- same metric
+    Sprint 2's original desk-corpus numbers used, so those stay comparable."""
+    onset = row.get("speech_onset_s")
+    if is_live and onset is not None and detect_audio_time is not None:
+        return round(max(0.0, (detect_audio_time - float(onset)) * 1000.0), 2)
+    return round(wall_ms, 2)
+
+
+def run_vad_candidate(candidate: dict[str, Any], cases: list[dict[str, Any]], rng: random.Random) -> list[CaseResult]:
     backend = str(candidate.get("backend") or "")
     artifact = find_declared_artifact(candidate)
     rows: list[CaseResult] = []
@@ -208,13 +269,8 @@ def run_vad_candidate(candidate: dict[str, Any], cases: list[dict[str, Any]], rn
         for row in cases:
             kind = row["kind"]
             expected = kind == "speech"
-            pcm = _pcm16_tone(int(row["duration_ms"]), speech=expected)
-            t0 = _time.perf_counter()
-            events = seg.feed(pcm.tobytes())
-            # flush with a bit of silence to force endpoint
-            events += seg.feed(_pcm16_tone(400, speech=False).tobytes())
-            dt = (_time.perf_counter() - t0) * 1000.0
-            detected = any(str(e[0]) == "speech_started" for e in events)
+            pcm, is_live, duration_ms = _vad_case_audio(row)
+            events, detected, detect_t, wall_ms = _feed_and_track(seg, pcm)
             if kind == "speech":
                 ok = bool(detected)
             elif kind == "silence":
@@ -230,11 +286,61 @@ def run_vad_candidate(candidate: dict[str, Any], cases: list[dict[str, Any]], rn
                     metrics={
                         "ts": time.time(),
                         "kind": kind,
-                        "duration_ms": row["duration_ms"],
-                        "detection_latency_ms": round(dt, 2) if expected else None,
+                        "duration_ms": duration_ms,
+                        "live": is_live,
+                        "detection_latency_ms": _vad_detection_latency_ms(row, is_live, detect_t, wall_ms)
+                        if expected
+                        else None,
                         "false_accept": bool(detected) and not expected,
                         "events": [str(e[0]) for e in events],
                         "api": "silero_onnx_real",
+                    },
+                    resources=sample_resources().to_dict(),
+                    measured=True,
+                )
+            )
+            seg.reset()
+        return rows
+
+    if backend == "firered_onnx":
+        if artifact is None or importlib.util.find_spec("onnxruntime") is None:
+            reason = (
+                "firered artifact present; onnxruntime not installed on this host"
+                if artifact is not None
+                else "firered artifact missing"
+            )
+            return [unmeasured_case(candidate, row["id"], reason) for row in cases]
+        from nova_hailo.web.firered_vad import FireRedVadSegmenter
+
+        seg = FireRedVadSegmenter()
+        for row in cases:
+            kind = row["kind"]
+            expected = kind == "speech"
+            pcm, is_live, duration_ms = _vad_case_audio(row)
+            events, detected, detect_t, wall_ms = _feed_and_track(seg, pcm)
+            if kind == "speech":
+                ok = bool(detected)
+            elif kind == "silence":
+                ok = not bool(detected)
+            else:
+                ok = True  # noise: informational only
+            rows.append(
+                CaseResult(
+                    case_id=row["id"],
+                    candidate_id=str(candidate["id"]),
+                    component="vad",
+                    ok=ok,
+                    metrics={
+                        "ts": time.time(),
+                        "kind": kind,
+                        "duration_ms": duration_ms,
+                        "live": is_live,
+                        "detection_latency_ms": _vad_detection_latency_ms(row, is_live, detect_t, wall_ms)
+                        if expected
+                        else None,
+                        "false_accept": bool(detected) and not expected,
+                        "events": [str(e[0]) for e in events],
+                        "api": "firered_onnx_real",
                     },
                     resources=sample_resources().to_dict(),
                     measured=True,
@@ -252,12 +358,8 @@ def run_vad_candidate(candidate: dict[str, Any], cases: list[dict[str, Any]], rn
         for row in cases:
             kind = row["kind"]
             expected = kind == "speech"
-            pcm = _pcm16_tone(int(row["duration_ms"]), speech=expected)
-            t0 = _time.perf_counter()
-            events = seg.feed(pcm.tobytes())
-            events += seg.feed(_pcm16_tone(400, speech=False).tobytes())
-            dt = (_time.perf_counter() - t0) * 1000.0
-            detected = any(e[0] == "speech_started" for e in events)
+            pcm, is_live, duration_ms = _vad_case_audio(row)
+            events, detected, detect_t, wall_ms = _feed_and_track(seg, pcm)
             rows.append(
                 CaseResult(
                     case_id=row["id"],
@@ -267,8 +369,11 @@ def run_vad_candidate(candidate: dict[str, Any], cases: list[dict[str, Any]], rn
                     metrics={
                         "ts": time.time(),
                         "kind": kind,
-                        "duration_ms": row["duration_ms"],
-                        "detection_latency_ms": round(dt, 2) if expected else None,
+                        "duration_ms": duration_ms,
+                        "live": is_live,
+                        "detection_latency_ms": _vad_detection_latency_ms(row, is_live, detect_t, wall_ms)
+                        if expected
+                        else None,
                         "false_accept": bool(detected and not expected),
                         "api": "webrtcvad_real",
                     },
@@ -287,6 +392,7 @@ _CPU_ASR_BACKENDS = {
     "transcribe_cpp",
     "transformers_asr",
     "onnxruntime_genai_asr",
+    "nemo_speech",
 }
 
 
@@ -718,12 +824,15 @@ def summarize_component(candidate: dict[str, Any], rows: list[CaseResult]) -> Co
     )
 
 
-def load_cases(component: str, protocol: dict[str, Any], max_cases: int | None) -> list[dict[str, Any]]:
+def load_cases(
+    component: str, protocol: dict[str, Any], max_cases: int | None, live: bool = False
+) -> list[dict[str, Any]]:
     if component == "wake":
         # Reuse VAD case ids as wake timing placeholders for the PTT baseline.
         return case_slice(read_jsonl(CORPUS / "vad_cases.jsonl"), protocol, max_cases)
+    vad_path = CORPUS / "vad_live_cases.jsonl" if live and component == "vad" else CORPUS / "vad_cases.jsonl"
     path_map = {
-        "vad": CORPUS / "vad_cases.jsonl",
+        "vad": vad_path,
         "asr": CORPUS / "asr_transcripts.jsonl",
         "llm": CORPUS / "llm_prompts.jsonl",
         "tts": CORPUS / "tts_texts.jsonl",
@@ -758,6 +867,13 @@ def main() -> int:
     parser.add_argument("--hardware", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--ids", default="", help="comma-separated candidate ids to include (empty = all)")
+    parser.add_argument(
+        "--live-corpus",
+        action="store_true",
+        help="vad component only: score against bench/corpus/vad_live_cases.jsonl "
+        "(real recorded speech/silence/noise via record_vad_corpus.py) instead of "
+        "synthetic tones",
+    )
     args = parser.parse_args()
 
     manifest = load_manifest(args.manifest)
@@ -803,7 +919,7 @@ def main() -> int:
             continue
         if candidate_id in completed and not args.force:
             continue
-        cases = load_cases(component, protocol, args.max_cases)
+        cases = load_cases(component, protocol, args.max_cases, live=args.live_corpus)
         support = str(candidate.get("support") or UNMEASURED)
         if support == UNSUPPORTED:
             rows = [

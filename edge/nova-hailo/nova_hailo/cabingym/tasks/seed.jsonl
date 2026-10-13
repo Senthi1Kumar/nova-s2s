@@ -1,0 +1,89 @@
+{"id":"hvac-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"set the temperature to 23 degrees","expect_gate":["execute"]}],"expected_diff":{"hvac.driver.temp":23.0}}
+{"id":"hvac-002","category":"S-S","tags":["demo","relative"],"init":{},"turns":[{"user":"I'm a bit cold","expect_gate":["execute"]}],"expected_diff":{"hvac.driver.temp":22.0}}
+{"id":"hvac-003","category":"S-M","tags":["demo","relative"],"init":{"speed":50.0,"gear":"D","hvac.driver.temp":20.0},"turns":[{"user":"make it a bit warmer for me and turn the fan up","expect_gate":["execute","execute"]}],"expected_diff":{"hvac.driver.temp":21.0,"hvac.driver.fan":3,"hvac.passenger.fan":3}}
+{"id":"hvac-004","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"turn on the defroster","expect_gate":["execute"]}],"expected_diff":{"hvac.defrost.front":true}}
+{"id":"hvac-005","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"defrost the rear window","expect_gate":["execute"]}],"expected_diff":{"hvac.defrost.rear":true}}
+{"id":"hvac-006","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"turn off the AC","expect_gate":["execute"]}],"expected_diff":{"hvac.ac":false}}
+{"id":"hvac-007","category":"S-S","tags":["demo"],"init":{"hvac.recirc":true},"turns":[{"user":"switch to fresh air","expect_gate":["execute"]}],"expected_diff":{"hvac.recirc":false}}
+{"id":"hvac-008","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"set the passenger temperature to 19","expect_gate":["execute"]}],"expected_diff":{"hvac.passenger.temp":19.0}}
+{"id":"hvac-009","category":"S-S","tags":["demo"],"init":{"hvac.driver.temp":22.0},"turns":[{"user":"sync the passenger side to mine","expect_gate":["execute"]}],"expected_diff":{"hvac.passenger.temp":22.0,"hvac.sync":true}}
+{"id":"hvac-010","category":"S-S","tags":["demo","clamp"],"init":{},"turns":[{"user":"set the temperature to 35","expect_gate":["execute"]}],"expected_diff":{"hvac.driver.temp":28.0}}
+{"id":"hvac-011","category":"S-S","tags":["demo","fahrenheit"],"init":{},"turns":[{"user":"set it to 72 degrees","expect_gate":["execute"]}],"expected_diff":{"hvac.driver.temp":22.0}}
+{"id":"hvac-012","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"set driver and passenger to 20 degrees","expect_gate":["execute"]}],"expected_diff":{"hvac.driver.temp":20.0,"hvac.passenger.temp":20.0}}
+{"id":"hvac-013","category":"S-S","tags":["demo","relative"],"init":{"hvac.driver.temp":24.0},"turns":[{"user":"it's too warm in here","expect_gate":["execute"]}],"expected_diff":{"hvac.driver.temp":23.0}}
+{"id":"seat-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"turn on my seat heater","expect_gate":["execute"]}],"expected_diff":{"seat.driver.heat":2}}
+{"id":"seat-002","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"passenger seat heating on high","expect_gate":["execute"]}],"expected_diff":{"seat.passenger.heat":3}}
+{"id":"seat-003","category":"S-S","tags":["demo"],"init":{"seat.driver.heat":2},"turns":[{"user":"turn off the seat heating","expect_gate":["execute"]}],"expected_diff":{"seat.driver.heat":0}}
+{"id":"seat-004","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"cool my seat","expect_gate":["execute"]}],"expected_diff":{"seat.driver.vent":2}}
+{"id":"seat-005","category":"S-S","tags":["demo","decline"],"init":{},"turns":[{"user":"heat the rear seats","expect_gate":["decline"]}],"expected_diff":{}}
+{"id":"seat-006","category":"S-S","tags":["demo","decline"],"init":{},"turns":[{"user":"massage the back seats","expect_gate":["decline"]}],"expected_diff":{}}
+{"id":"seat-007","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"massage for me","expect_gate":["execute"]}],"expected_diff":{"seat.driver.massage":true}}
+{"id":"win-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"open my window","expect_gate":["execute"]}],"expected_diff":{"window.driver":100}}
+{"id":"win-002","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"crack the rear windows","expect_gate":["execute"]}],"expected_diff":{"window.rear_left":10,"window.rear_right":10}}
+{"id":"win-003","category":"S-S","tags":["demo"],"init":{"window.driver":100,"window.passenger":100,"window.rear_left":100,"window.rear_right":100},"turns":[{"user":"close all the windows","expect_gate":["execute"]}],"expected_diff":{"window.driver":0,"window.passenger":0,"window.rear_left":0,"window.rear_right":0}}
+{"id":"win-004","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"put the window down halfway on the passenger side","expect_gate":["execute"]}],"expected_diff":{"window.passenger":50}}
+{"id":"win-005","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"raise the rear shade","expect_gate":["execute"]}],"expected_diff":{"rear_shade":100}}
+{"id":"door-001","category":"S-S","tags":["demo"],"init":{"lock.driver":false,"lock.passenger":false,"lock.rear_left":false,"lock.rear_right":false},"turns":[{"user":"lock the doors","expect_gate":["execute"]}],"expected_diff":{"lock.driver":true,"lock.passenger":true,"lock.rear_left":true,"lock.rear_right":true}}
+{"id":"door-002","category":"S-S","tags":["demo","safety"],"init":{"speed":60.0,"gear":"D"},"turns":[{"user":"unlock the car","expect_gate":["refuse"]}],"expected_diff":{}}
+{"id":"door-003","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"unlock the doors","expect_gate":["execute"]}],"expected_diff":{"lock.driver":false,"lock.passenger":false,"lock.rear_left":false,"lock.rear_right":false}}
+{"id":"door-004","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"open the trunk","expect_gate":["execute"]}],"expected_diff":{"trunk":true}}
+{"id":"door-005","category":"S-S","tags":["demo","safety"],"init":{"speed":40.0,"gear":"D"},"turns":[{"user":"pop the trunk","expect_gate":["refuse"]}],"expected_diff":{}}
+{"id":"door-006","category":"S-S","tags":["demo","safety"],"init":{"speed":30.0,"gear":"D","child_lock.rear_left":true,"child_lock.rear_right":true},"turns":[{"user":"turn off the child locks","expect_gate":["confirm_first"]}],"expected_diff":{}}
+{"id":"door-007","category":"M-S","tags":["demo","safety"],"init":{"speed":30.0,"gear":"D","child_lock.rear_left":true,"child_lock.rear_right":true},"turns":[{"user":"turn off the child locks","expect_gate":["confirm_first"]},{"user":"yes","expect_gate":["execute"]}],"expected_diff":{"child_lock.rear_left":false,"child_lock.rear_right":false}}
+{"id":"light-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"turn on the hazards","expect_gate":["execute"]}],"expected_diff":{"hazards":true}}
+{"id":"light-002","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"high beams on","expect_gate":["execute"]}],"expected_diff":{"headlights":"high"}}
+{"id":"light-003","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"switch the headlights off","expect_gate":["execute"]}],"expected_diff":{"headlights":"off"}}
+{"id":"light-004","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"make the ambient lighting blue","expect_gate":["execute"]}],"expected_diff":{"ambient.color":"blue"}}
+{"id":"light-005","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"turn on the reading lights in the back","expect_gate":["execute"]}],"expected_diff":{"rear_reading":true}}
+{"id":"body-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"open the sunroof","expect_gate":["execute"]}],"expected_diff":{"sunroof":100}}
+{"id":"body-002","category":"S-S","tags":["demo","safety"],"init":{"speed":100.0,"gear":"D"},"turns":[{"user":"open the sunroof","expect_gate":["confirm_first"]}],"expected_diff":{}}
+{"id":"body-003","category":"M-S","tags":["demo","safety"],"init":{"speed":100.0,"gear":"D"},"turns":[{"user":"open the sunroof","expect_gate":["confirm_first"]},{"user":"yes please","expect_gate":["execute"]}],"expected_diff":{"sunroof":100}}
+{"id":"body-004","category":"M-S","tags":["demo","safety"],"init":{"speed":100.0,"gear":"D"},"turns":[{"user":"tilt the sunroof","expect_gate":["confirm_first"]},{"user":"no","expect_gate":["cancelled"]}],"expected_diff":{}}
+{"id":"body-005","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"turn the wipers on","expect_gate":["execute"]}],"expected_diff":{"wipers":"low"}}
+{"id":"body-006","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"fold the mirrors","expect_gate":["execute"]}],"expected_diff":{"mirrors.folded":true}}
+{"id":"body-007","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"close the sunshade","expect_gate":["execute"]}],"expected_diff":{"sunshade":100}}
+{"id":"media-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"play some jazz","expect_gate":["execute"]}],"expected_diff":{"media.state":"playing","media.title":"jazz"}}
+{"id":"media-002","category":"S-S","tags":["demo"],"init":{"media.state":"playing"},"turns":[{"user":"pause the music","expect_gate":["execute"]}],"expected_diff":{"media.state":"paused"}}
+{"id":"media-003","category":"S-S","tags":["demo"],"init":{"media.state":"playing"},"turns":[{"user":"skip this song","expect_gate":["execute"]}],"expected_diff":{"media.track":1}}
+{"id":"media-004","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"turn the volume up","expect_gate":["execute"]}],"expected_diff":{"volume":50}}
+{"id":"media-005","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"set the volume to 25","expect_gate":["execute"]}],"expected_diff":{"volume":25}}
+{"id":"media-006","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"switch to the radio","expect_gate":["execute"]}],"expected_diff":{"media.source":"radio"}}
+{"id":"nav-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"take me home","expect_gate":["execute"]}],"expected_diff":{"nav.active":true,"nav.dest":"home"}}
+{"id":"nav-002","category":"S-S","tags":["demo"],"init":{"nav.active":true,"nav.dest":"home"},"turns":[{"user":"cancel navigation","expect_gate":["execute"]}],"expected_diff":{"nav.active":false,"nav.dest":""}}
+{"id":"nav-003","category":"S-S","tags":["demo","poi"],"init":{},"turns":[{"user":"find the nearest charging station","expect_gate":["execute"]}],"expected_diff":{}}
+{"id":"nav-004","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"navigate to Sam's place","expect_gate":["execute"]}],"expected_diff":{"nav.active":true,"nav.dest":"Sam's place"}}
+{"id":"nav-005","category":"S-S","tags":["demo","poi"],"init":{"nav.active":true,"nav.dest":"home","nav.dest_lat":37.4275,"nav.dest_lon":-122.1697},"turns":[{"user":"add a stop at the nearest coffee shop","expect_gate":["execute"]}],"expected_diff":{"nav.stops":[{"name":"Hilltop Cafe","lat":37.443,"lon":-122.158,"category":"coffee"}]}}
+{"id":"nav-006","category":"S-S","tags":["demo","clarify"],"init":{},"turns":[{"user":"navigate to the moon base","expect_gate":["clarify"]}],"expected_diff":{}}
+{"id":"nav-007","category":"S-S","tags":["stt","stop"],"init":{"nav.active":true,"nav.dest":"home","nav.dest_lat":37.4275,"nav.dest_lon":-122.1697},"turns":[{"user":"I would like to pick up my child at Blue Door Coffee on our way","expect_gate":["execute"]}],"expected_diff":{"nav.stops":[{"name":"Blue Door Coffee","lat":37.4447,"lon":-122.161,"category":"coffee"}]}}
+{"id":"phone-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"call Sam","expect_gate":["execute"]}],"expected_diff":{"call.state":"dialing","call.peer":"Sam","last_dialed":"Sam"}}
+{"id":"phone-002","category":"S-S","tags":["demo","clarify"],"init":{},"turns":[{"user":"call Bob","expect_gate":["clarify"]}],"expected_diff":{}}
+{"id":"phone-003","category":"S-S","tags":["demo"],"init":{"call.state":"ringing","call.peer":"Priya"},"turns":[{"user":"answer it","expect_gate":["execute"]}],"expected_diff":{"call.state":"active"}}
+{"id":"phone-004","category":"S-S","tags":["demo"],"init":{"call.state":"ringing","call.peer":"Priya"},"turns":[{"user":"decline","expect_gate":["execute"]}],"expected_diff":{"call.state":"idle","call.peer":""}}
+{"id":"phone-005","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"read my messages","expect_gate":["execute"]}],"expected_diff":{"read_ids":["m2"]}}
+{"id":"phone-006","category":"S-S","tags":["demo","safety"],"init":{"speed":50.0,"gear":"D"},"turns":[{"user":"read my messages","expect_gate":["execute"]}],"expected_diff":{"read_ids":["m2"]}}
+{"id":"phone-007","category":"M-S","tags":["demo","safety"],"init":{},"turns":[{"user":"text Priya that I'm on my way","expect_gate":["confirm_first"]},{"user":"yes","expect_gate":["execute"]}],"expected_diff":{"outbox":[{"to":"Priya","text":"I'm on my way"}]}}
+{"id":"phone-008","category":"S-S","tags":["demo","safety"],"init":{"phone.connected":false},"turns":[{"user":"call Mom","expect_gate":["refuse"]}],"expected_diff":{}}
+{"id":"phone-009","category":"S-S","tags":["demo"],"init":{"call.state":"active","call.peer":"Sam"},"turns":[{"user":"hang up","expect_gate":["execute"]}],"expected_diff":{"call.state":"idle","call.peer":""}}
+{"id":"phone-010","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"who called me","expect_gate":["execute"]}],"expected_diff":{}}
+{"id":"phone-011","category":"S-S","tags":["demo","no_call"],"init":{},"turns":[{"user":"answer it","expect_gate":["clarify"]}],"expected_diff":{}}
+{"id":"read-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"how much range do I have left","expect_gate":["execute"]}],"expected_diff":{}}
+{"id":"read-002","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"what's the temperature outside","expect_gate":["execute"]}],"expected_diff":{}}
+{"id":"read-003","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"where am I","expect_gate":["execute"]}],"expected_diff":{}}
+{"id":"read-004","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"what gear am I in","expect_gate":["execute"]}],"expected_diff":{}}
+{"id":"sys-001","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"switch to sport mode","expect_gate":["execute"]}],"expected_diff":{"drive_mode":"sport"}}
+{"id":"sys-002","category":"S-S","tags":["demo","safety"],"init":{"speed":70.0,"gear":"D"},"turns":[{"user":"switch to eco mode","expect_gate":["confirm_first"]}],"expected_diff":{}}
+{"id":"sys-003","category":"S-S","tags":["demo"],"init":{},"turns":[{"user":"dim the screen","expect_gate":["execute"]}],"expected_diff":{"brightness":60}}
+{"id":"sys-004","category":"S-S","tags":["demo","safety"],"init":{"headlights":"low"},"turns":[{"user":"set screen brightness to 5 percent","expect_gate":["execute"]}],"expected_diff":{"brightness":10}}
+{"id":"multi-001","category":"S-M","tags":["demo"],"init":{},"turns":[{"user":"make it warmer for me and call Sam","expect_gate":["execute","execute"]}],"expected_diff":{"hvac.driver.temp":22.0,"call.state":"dialing","call.peer":"Sam","last_dialed":"Sam"}}
+{"id":"multi-002","category":"S-M","tags":["demo"],"init":{},"turns":[{"user":"navigate home and play some jazz","expect_gate":["execute","execute"]}],"expected_diff":{"nav.active":true,"nav.dest":"home","media.state":"playing","media.title":"jazz"}}
+{"id":"multi-003","category":"S-M","tags":["demo"],"init":{"window.driver":100,"window.passenger":100,"window.rear_left":100,"window.rear_right":100,"lock.driver":false,"lock.passenger":false,"lock.rear_left":false,"lock.rear_right":false},"turns":[{"user":"close all the windows and lock the doors","expect_gate":["execute","execute"]}],"expected_diff":{"window.driver":0,"window.passenger":0,"window.rear_left":0,"window.rear_right":0,"lock.driver":true,"lock.passenger":true,"lock.rear_left":true,"lock.rear_right":true}}
+{"id":"multi-004","category":"S-M","tags":["demo"],"init":{"hvac.driver.temp":23.0},"turns":[{"user":"set the temperature to 21 and the volume to 30","expect_gate":["execute","execute"]}],"expected_diff":{"hvac.driver.temp":21.0,"volume":30}}
+{"id":"multi-005","category":"M-M","tags":["demo"],"init":{},"turns":[{"user":"take me to work","expect_gate":["execute"]},{"user":"and play some jazz","expect_gate":["execute"]}],"expected_diff":{"nav.active":true,"nav.dest":"work","media.state":"playing","media.title":"jazz"}}
+{"id":"para-001","category":"S-S","tags":["paraphrase"],"init":{},"turns":[{"user":"my feet are freezing","expect_gate":["execute"]}],"expected_diff":{"hvac.driver.temp":22.0}}
+{"id":"para-002","category":"S-S","tags":["paraphrase"],"init":{},"turns":[{"user":"I can't see out the windshield, it's all fogged up","expect_gate":["execute"]}],"expected_diff":{"hvac.defrost.front":true}}
+{"id":"para-003","category":"S-S","tags":["paraphrase"],"init":{},"turns":[{"user":"let some air in on my side","expect_gate":["execute"]}],"expected_diff":{"window.driver":10}}
+{"id":"para-004","category":"S-S","tags":["paraphrase"],"init":{},"turns":[{"user":"it's getting dark, I need lights","expect_gate":["execute"]}],"expected_diff":{"headlights":"low"}}
+{"id":"para-005","category":"S-S","tags":["paraphrase"],"init":{},"turns":[{"user":"ring my mother","expect_gate":["execute"]}],"expected_diff":{"call.state":"dialing","call.peer":"Mom","last_dialed":"Mom"}}
+{"id":"para-006","category":"S-S","tags":["paraphrase"],"init":{},"turns":[{"user":"I'd like it cooler on the passenger side","expect_gate":["execute"]}],"expected_diff":{"hvac.passenger.temp":20.0}}
+{"id":"para-007","category":"S-S","tags":["paraphrase"],"init":{"media.state":"playing"},"turns":[{"user":"the music's too loud","expect_gate":["execute"]}],"expected_diff":{"volume":30}}
+{"id":"para-008","category":"S-S","tags":["paraphrase"],"init":{"nav.active":true,"nav.dest":"home"},"turns":[{"user":"how long till we're there","expect_gate":["execute"]}],"expected_diff":{}}

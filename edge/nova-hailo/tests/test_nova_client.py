@@ -218,3 +218,42 @@ def test_enter_presses_arm_and_end_of_input_stops_the_reader():
     finally:
         os.close(r)
     assert presses == [1, 1]
+
+
+def test_device_option_selects_input_and_output():
+    class FakeSD:
+        class default:
+            device = None
+
+    nova_client.select_device(FakeSD, "pulse")
+    assert FakeSD.default.device == ("pulse", "pulse")
+    nova_client.select_device(FakeSD, "3")
+    assert FakeSD.default.device == (3, 3)
+    nova_client.select_device(FakeSD, "")
+    assert FakeSD.default.device == (3, 3)  # empty leaves the default alone
+
+
+def test_open_mic_leaves_the_wake_choice_to_the_server():
+    update = json.loads(nova_client._session_update("none", True))
+    assert "wake" not in update["session"]["input"]
+    assert update["session"]["input"]["echo_cancellation"] is True
+    d = nova_client.Device(None, wake="none", echo_cancellation=True)
+    d.state = "IDLE"
+    assert d.should_stream()
+
+
+def test_open_mic_warns_when_the_server_still_gates_on_its_wake_word(capsys):
+    d = nova_client.Device(None, wake="none", echo_cancellation=True)
+    asyncio.run(d.on_event({"type": "session.created", "session": {"wake_source": "server"}}))
+    assert "wake.mode" in capsys.readouterr().out
+    asyncio.run(d.on_event({"type": "session.created", "session": {"wake_source": "none"}}))
+    assert capsys.readouterr().out == ""
+
+
+def test_a_muted_cabin_stops_the_mic_stream():
+    d = nova_client.Device(None, wake="none", echo_cancellation=False)
+    d.state = "LISTENING"
+    asyncio.run(d.on_event({"type": "nova.mic", "muted": True, "source": "cockpit"}))
+    assert d.muted is True and not d.should_stream()
+    asyncio.run(d.on_event({"type": "nova.mic", "muted": False, "source": "cockpit"}))
+    assert d.should_stream()

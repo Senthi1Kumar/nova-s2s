@@ -5,6 +5,7 @@ logs/
 session_logs/
 *.jsonl
 !examples/realtime/lvgl/demo/*.jsonl
+!nova_hailo/cabingym/tasks/*.jsonl
 models/*.hef
 models/*.hef.hailort-zoo
 models/.hailo_llm_fetch.env

@@ -131,7 +131,7 @@ tools:
   jev_max_actions: 2
   enable_in_prompt: false
   profile: oem_readonly
-  enabled: [web_search, deep_research, check_calendar, check_email, list_drive_files]
+  enabled: [web_search, deep_research, check_calendar, check_email, list_drive_files, vehicle]
   write_enabled: false
   timeout_sec: 8
   research_poll_timeout_sec: 45
@@ -143,3 +143,28 @@ tools:
   summarizer_hef: qwen2
   brave_primary: false
   serper_fallback: false
+
+cabingym:
+  # Vehicle profile: ev_demo (desk) | audi_q7_ice
+  profile: ev_demo
+  # sim only for now; hybrid (real OBD/GPS read + simulated cabin) comes with the car adapters
+  adapter: sim
+  # Spoken turn-by-turn from the route. Mute still only closes the mic.
+  voice_guidance: true
+  # Simulated drive streamed at 5 Hz (speed, gear, GPS, charge) + nova.nav for displays.
+  # autoplay: [start, work] drives without a voice command; route_service: auto | mapbox | osrm | off
+  sim_drive:
+    enabled: true
+    cruise_kph: 50
+    autoplay: []
+    route_service: auto
+
+harness:
+  # Frontend/backend split (Qwen-Audio-Agent style). direct = slice-1 behaviour;
+  # mixed = parsed turns run on the Pi, plans/vague goals go to the backend agent;
+  # delegated = every vehicle turn goes to the backend (benchmark baseline).
+  execution: mixed
+  backend: groq
+  backend_model: openai/gpt-oss-120b
+  max_steps: 6
+  budget_s: 20

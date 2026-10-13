@@ -150,3 +150,25 @@ def test_clear_drops_the_carried_question() -> None:
     h.clear()
 
     assert SPACEX_Q not in h.build_messages("You are Nova.", "Why is it?")[-1]["content"]
+
+
+def test_an_untrusted_turn_never_leaves_an_unanswered_question():
+    from nova_hailo.context_history import ConversationHistory
+
+    h = ConversationHistory(max_turns=3)
+    h.add("navigating to work about nine minutes", "I'm sorry, I didn't catch that.", trusted=False)
+    msgs = h.build_messages("sys", "what's the weather")
+    assert "Earlier question" not in msgs[-1]["content"]
+
+
+def test_an_unanswered_question_is_offered_once_and_expires():
+    from nova_hailo.context_history import ConversationHistory
+
+    t = [0.0]
+    h = ConversationHistory(max_turns=3, unanswered_ttl_s=60, clock=lambda: t[0])
+    h.add("why is it", "I'm sorry, I didn't catch that.")
+    assert "Earlier question" in h.build_messages("sys", "search for it")[-1]["content"]
+    assert "Earlier question" not in h.build_messages("sys", "and now")[-1]["content"]
+    h.add("why is it", "I'm sorry, I didn't catch that.")
+    t[0] = 61.0
+    assert "Earlier question" not in h.build_messages("sys", "search for it")[-1]["content"]

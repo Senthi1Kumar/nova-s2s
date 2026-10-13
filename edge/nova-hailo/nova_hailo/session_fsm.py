@@ -230,6 +230,20 @@ class SessionFSM:
                 self.last_terminal = TurnTerminal.CANCELLED
             return ctx
 
+    def force_idle(self) -> None:
+        """× on a display: IDLE from any state. A running turn ends as cancelled and
+        no follow-up window is left behind."""
+        with self._lock:
+            ctx = self.current
+            if ctx is not None and ctx.terminal is None:
+                ctx.terminal = TurnTerminal.CANCELLED
+                ctx.metadata.setdefault("interrupt_reason", "force_idle")
+                self.last_terminal = TurnTerminal.CANCELLED
+            self._armed_until = None
+            if self.state != SessionState.IDLE:
+                self.state = SessionState.IDLE
+                self._emit()
+
     def complete(
         self,
         generation_id: int,

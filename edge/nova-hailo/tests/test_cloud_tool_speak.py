@@ -25,6 +25,36 @@ def test_numeric_stock_result_is_final():
     assert tool_result_is_final(out) is True
 
 
+def test_vehicle_success_and_clarify_are_final():
+    success = {
+        "ok": True, "name": "vehicle", "status": "success",
+        "speak": "Navigating to Palo Alto Club. About 4 minutes.",
+        "result": {"diff": [{"path": "x"}], "trace": {"router": "cloud"}},
+    }
+    clarify = {
+        "ok": True, "name": "vehicle", "status": "clarify",
+        "speak": "Where would you like to go?",
+        "result": {"diff": [], "trace": {"router": "cloud"}},
+    }
+    assert tool_result_is_final(success) is True
+    assert tool_result_is_final(clarify) is True
+
+
+def test_vehicle_log_prints_the_action_not_an_empty_query():
+    from nova_hailo.edge_harness.cloud_tool_speak import tool_log_detail
+
+    out = {
+        "name": "vehicle", "status": "success", "speak": "Fan set to 3.",
+        "result": {"trace": {"calls": [{"device": "hvac", "api": "set_fan",
+                                        "args": {"zone": "all", "value": 3}}]}},
+    }
+    detail = tool_log_detail("vehicle_hvac", {"action": "set_fan", "value": 3}, out)
+    assert "action='set_fan'" in detail and "value='3'" in detail and "query=" not in detail
+    assert tool_log_detail("web_search", {"query": "Palo Alto news"}, {"name": "web_search"}) == (
+        "query='Palo Alto news'"
+    )
+
+
 def test_news_result_is_not_final():
     out = {
         "ok": True,

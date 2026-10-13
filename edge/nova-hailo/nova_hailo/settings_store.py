@@ -13,7 +13,17 @@ OR_MODELS = (
     {
         "id": "deepseek/deepseek-v4-flash-0731",
         "label": "DeepSeek V4 Flash",
-        "hint": "default · fastest full tool turn · tools",
+        "hint": "default · best CabinGym tool accuracy · fast",
+    },
+    {
+        "id": "openai/gpt-oss-120b",
+        "label": "GPT-OSS 120B",
+        "hint": "fastest single-step tool calls · low reasoning",
+    },
+    {
+        "id": "openai/gpt-oss-20b",
+        "label": "GPT-OSS 20B",
+        "hint": "smaller, cheapest · slower here",
     },
     {
         "id": "meta-llama/llama-3.3-70b-instruct",
@@ -152,6 +162,10 @@ def load_settings(path: Path | None = None) -> dict[str, Any]:
         "local_hef": DEFAULT_LOCAL,
         "or_model": DEFAULT_OR,
         "connectors": [],
+        # "" = llm.cloud_provider from config; set once a display picks a provider.
+        "cloud_provider": "",
+        # None = llm.failover from config; a bool once a display switches it.
+        "failover": None,
     }
     try:
         if p.is_file():
@@ -165,6 +179,9 @@ def load_settings(path: Path | None = None) -> dict[str, Any]:
     data["local_hef"] = str(data.get("local_hef") or DEFAULT_LOCAL)
     data["or_model"] = str(data.get("or_model") or DEFAULT_OR)
     data["connectors"] = _normalize_connectors(data.get("connectors"))
+    data["cloud_provider"] = str(data.get("cloud_provider") or "").strip().lower()
+    if not isinstance(data.get("failover"), bool):
+        data["failover"] = None
     return data
 
 
@@ -173,7 +190,8 @@ def save_settings(data: dict[str, Any], path: Path | None = None) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     cur = load_settings(p)
     cur.update(
-        {k: data[k] for k in ("mode", "local_hef", "or_model", "connectors") if k in data}
+        {k: data[k] for k in ("mode", "local_hef", "or_model", "connectors", "cloud_provider",
+                              "failover") if k in data}
     )
     mode = str(cur.get("mode") or "local").strip().lower()
     cur["mode"] = "openrouter" if mode in {"openrouter", "or", "cloud"} else "local"

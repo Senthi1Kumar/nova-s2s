@@ -136,10 +136,12 @@ class ToolBroker:
         *,
         timeout_sec: float = 1.5,
         serper_fallback: bool = True,
+        vehicle: Any = None,
     ):
         self.profile = profile
         self.timeout_sec = float(timeout_sec)
         self.serper_fallback = bool(serper_fallback)
+        self.vehicle = vehicle
 
     def execute(self, routed: RoutedIntent) -> dict[str, Any]:
         intent, query, slots = routed.intent, routed.query, routed.slots
@@ -160,6 +162,13 @@ class ToolBroker:
             return _ok(name, speak) if speak else _unavailable(name, "no_capability_match")
         if not self.profile.allows(intent):
             return _unavailable(name, "tool_not_in_oem_allowlist")
+        if intent is Intent.VEHICLE:
+            if self.vehicle is None:
+                return _unavailable(name, "vehicle_not_configured")
+            outcome = slots.get("outcome")
+            if outcome is None:
+                return _unavailable(name, "vehicle_no_outcome")
+            return self.vehicle.run(outcome)
         if name in _WRITE_INTENTS and not self.profile.write_enabled:
             return _unavailable(name, "writes_disabled_for_oem_demo")
         if intent is Intent.WEB_SEARCH:

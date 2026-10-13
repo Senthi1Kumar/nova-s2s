@@ -35,6 +35,7 @@ class InferenceMetrics:
     token_timestamps: list = field(default_factory=list)
     device: str = "hailo10h_npu"
     no_think: bool = False
+    failover: str | None = None  # e.g. "groq→openrouter (429)" when another provider answered
 
     def start(self, prompt_tokens_est: int = 0):
         self.prompt_tokens_est = prompt_tokens_est
@@ -128,6 +129,7 @@ class InferenceMetrics:
             "token_latency_p50_ms": _r(self._pct(0.50)),
             "token_latency_p95_ms": _r(self._pct(0.95)),
             "token_latency_p99_ms": _r(self._pct(0.99)),
+            **({"failover": self.failover} if self.failover else {}),
         }
 
 

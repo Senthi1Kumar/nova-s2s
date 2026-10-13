@@ -10,6 +10,7 @@ so anything it does, an ESP32 or a phone can do too. See docs/api/realtime.md.
   Live mic + speaker:
     nova_client.py --url ... --token $T --ca cert.pem --wake server   # say "Hey Nova, ..."
     nova_client.py --url ... --token $T --ca cert.pem --wake device   # Enter = local wake
+    nova_client.py --url ... --wake none     # open mic when the server runs without a wake word
   Record a 16 kHz fixture from this laptop's mic:
     nova_client.py --record question.wav --seconds 4
   With a screen (see docs/api/ui-state.md):
@@ -177,12 +178,13 @@ def _ssl_context(url: str, ca: str | None) -> ssl.SSLContext | None:
 
 
 def _session_update(wake: str, echo_cancellation: bool) -> str:
+    # "none" declares no wake word, so the server keeps its own (wake.mode: ptt = open mic).
+    inp: dict = {"echo_cancellation": echo_cancellation}
+    if wake != "none":
+        inp["wake"] = wake
     return json.dumps({
         "type": "session.update",
-        "session": {
-            "input": {"wake": wake, "echo_cancellation": echo_cancellation},
-            "audio": {"output": {"sample_rate": RATE}},
-        },
+        "session": {"input": inp, "audio": {"output": {"sample_rate": RATE}}},
     })
 
 
@@ -203,9 +205,12 @@ class Device:
         self.reply_rate = RATE
         self.generation = None
         self.done = asyncio.Event()
+        self.muted = False  # the cabin mic, from nova.mic
 
     def should_stream(self) -> bool:
-        if self.wake == "server":
+        if self.muted:
+            return False  # the cabin mic is off (nova.mic)
+        if self.wake in ("server", "none"):
             return True
         if self.arm_pending:
             return True
@@ -218,7 +223,14 @@ class Device:
             for update in ui_updates(ev):
                 self.ui.send(update)
         t = ev.get("type")
-        if t == "nova.fsm":
+        if t == "nova.mic":
+            self.muted = bool(ev.get("muted"))
+            print(f"[mic] {'muted' if self.muted else 'on'} ({ev.get('source')})", flush=True)
+        elif t == "session.created" and self.wake == "none":
+            if (ev.get("session") or {}).get("wake_source") == "server":
+                print("[wake] this server still waits for 'Hey Nova': set wake.mode: ptt in its "
+                      "config and restart it for an open mic", flush=True)
+        elif t == "nova.fsm":
             self.state = (ev.get("fsm") or {}).get("state", self.state)
             if self.state != "IDLE":
                 self.arm_pending = False
@@ -457,7 +469,8 @@ async def run_live(url, token, *, wake, echo_cancellation, ca=None, ui_cmd=None)
     await _ui_connected(holder, device, ws)
     if wake == "device":
         _on_enter(loop, lambda: asyncio.ensure_future(arm_from_enter()))
-    print("say 'Hey Nova, ...'" if wake == "server" else "press Enter, then speak", flush=True)
+    print({"server": "say 'Hey Nova, ...'", "device": "press Enter, then speak"}.get(
+        wake, "open mic: just speak"), flush=True)
     with sd.RawInputStream(samplerate=RATE, channels=1, dtype="int16",
                            blocksize=FRAME_BYTES // 2, callback=on_mic):
         try:
@@ -488,21 +501,38 @@ def record(path: str, seconds: float) -> int:
     return 0
 
 
+def select_device(sd, name: str) -> None:
+    """Use one device for mic and speaker; a number selects by PortAudio index."""
+    if not name:
+        return
+    dev = int(name) if name.isdigit() else name
+    sd.default.device = (dev, dev)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", default="ws://127.0.0.1:8766/v1/realtime")
     p.add_argument("--token", default="")
     p.add_argument("--ca", help="PEM to trust (the Pi's self-signed cert.pem)")
-    p.add_argument("--wake", choices=["server", "device"], default="server")
+    p.add_argument("--wake", choices=["server", "device", "none"], default="server",
+                   help="server: say 'Hey Nova'; device: Enter wakes; none: open mic "
+                        "(the server's own wake.mode decides)")
     p.add_argument("--aec", action="store_true", help="declare echo_cancellation=true")
     p.add_argument("--wav", help="16 kHz mono WAV to send instead of the mic")
     p.add_argument("--out", default="reply.wav")
     p.add_argument("--record", help="record a fixture WAV from the mic and exit")
     p.add_argument("--seconds", type=float, default=4.0)
+    p.add_argument("--device", default=os.environ.get("NOVA_CLIENT_DEVICE", ""),
+                   help="sounddevice input/output device (name or index), e.g. pulse to use "
+                        "PipeWire's echo canceller via PULSE_SOURCE/PULSE_SINK")
     p.add_argument("--ui", metavar="CMD",
                    help='screen to run and feed UI-state lines, e.g. "examples/realtime/lvgl/build/nova_face"')
     a = p.parse_args(argv)
+    if a.device:
+        import sounddevice as sd
+
+        select_device(sd, a.device)
     try:
         if a.record:
             return record(a.record, a.seconds)
