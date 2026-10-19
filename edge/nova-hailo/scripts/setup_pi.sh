@@ -53,7 +53,18 @@ then run this again."
   fi
   echo "installing HailoRT 5.3.0 from $HAILO_BUNDLE (asks for your password)"
   sudo apt-get update -qq
-  sudo apt-get install -y dkms linux-headers-rpi-2712 "${deb_drv[0]}" "${deb_rt[0]}"
+  sudo apt-get install -y dkms linux-headers-rpi-2712
+  # The PCIe driver is compiled for the running kernel. A Pi that has not been upgraded runs an
+  # older kernel than the newest headers, and the build fails inside dpkg with no clear reason.
+  if [[ ! -d "/lib/modules/$(uname -r)/build" ]]; then
+    die "the running kernel $(uname -r) has no headers to build the Hailo driver against.
+Bring the kernel up to date, reboot, and run this again:
+  sudo apt update && sudo apt full-upgrade -y && sudo reboot"
+  fi
+  # Copied out of the home folder so apt's sandbox user can read them.
+  stage="$(mktemp -d)"
+  cp "${deb_drv[0]}" "${deb_rt[0]}" "$stage/" && chmod 755 "$stage" && chmod 644 "$stage"/*.deb
+  sudo apt-get install -y "$stage/$(basename "${deb_drv[0]}")" "$stage/$(basename "${deb_rt[0]}")"
   sudo /usr/bin/python3 -m pip install --break-system-packages "${whl[0]}"
   printf '\nHailoRT 5.3.0 is installed. Reboot the Pi (sudo reboot), then run scripts/setup_pi.sh again.\n'
   exit 0
@@ -67,6 +78,26 @@ if ((${#missing[@]})); then
   sudo apt-get update -qq && sudo apt-get install -y "${missing[@]}"
 else
   echo "all present"
+fi
+
+# Wi-Fi power saving parks the radio between packets: latency swings from 3 ms to 200+ ms, the cockpit's car
+# feed arrives in bursts and voice links drop. Off now, and in NetworkManager so it stays off after a reboot.
+if command -v iw >/dev/null && iw dev wlan0 get power_save 2>/dev/null | grep -q "on"; then
+  echo "turning off Wi-Fi power saving (asks for your password)"
+  sudo iw dev wlan0 set power_save off || true
+  con="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | awk -F: '$2 == "wlan0" {print $1; exit}')"
+  [[ -n "$con" ]] && sudo nmcli connection modify "$con" 802-11-wireless.powersave 2 || true
+fi
+
+# The reSpeaker XVF3800 reports speech energy after its echo canceller over USB; Nova reads it
+# for barge-in (nova_hailo/xvf3800.py). Its device node is root-only without this rule.
+XVF_RULE=/etc/udev/rules.d/99-respeaker-xvf3800.rules
+if [[ ! -f "$XVF_RULE" ]]; then
+  echo "letting the plugdev group read the reSpeaker XVF3800 over USB (asks for your password)"
+  echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="2886", ATTRS{idProduct}=="001a", MODE="0660", GROUP="plugdev"' \
+    | sudo tee "$XVF_RULE" >/dev/null
+  sudo udevadm control --reload-rules && sudo udevadm trigger --attr-match=idVendor=2886 || true
+  id -nG | grep -qw plugdev || sudo usermod -aG plugdev "$USER"
 fi
 
 step "4/8 Python environment (.venv)"
