@@ -74,6 +74,14 @@ static double s_nav_total_m;
 static char s_via[200];
 static char s_stop_names[STOPS_MAX][96], s_dest_name[96];
 static route_stop_t s_stops[STOPS_MAX], s_dest;
+static char s_poi_names[STOPS_MAX][96];
+static route_stop_t s_pois[STOPS_MAX];   /* the last place search, numbered in order */
+static int s_n_pois;
+/* Pins hide once one of them is chosen (the destination or a stop) or a trip starts after the search; a new
+   search shows them again. */
+static uint32_t s_poi_key, s_poi_hidden_key;
+static int s_pins_shown;
+static char s_trip[160];
 static int s_n_stops;
 
 /* ---------- helpers ---------- */
@@ -584,6 +592,53 @@ static void nav_stops(const cbj_t *f)
     }
 }
 
+static bool near_m(const route_stop_t *a, double lat, double lon, double m)
+{
+    double dy = (a->lat - lat) * 111320.0, dx = (a->lon - lon) * 111320.0 * cos(lat * M_PI / 180.0);
+    return dx * dx + dy * dy <= m * m;
+}
+
+/* Called once stops and destination are known: decides whether the pins still belong on the map. */
+static void show_pois(lv_obj_t *map, bool active, const route_stop_t *dest)
+{
+    char trip[160] = "";
+    if(active && dest) snprintf(trip, sizeof trip, "%s@%.4f,%.4f", dest->name, dest->lat, dest->lon);
+    if(strcmp(trip, s_trip) != 0) {   /* a trip started, changed or ended: earlier results are done */
+        snprintf(s_trip, sizeof s_trip, "%s", trip);
+        s_poi_hidden_key = s_poi_key;
+    }
+    for(int i = 0; active && i < s_n_pois; i++) {   /* one was chosen: it is the destination or a stop now */
+        bool chosen = dest && near_m(&s_pois[i], dest->lat, dest->lon, 60);
+        for(int k = 0; !chosen && k < s_n_stops; k++) chosen = near_m(&s_pois[i], s_stops[k].lat, s_stops[k].lon, 60);
+        if(chosen) s_poi_hidden_key = s_poi_key;
+    }
+    s_pins_shown = s_poi_key && s_poi_key != s_poi_hidden_key ? s_n_pois : 0;
+    if(map) map_view_set_results(map, s_pois, s_pins_shown);
+}
+
+int live_pins_shown(void) { return s_pins_shown; }
+
+/* The last place search, kept for show_pois. */
+static void nav_pois(const cbj_t *f)
+{
+    int n = 0;
+    const cbj_t *pois = cbj_get(f, "pois");
+    for(const cbj_t *p = pois ? pois->child : NULL; p && n < STOPS_MAX; p = p->next) {
+        const cbj_t *lat = cbj_get(p, "lat"), *lon = cbj_get(p, "lon");
+        if(!lat || !lon) continue;
+        snprintf(s_poi_names[n], sizeof s_poi_names[n], "%s", cbj_str(cbj_get(p, "name"), "Place"));
+        s_pois[n] = (route_stop_t){ s_poi_names[n], cbj_num(lat, 0), cbj_num(lon, 0) };
+        n++;
+    }
+    uint32_t key = n ? 2166136261u ^ (uint32_t)n : 0;   /* changes with the set: a new search */
+    for(int i = 0; i < n; i++) {
+        key = (key ^ (uint32_t)llround(s_pois[i].lat * 1e5)) * 16777619u;
+        key = (key ^ (uint32_t)llround(s_pois[i].lon * 1e5)) * 16777619u;
+    }
+    s_poi_key = n ? (key ? key : 1) : 0;
+    s_n_pois = n;
+}
+
 static void on_nav(const cbj_t *f)
 {
     cockpit_t *c = ck();
@@ -591,9 +646,11 @@ static void on_nav(const cbj_t *f)
     L.nav_active = cbj_bool(cbj_get(f, "active"), false);
     L.pos_dirty = true;
     flush_position();
+    nav_pois(f);
     nav_state_from_frame(&s_nav, f);
     if(!L.nav_active) {
         cockpit_set_nav(NULL, NULL, 0);
+        show_pois(c->map, false, NULL);
         if(c->map) {
             map_view_set_route(c->map, NULL, 0, NULL);
             map_view_set_stops(c->map, NULL, 0, NULL);
@@ -618,6 +675,7 @@ static void on_nav(const cbj_t *f)
         map_view_set_route(c->map, (const double (*)[2])s_route, n, s_congestion[0] ? s_congestion : NULL);
         map_view_set_stops(c->map, s_stops, s_n_stops, have_dest ? &s_dest : NULL);
     }
+    show_pois(c->map, true, have_dest ? &s_dest : NULL);
 }
 
 static bool llm_from(const cbj_t *llm, live_llm_t *out);

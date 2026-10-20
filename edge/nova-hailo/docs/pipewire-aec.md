@@ -1,5 +1,7 @@
 # PipeWire echo-cancel (WM8960 / Pi HMI)
 
+This is the WM8960 path. A reSpeaker XVF3800 cancels echo on the board; `scripts/setup_pipewire_aec.sh` removes this module when that card is present, so the same echo is not processed twice.
+
 Zero-Python AEC for the Qt HMI on a shared-codec WM8960 (same clock for speaker
 and mic). Playback goes to the echo-cancel **sink**; capture comes from the
 echo-cancel **source**. In-process AEC (TTS PCM as far-end) is a fallback only

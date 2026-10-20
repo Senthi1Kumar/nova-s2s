@@ -33,6 +33,10 @@ dependencies = [
     "httpx>=0.27",
     # Official Qt HMI (hmi_qt/run.sh) — same venv as the backend
     "PySide6>=6.5",
+    # reSpeaker XVF3800 status over USB (nova_hailo/xvf3800.py): speech energy after its echo
+    # canceller drives barge-in. Pure Python over the system libusb; a core dependency so a
+    # plain `uv sync` on the Pi does not drop it.
+    "pyusb>=1.2",
 ]
 
 [project.optional-dependencies]

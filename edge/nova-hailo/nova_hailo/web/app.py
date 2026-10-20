@@ -221,7 +221,7 @@ def _start_sim_drive(pipeline: NovaPipeline):
     print(f"CabinEnv sim drive: cruise {feed.drive.cruise_kph:.0f} km/h, "
           f"router {feed.routes.live_name if feed.routes.live else 'baked only'}"
           f"{', autoplay ' + '→'.join(feed.autoplay) if feed.autoplay else ''}", flush=True)
-    return asyncio.create_task(drive_loop(feed, hz=5.0))
+    return asyncio.create_task(drive_loop(feed, hz=10.0))   # the cockpit draws the car one sample behind
 
 
 def _start_gps(pipeline: NovaPipeline):

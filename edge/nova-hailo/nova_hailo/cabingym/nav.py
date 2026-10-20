@@ -31,8 +31,28 @@ _CATEGORY_IDS = {
     "parking": "parking_lot",
     "coffee": "coffee",
     "food": "food_and_drink",
+    "fast_food": "fast_food",
+    "pharmacy": "pharmacy",
+    "car_wash": "car_wash",
+    "car_repair": "auto_repair",
+    "grocery": "grocery",
+    "convenience": "convenience_store",
+    "atm": "atm",
+    "bank": "bank",
+    "post_office": "post_office",
+    "hospital": "hospital",
+    "doctor": "medical_clinic",
+    "hotel": "hotel",
+    "bakery": "bakery",
+    "bar": "bar",
+    "gym": "fitness_center",
+    "shopping": "shopping_mall",
+    "park": "park",
     "airport": "airport",
+    "movie_theater": "cinema",
 }
+# Words for a text search when a category search finds nothing.
+_CATEGORY_TEXT = {"movie_theater": "movie theater", "car_repair": "auto repair", "doctor": "medical clinic"}
 _LOCAL_SCORE = 0.68
 _GLOBAL_SCORE = 0.84
 _WIDE_KM = 80.0
@@ -45,6 +65,18 @@ _AIRPORT_FILL = frozenset({
 _CORRECTION_REJECT = ("not sure", "don't know", "do not know", "dont know", "unknown")
 # A trailing word that is a kind of place, not part of the proper name.
 _TAIL_WORDS = frozenset({"park", "parks", "plaza", "mall", "center", "centre", "centers", "centres"})
+# Words that say what kind of place it is, not which one: "the OpenAI office" is the place called OpenAI.
+_KIND_WORDS = frozenset({"office", "offices", "hq", "headquarters", "building", "campus"})
+_ARTICLES = frozenset({"the", "a", "an"})
+# Kinds of venue. A query that ends in one ("Palo Alto Art Center") is not a different kind that shares the rest
+# of the name ("Palo Alto Art Studio"), unless the names are near enough to be the same place.
+_VENUE_KINDS = _TAIL_WORDS | _KIND_WORDS | frozenset({
+    "studio", "studios", "school", "store", "shop", "clinic", "hospital", "hotel", "restaurant", "cafe", "bar",
+    "gym", "library", "museum", "church", "station", "garage", "lab", "bank", "market", "theater", "theatre",
+    "club", "salon", "academy", "college", "university", "apartments", "bakery", "pharmacy"})
+# A hit below _EXACT_SCORE must also contain the query's identifying word at least this closely: shared letters
+# from "office" and "Palo Alto" made "Immigration Law Offices Palo Alto" pass for "OpenAI office Palo Alto".
+_KEY_WORD_MATCH = 0.85
 # A wide hit this close to the heard name is the place. Weaker wide hits wait for the local pool.
 _EXACT_SCORE = 0.92
 
@@ -233,13 +265,30 @@ def clean_place_correction(text: str | None) -> str | None:
     return line
 
 
+# "CVS pharmacy near Palo Alto", "the pharmacy opposite us": where it is, not what it is called.
+_RELATIVE_TAIL = re.compile(r"\s+(?:near(?:by)?|opposite(?:\s+to)?|next\s+to|close\s+to|across\s+from|"
+                            r"beside|around)\b.*$", re.I)
+# Street words: "CVS Pharmacy Middlefield Road Palo Alto" is CVS Pharmacy, on Middlefield Road.
+_STREET_WORDS = frozenset({"road", "rd", "street", "st", "avenue", "ave", "boulevard", "blvd", "way", "drive",
+                           "dr", "lane", "ln", "expressway", "expy", "highway", "hwy", "parkway", "pkwy"})
+
+
+def _before_street(query: str) -> str:
+    """The name before a trailing street ("... Middlefield Road ..."), or "" when there is none."""
+    words = query.split()
+    for i, word in enumerate(words):
+        if i >= 2 and _alnum(word) in _STREET_WORDS:
+            return " ".join(words[:i - 1])
+    return ""
+
+
 def _without_locality(query: str) -> str:
     """Drop a trailing ", City" or "in City" so the place name can still match.
 
     "Paris, Texas" stays whole: the part before the comma is a single word, and that
     word is the city. "Bowling Green Park, Palo Alto" becomes "Bowling Green Park".
     """
-    text = re.sub(r"\s+", " ", (query or "").strip())
+    text = _RELATIVE_TAIL.sub("", re.sub(r"\s+", " ", (query or "").strip())) or (query or "").strip()
     for _ in range(3):
         match = re.match(r"^(?P<name>.+?)\s*,\s*(?P<where>[^,]+)$", text)
         if match is None:
@@ -259,7 +308,7 @@ def _name_part(query: str) -> str:
     Unlike the search form, a one-word name is split from its town here. Searching
     keeps "Paris, Texas" whole; scoring the results by "Paris" finds the same city.
     """
-    text = re.sub(r"\s+", " ", (query or "").strip())
+    text = _RELATIVE_TAIL.sub("", re.sub(r"\s+", " ", (query or "").strip())) or (query or "").strip()
     match = re.match(r"^(?P<name>[^,]+?)\s*,\s*(?P<where>[^,]+)$", text)
     if match is None:
         return _without_locality(text)
@@ -275,8 +324,12 @@ def _query_forms(query: str) -> list[str]:
     only inside the tight box, so a far street of the longer name cannot win
     just by being the first hit over the floor.
     """
-    primary = _without_locality(query)
+    # A spoken article ("the OpenAI office") steers Search Box to names starting with "The".
+    primary = re.sub(r"^\s*(the|a|an)\s+", "", _without_locality(query), flags=re.I)
     forms = [primary] if primary else []
+    named = _before_street(primary)
+    if named:   # searched as itself too: the full line finds the street, not the shop on it
+        forms.append(named)
     words = primary.split()
     if len(words) >= 3 and _alnum(words[-1]) in _TAIL_WORDS:
         stem = " ".join(words[:-1]).strip()
@@ -399,10 +452,60 @@ def _places_from(payload: Any, category: str | None) -> list[Place]:
 _TIE_MARGIN = 0.12
 
 
+def _key_word(query: str) -> str:
+    """The word that names the place: the first that is neither an article nor a kind word."""
+    for word in re.findall(r"[a-z0-9]+", (query or "").casefold()):
+        if word not in _ARTICLES and word not in _KIND_WORDS:
+            return word
+    return ""
+
+
+_KIND_PHRASES = ("post office", "gas station", "car wash", "coffee shop", "police station", "fire station",
+                 "train station", "bus station", "grocery store", "urgent care")
+
+
+def _kind_clash(query: str, candidate: str) -> bool:
+    """The query names a kind of venue and the candidate is another kind, not that one."""
+    q, cand = (query or "").casefold(), (candidate or "").casefold()
+    for phrase in _KIND_PHRASES:   # "Palo Alto post office" is not the "Palo Alto Daily Post"
+        if q.rstrip(" .").endswith(phrase):
+            return phrase not in cand
+    said = re.findall(r"[a-z0-9]+", (query or "").casefold())
+    if not said or said[-1] not in _VENUE_KINDS:
+        return False
+    kinds = {w for w in re.findall(r"[a-z0-9]+", (candidate or "").casefold()) if w in _VENUE_KINDS}
+    return bool(kinds) and said[-1] not in kinds and said[-1].rstrip("s") not in {k.rstrip("s") for k in kinds}
+
+
+def _has_key_word(key: str, candidate: str) -> bool:
+    if not key:
+        return True
+    return any(difflib.SequenceMatcher(None, key, word).ratio() >= _KEY_WORD_MATCH
+               for word in re.findall(r"[a-z0-9]+", (candidate or "").casefold()))
+
+
+def _place_score(query: str, candidate: str) -> float:
+    """name_score, also without trailing kind words: "OpenAI office" is a full match for "OpenAI"."""
+    score = name_score(query, candidate)
+    words = query.split()
+    while words and _alnum(words[-1]) in _KIND_WORDS:
+        words.pop()
+    core = " ".join(words)
+    if core and core != query.strip():
+        score = max(score, name_score(core, candidate))
+    named = _before_street(query)
+    if named:
+        score = max(score, name_score(named, candidate))
+    return score
+
+
 def _best_place(query: str, places: list[Place], near: Place, floor: float) -> Place | None:
     scored: list[tuple[float, float, Place]] = []
+    key = _key_word(query)
     for place in places:
-        score = name_score(query, place.name)
+        score = _place_score(query, place.name)
+        if score < _EXACT_SCORE and (not _has_key_word(key, place.name) or _kind_clash(query, place.name)):
+            continue   # close in letters, but not the place named
         if score >= floor:
             scored.append((score, haversine_km(near, place), place))
     if not scored:
@@ -508,7 +611,7 @@ class MapboxNav:
             return [exact]
         tight = self._forward(primary, near, _bbox(near, _TIGHT_KM))
         # The shorter name stays inside the tight box. A far street must not outrank a local POI.
-        extra = self._forward(forms[1], near, _bbox(near, _TIGHT_KM)) if len(forms) > 1 else []
+        extra = [p for form in forms[1:] for p in self._forward(form, near, _bbox(near, _TIGHT_KM))]
         hit = _best_place(name, [*wide, *tight, *extra], near, _LOCAL_SCORE)
         if hit is not None:
             return [hit]
@@ -546,6 +649,12 @@ class MapboxNav:
             }
             params.update(self._route_params(route))
             payload = self._call(f"/category/{canonical}", params)
+            if not _places_from(payload, category):
+                # An id the index has nothing for must not look like "no such place nearby".
+                text = _CATEGORY_TEXT.get(category, category.replace("_", " "))
+                params = self._forward_params(text, near, None if route else _bbox(near, _WIDE_KM), poi=True)
+                params.update(self._route_params(route))
+                payload = self._call("/forward", params)
         else:
             params = self._forward_params(category, near, None if route else _bbox(near, _WIDE_KM), poi=True)
             params.update(self._route_params(route))

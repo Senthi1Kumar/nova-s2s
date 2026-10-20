@@ -1,4 +1,5 @@
 #include "map/map_view.h"
+#include "cb_ambient.h"
 #include "cb_theme.h"
 #include "map/map_gesture.h"
 #include "map/map_puck.h"
@@ -13,8 +14,7 @@
 #include "map/map_worker.h"
 #endif
 
-#define FAST_MS 33     /* render pace while touched, gliding or zooming */
-#define FOLLOW_MS 66   /* following a moving car */
+#define FAST_MS 33     /* render pace while touched, gliding, zooming or following a moving car */
 #define IDLE_MS 100    /* nothing moving: tiles and fades still land */
 #define UI_MS 16       /* the UI picks up finished frames this often */
 
@@ -22,12 +22,13 @@
 #define NAV_PITCH 45.0
 #define NAV_LOOKAHEAD 0.38   /* top padding as a share of the height: the car sits low, the road ahead shows */
 #define FOLLOW_ZOOM 16.0     /* recenter without a route */
-#define FOLLOW_EASE_MS 260   /* each car update while following */
+#define CAR_MOVING_MS 700    /* a car update keeps the map at the fast pace this long */
 #define OVERVIEW_MS 3500     /* a new route is shown whole this long, then the camera returns to the car */
+#define RESULTS_MS 6000      /* new search results while navigating: shown this long, then back to the car */
 #define OVERVIEW_PAD 90
 
 typedef struct {
-    lv_obj_t *obj, *placeholder, *logo, *attrib;
+    lv_obj_t *obj, *placeholder, *logo, *attrib, *puck;
     lv_timer_t *timer;
     map_view_cfg_t cfg;
     char style[256], token[256];
@@ -36,13 +37,15 @@ typedef struct {
 #endif
     lv_image_dsc_t img;
     bool have_frame, visible, follow, touching, failed, have_car, night, fixed_style;
-    bool nav, north_up, have_bbox;
-    uint32_t motion_until, overview_until, route_key;
+    bool nav, north_up, have_bbox, boost;
+    uint32_t motion_until, overview_until, route_key, car_moving_until, tag_seq, results_key;
     int32_t travel;
     cb_drag_t drag;
     double car_lat, car_lon, car_heading;
     double bbox[4];   /* south, west, north, east of the route */
-    char *route_json, *stops_json;
+    char *route_json, *stops_json, *results_json;
+    double rbox[4];   /* south, west, north, east of the search results */
+    bool have_rbox;
 } mv_t;
 
 static mv_t *get(lv_obj_t *o) { return lv_obj_get_user_data(o); }
@@ -72,8 +75,6 @@ static void motion(mv_t *v, uint32_t ms) { v->motion_until = lv_tick_get() + ms;
 static bool due(uint32_t now, uint32_t t) { return (int32_t)(now - t) >= 0; }
 
 static const char *EMPTY = "{\"type\":\"FeatureCollection\",\"features\":[]}";
-static uint8_t s_puck[MAP_PUCK_PX * MAP_PUCK_PX * 4];   /* rendered once, on the worker */
-static bool s_puck_done;
 
 /* Runs on the map worker once the style is loaded: our sources and layers on top of the basemap. */
 static void add_layers(cb_map_t *m)
@@ -91,14 +92,9 @@ static void add_layers(cb_map_t *m)
                  font);
         cb_map_add_layer_json(m, b);
     }
-    if(!s_puck_done) {
-        map_puck_render(s_puck, MAP_PUCK_PX);
-        s_puck_done = true;
-    }
-    cb_map_set_image(m, "cb-puck", s_puck, MAP_PUCK_PX, MAP_PUCK_PX);
     cb_map_set_geojson(m, "cb-route", EMPTY);
     cb_map_set_geojson(m, "cb-stops", EMPTY);
-    cb_map_set_geojson(m, "cb-car", EMPTY);
+    cb_map_set_geojson(m, "cb-results", EMPTY);
 
     /* the route, colored by Directions' traffic: unknown in the route cyan, low green, then yellow, red, dark red */
     cb_map_add_layer_json(m, "{\"id\":\"cb-route-casing\",\"type\":\"line\",\"source\":\"cb-route\","
@@ -122,40 +118,64 @@ static void add_layers(cb_map_t *m)
              font, text, halo);
     cb_map_add_layer_json(m, b);
 
-    /* the car: a soft halo under the arrow puck, which turns with the heading and lies flat when tilted */
-    cb_map_add_layer_json(m, "{\"id\":\"cb-car-halo\",\"type\":\"circle\",\"source\":\"cb-car\","
-                             "\"paint\":{\"circle-radius\":24,\"circle-color\":\"#2b80ff\",\"circle-opacity\":0.16,"
-                             "\"circle-pitch-alignment\":\"map\"}}");
-    cb_map_add_layer_json(m, "{\"id\":\"cb-car\",\"type\":\"symbol\",\"source\":\"cb-car\","
-                             "\"layout\":{\"icon-image\":\"cb-puck\",\"icon-rotate\":[\"get\",\"h\"],"
-                             "\"icon-rotation-alignment\":\"map\",\"icon-pitch-alignment\":\"map\","
-                             "\"icon-allow-overlap\":true,\"icon-ignore-placement\":true}}");
+    /* the last place search: violet numbered pins, named below, so "the second one" can be seen as well as said */
+    cb_map_add_layer_json(m, "{\"id\":\"cb-result-dot\",\"type\":\"circle\",\"source\":\"cb-results\","
+                             "\"paint\":{\"circle-radius\":12,\"circle-color\":\"#8b5cf6\","
+                             "\"circle-stroke-color\":\"#ffffff\",\"circle-stroke-width\":2}}");
+    snprintf(b, sizeof b,
+             "{\"id\":\"cb-result-num\",\"type\":\"symbol\",\"source\":\"cb-results\","
+             "\"layout\":{\"text-field\":[\"to-string\",[\"get\",\"n\"]],\"text-size\":13,\"text-font\":[%s],"
+             "\"text-allow-overlap\":true,\"text-ignore-placement\":true},"
+             "\"paint\":{\"text-color\":\"#ffffff\"}}",
+             font);
+    cb_map_add_layer_json(m, b);
+    snprintf(b, sizeof b,
+             "{\"id\":\"cb-result-name\",\"type\":\"symbol\",\"source\":\"cb-results\","
+             "\"layout\":{\"text-field\":[\"get\",\"name\"],\"text-size\":13,\"text-max-width\":10,"
+             "\"text-anchor\":\"top\",\"text-offset\":[0,1.3],\"text-font\":[%s]},"
+             "\"paint\":{\"text-color\":\"%s\",\"text-halo-color\":\"%s\",\"text-halo-width\":1.5}}",
+             font, text, halo);
+    cb_map_add_layer_json(m, b);
+    /* the car is not a map layer: LVGL draws the puck at the point each frame carries (see take_frame) */
+}
+
+static void place_puck(mv_t *v, const cb_map_tag_t *t)
+{
+    lv_obj_set_hidden(v->puck, !t->car_on || !v->have_frame);
+    if(!t->car_on) return;
+    lv_obj_set_pos(v->puck, lroundf(t->car_x) - MAP_PUCK_PX / 2, lroundf(t->car_y) - MAP_PUCK_PX / 2);
+    lv_image_set_rotation(v->puck, (int32_t)lroundf(t->car_rot * 10.0f));
 }
 
 static void take_frame(mv_t *v)
 {
-    uint32_t w, h, stride;
-    const uint8_t *px = cb_mapw_take(v->mw, &w, &h, &stride);
-    if(!px) return;
-    if(v->have_frame) lv_image_cache_drop(&v->img);
-    v->img.header.magic = LV_IMAGE_HEADER_MAGIC;
-    v->img.header.cf = LV_COLOR_FORMAT_XRGB8888;
-    v->img.header.w = w;
-    v->img.header.h = h;
-    v->img.header.stride = stride;
-    v->img.data = px;
-    v->img.data_size = stride * h;
-    v->have_frame = true;
-    lv_obj_set_hidden(v->placeholder, true);
-    lv_obj_invalidate(v->obj);
+    cb_mapw_frame_t f;
+    const uint8_t *px = cb_mapw_take(v->mw, &f);
+    if(px) {
+        if(v->have_frame) lv_image_cache_drop(&v->img);
+        v->img.header.magic = LV_IMAGE_HEADER_MAGIC;
+        v->img.header.cf = LV_COLOR_FORMAT_XRGB8888;
+        v->img.header.w = f.w;
+        v->img.header.h = f.h;
+        v->img.header.stride = f.stride;
+        v->img.data = px;
+        v->img.data_size = f.stride * f.h;
+        v->have_frame = true;
+        lv_obj_set_hidden(v->placeholder, true);
+        lv_obj_invalidate(v->obj);
+    }
+    if(px || f.tag_seq != v->tag_seq) {   /* the puck moves with the frame it belongs to, or alone when idle */
+        v->tag_seq = f.tag_seq;
+        place_puck(v, &f.tag);
+    }
 }
 
 static void push_car(mv_t *v)
 {
-    char b[192];
-    if(v->have_car && route_geojson_car(b, sizeof b, v->car_lat, v->car_lon, v->car_heading))
-        cb_mapw_set_geojson(v->mw, "cb-car", b);
+    if(v->have_car) cb_mapw_set_car(v->mw, v->car_lat, v->car_lon, v->car_heading);
 }
+
+static void recenter_camera(mv_t *v, uint32_t ms);
 
 static bool ensure_map(mv_t *v)
 {
@@ -168,19 +188,28 @@ static bool ensure_map(mv_t *v)
     v->mw = cb_mapw_create(&c, add_layers);
     if(!v->mw) return false;
     push_car(v);   /* whatever arrived before the worker existed */
+    if(v->follow) recenter_camera(v, 0);
     if(v->route_json) cb_mapw_set_geojson(v->mw, "cb-route", v->route_json);
     if(v->stops_json) cb_mapw_set_geojson(v->mw, "cb-stops", v->stops_json);
+    if(v->results_json) cb_mapw_set_geojson(v->mw, "cb-results", v->results_json);
     return true;
 }
 
 static double pad_top(const mv_t *v) { return NAV_LOOKAHEAD * (double)lv_obj_get_height(v->obj); }
 
+/* Follow at street level: heading-up and tilted with a look-ahead while navigating, else flat and north up. */
 static void recenter_camera(mv_t *v, uint32_t ms)
 {
-    if(!v->mw || !v->have_car) return;
-    if(v->nav) cb_mapw_camera_to(v->mw, v->car_lat, v->car_lon, NAV_ZOOM, v->car_heading, NAV_PITCH, pad_top(v), ms);
-    else cb_mapw_camera_to(v->mw, v->car_lat, v->car_lon, FOLLOW_ZOOM, 0, 0, 0, ms);
+    if(!v->mw) return;
+    if(v->nav && !v->north_up) cb_mapw_follow(v->mw, true, true, NAV_ZOOM, NAV_PITCH, pad_top(v), ms);
+    else cb_mapw_follow(v->mw, true, false, v->nav ? NAV_ZOOM : FOLLOW_ZOOM, 0, 0, ms);
     motion(v, ms + 400);
+}
+
+static void stop_following(mv_t *v)
+{
+    v->follow = false;
+    if(v->mw) cb_mapw_follow(v->mw, false, false, NAN, NAN, NAN, 0);
 }
 
 static void overview_camera(mv_t *v)
@@ -191,6 +220,7 @@ static void overview_camera(mv_t *v)
         s = fmin(s, v->car_lat), n = fmax(n, v->car_lat);
         w = fmin(w, v->car_lon), e = fmax(e, v->car_lon);
     }
+    cb_mapw_follow(v->mw, false, false, NAN, NAN, NAN, 0);   /* the fit owns the camera until the next recenter */
     cb_mapw_fit(v->mw, s, w, n, e, OVERVIEW_PAD, 900);
     motion(v, 1500);
 }
@@ -211,8 +241,10 @@ static void tick(lv_timer_t *t)
         v->overview_until = 0;
         if(v->follow) recenter_camera(v, 1000);
     }
-    bool fast = v->touching || (int32_t)(v->motion_until - now) > 0;
-    cb_mapw_set_period(v->mw, !v->visible ? 0 : fast ? FAST_MS : v->follow && v->have_car ? FOLLOW_MS : IDLE_MS);
+    bool fast = v->touching || (int32_t)(v->motion_until - now) > 0 || (int32_t)(v->car_moving_until - now) > 0;
+    cb_mapw_set_period(v->mw, !v->visible ? 0 : fast ? FAST_MS : IDLE_MS);
+    bool boost = v->visible && fast;   /* 60 Hz refresh and input while the map moves: frames land on time */
+    if(boost != v->boost) cb_frame_boost(v->boost = boost);
     lv_timer_set_period(t, v->visible ? UI_MS : 250);
     if(v->visible) take_frame(v);
 }
@@ -246,6 +278,37 @@ static void footer_create(mv_t *v)
     lv_obj_set_style_radius(v->attrib, 4, 0);
     lv_obj_align(v->attrib, LV_ALIGN_BOTTOM_RIGHT, -6, -6);
     footer_update(v);
+}
+
+/* ---------- the car's puck, drawn by LVGL at the point each frame carries ---------- */
+
+static uint8_t s_puck_px[MAP_PUCK_PX * MAP_PUCK_PX * 4];
+static lv_image_dsc_t s_puck_img;
+
+static void puck_create(mv_t *v)
+{
+    if(!s_puck_img.data) {   /* the shared art, once: premultiplied RGBA to LVGL's straight B, G, R, A */
+        map_puck_render(s_puck_px, MAP_PUCK_PX);
+        for(int i = 0; i < MAP_PUCK_PX * MAP_PUCK_PX; i++) {
+            uint8_t *p = s_puck_px + i * 4, r = p[0], g = p[1], b = p[2], a = p[3];
+            p[0] = a ? (uint8_t)(b * 255 / a) : 0;
+            p[1] = a ? (uint8_t)(g * 255 / a) : 0;
+            p[2] = a ? (uint8_t)(r * 255 / a) : 0;
+        }
+        s_puck_img.header.magic = LV_IMAGE_HEADER_MAGIC;
+        s_puck_img.header.cf = LV_COLOR_FORMAT_ARGB8888;
+        s_puck_img.header.w = MAP_PUCK_PX;
+        s_puck_img.header.h = MAP_PUCK_PX;
+        s_puck_img.header.stride = MAP_PUCK_PX * 4;
+        s_puck_img.data_size = sizeof s_puck_px;
+        s_puck_img.data = s_puck_px;
+    }
+    v->puck = lv_image_create(v->obj);
+    lv_image_set_src(v->puck, &s_puck_img);
+    lv_image_set_pivot(v->puck, MAP_PUCK_PX / 2, MAP_PUCK_PX / 2);
+    lv_image_set_antialias(v->puck, true);
+    lv_obj_set_clickable(v->puck, false);
+    lv_obj_set_hidden(v->puck, true);
 }
 
 /* ---------- LVGL object ---------- */
@@ -309,7 +372,7 @@ static void input_cb(lv_event_t *e)
         cb_drag_move(&v->drag, x, y, now, &dx, &dy);
         if(dx || dy) {
             v->travel += abs(dx) + abs(dy);
-            if(v->travel > 8) v->follow = false;
+            if(v->travel > 8 && v->follow) stop_following(v);   /* a drag takes the map; a tap does not */
             cb_mapw_move_by(v->mw, dx, dy);
         }
     }
@@ -323,7 +386,8 @@ static void input_cb(lv_event_t *e)
         else motion(v, 400);
         cb_mapw_gesture(v->mw, false);
         if(v->travel <= 8 && code == LV_EVENT_RELEASED && cb_tap_is_double(&v->drag, x, y, now)) {
-            cb_mapw_scale_by(v->mw, 2.0, x, y, 300);
+            if(v->follow) cb_mapw_follow_zoom(v->mw, 1.0);   /* zoom in on the car, still following */
+            else cb_mapw_scale_by(v->mw, 2.0, x, y, 300);
             motion(v, 900);
         }
     }
@@ -336,11 +400,13 @@ static void delete_cb(lv_event_t *e)
 {
     mv_t *v = get(lv_event_get_target_obj(e));
     if(v->timer) lv_timer_delete(v->timer);
+    if(v->boost) cb_frame_boost(false);
 #if CB_HAVE_MAP
     cb_mapw_destroy(v->mw);
 #endif
     free(v->route_json);
     free(v->stops_json);
+    free(v->results_json);
     free(v);
 }
 
@@ -390,6 +456,7 @@ lv_obj_t *map_view_create(lv_obj_t *parent, const map_view_cfg_t *cfg)
 #else
     lv_label_set_text(v->placeholder, "Map not built (MapLibre Native package missing)");
 #endif
+    puck_create(v);
     footer_create(v);
     return v->obj;
 }
@@ -405,16 +472,14 @@ void map_view_set_active(lv_obj_t *mv, bool visible)
 void map_view_set_car(lv_obj_t *mv, double lat, double lon, double heading)
 {
     mv_t *v = get(mv);
+    if(!v->have_car || lat != v->car_lat || lon != v->car_lon || heading != v->car_heading)
+        v->car_moving_until = lv_tick_get() + CAR_MOVING_MS;
     v->car_lat = lat;
     v->car_lon = lon;
     v->car_heading = heading;
     v->have_car = true;
 #if CB_HAVE_MAP
-    if(!v->mw) return;
-    push_car(v);
-    if(!v->follow || v->touching || v->overview_until) return;
-    if(v->nav && !v->north_up) cb_mapw_camera_to(v->mw, lat, lon, NAN, heading, NAN, -1, FOLLOW_EASE_MS);
-    else cb_mapw_ease_to(v->mw, lat, lon, 220);
+    if(v->mw) push_car(v);   /* the worker moves the car, and the camera when following, every frame */
 #endif
 }
 
@@ -481,15 +546,69 @@ void map_view_set_stops(lv_obj_t *mv, const route_stop_t *stops, int n, const ro
     motion(v, 300);
 }
 
+void map_view_set_results(lv_obj_t *mv, const route_stop_t *places, int n)
+{
+    mv_t *v = get(mv);
+    free(v->results_json);
+    v->results_json = NULL;
+    v->have_rbox = false;
+    uint32_t key = 0;
+    if(n > 0) {
+        size_t cap = 256 + (size_t)n * 320;
+        char *b = malloc(cap);
+        if(b && route_geojson_stops(b, cap, places, n, NULL)) v->results_json = b;
+        else free(b);
+        key = 2166136261u ^ (uint32_t)n;   /* changes with the set, so only a new search is framed */
+        for(int i = 0; i < n; i++) {
+            key = (key ^ (uint32_t)(int64_t)llround(places[i].lat * 1e5)) * 16777619u;
+            key = (key ^ (uint32_t)(int64_t)llround(places[i].lon * 1e5)) * 16777619u;
+        }
+        key = key ? key : 1;
+        v->rbox[0] = v->rbox[2] = places[0].lat;
+        v->rbox[1] = v->rbox[3] = places[0].lon;
+        for(int i = 1; i < n; i++) {
+            v->rbox[0] = fmin(v->rbox[0], places[i].lat);
+            v->rbox[2] = fmax(v->rbox[2], places[i].lat);
+            v->rbox[1] = fmin(v->rbox[1], places[i].lon);
+            v->rbox[3] = fmax(v->rbox[3], places[i].lon);
+        }
+        v->have_rbox = true;
+    }
+    bool fresh = key && key != v->results_key;
+    v->results_key = key;
+#if CB_HAVE_MAP
+    if(!v->mw) return;
+    cb_mapw_set_geojson(v->mw, "cb-results", v->results_json ? v->results_json : EMPTY);
+    if(fresh && !v->touching) {   /* frame the pins with the car */
+        double s = v->rbox[0], w = v->rbox[1], nn = v->rbox[2], e = v->rbox[3];
+        if(v->have_car) {
+            s = fmin(s, v->car_lat), nn = fmax(nn, v->car_lat);
+            w = fmin(w, v->car_lon), e = fmax(e, v->car_lon);
+        }
+        cb_mapw_follow(v->mw, false, false, NAN, NAN, NAN, 0);
+        cb_mapw_fit(v->mw, s, w, nn, e, OVERVIEW_PAD, 900);
+        if(v->nav && v->follow) v->overview_until = lv_tick_get() + RESULTS_MS;   /* driving: back to the car */
+        else v->follow = false;   /* parked or browsing: the pins stay until the driver recenters */
+        motion(v, 1500);
+    }
+#else
+    LV_UNUSED(fresh);
+#endif
+    motion(v, 300);
+}
+
 void map_view_set_follow(lv_obj_t *mv, bool follow)
 {
     mv_t *v = get(mv);
-    v->follow = follow;
 #if CB_HAVE_MAP
-    if(follow && v->have_car && v->mw) {
-        cb_mapw_ease_to(v->mw, v->car_lat, v->car_lon, 600);
-        motion(v, 900);
+    if(!follow) {
+        stop_following(v);
+        return;
     }
+    v->follow = true;
+    if(v->mw) recenter_camera(v, 600);
+#else
+    v->follow = follow;
 #endif
 }
 
@@ -500,14 +619,14 @@ void map_view_set_nav(lv_obj_t *mv, bool navigating)
     mv_t *v = get(mv);
     if(v->nav == navigating) return;
     v->nav = navigating;
-    if(navigating) return;   /* the route that follows brings the overview and the heading-up camera */
-    v->north_up = false;
-    v->overview_until = 0;
-#if CB_HAVE_MAP
-    if(v->mw && v->follow) {   /* arrived or cancelled: back to a flat, north-up map around the car */
-        cb_mapw_camera_to(v->mw, NAN, NAN, FOLLOW_ZOOM, 0, 0, 0, 700);
-        motion(v, 1100);
+    if(!navigating) {
+        v->north_up = false;
+        v->overview_until = 0;
     }
+#if CB_HAVE_MAP
+    /* starting: heading-up behind the car (a new route's overview takes over when it arrives);
+       arrived or cancelled: back to a flat, north-up map around the car */
+    if(v->mw && v->follow && !v->overview_until) recenter_camera(v, navigating ? 800 : 700);
 #endif
 }
 
@@ -528,7 +647,8 @@ void map_view_north_up(lv_obj_t *mv)
     v->north_up = true;
 #if CB_HAVE_MAP
     if(!v->mw) return;
-    cb_mapw_camera_to(v->mw, NAN, NAN, NAN, 0, 0, 0, 500);
+    if(v->follow) cb_mapw_follow(v->mw, true, false, NAN, 0, 0, 500);   /* still on the car, now flat and north up */
+    else cb_mapw_camera_to(v->mw, NAN, NAN, NAN, 0, 0, 0, 500);
     motion(v, 900);
 #endif
 }
@@ -540,7 +660,7 @@ void map_view_overview(lv_obj_t *mv)
     v->follow = false;
     v->overview_until = 0;
 #if CB_HAVE_MAP
-    overview_camera(v);
+    overview_camera(v);   /* stops the follow camera first */
 #endif
 }
 
@@ -560,7 +680,8 @@ void map_view_zoom(lv_obj_t *mv, double factor)
 #if CB_HAVE_MAP
     mv_t *v = get(mv);
     if(!v->mw) return;
-    cb_mapw_scale_by(v->mw, factor, lv_obj_get_width(v->obj) / 2.0, lv_obj_get_height(v->obj) / 2.0, 280);
+    if(v->follow) cb_mapw_follow_zoom(v->mw, log2(factor));   /* the follow camera keeps the new zoom */
+    else cb_mapw_scale_by(v->mw, factor, lv_obj_get_width(v->obj) / 2.0, lv_obj_get_height(v->obj) / 2.0, 280);
     motion(v, 700);
 #else
     LV_UNUSED(mv);
@@ -596,7 +717,8 @@ void map_view_wheel(lv_obj_t *mv, int32_t x, int32_t y, float notches)
     if(!v->visible || notches == 0 || x < a.x1 || x > a.x2 || y < a.y1 || y > a.y2) return;
 #if CB_HAVE_MAP
     if(!v->mw || v->failed) return;
-    cb_mapw_scale_by(v->mw, pow(2.0, notches * 0.5), x - a.x1, y - a.y1, 140);   /* a notch = half a zoom level */
+    if(v->follow) cb_mapw_follow_zoom(v->mw, notches * 0.5);   /* a notch = half a zoom level */
+    else cb_mapw_scale_by(v->mw, pow(2.0, notches * 0.5), x - a.x1, y - a.y1, 140);
     motion(v, 500);
 #endif
 }

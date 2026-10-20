@@ -3,6 +3,15 @@
 #
 # PortAudio does not see PipeWire node names (echo-cancel-source). The Pulse
 # plugin device is "pulse"; PULSE_SOURCE / PULSE_SINK select the AEC nodes.
+# With a reSpeaker XVF3800 the echo is cancelled on the board, so the clients
+# talk to its own PipeWire nodes; otherwise to the WebRTC echo-cancel nodes.
+if grep -qi "XVF3800" /proc/asound/cards 2>/dev/null && command -v pw-cli >/dev/null 2>&1; then
+  _xvf_nodes=$(pw-cli ls Node 2>/dev/null | grep -o 'alsa_\(input\|output\)\.usb-Seeed_Studio_reSpeaker_XVF3800[^"]*' || true)
+  export PULSE_SOURCE="${PULSE_SOURCE:-$(grep -m1 '^alsa_input' <<<"$_xvf_nodes" || echo echo-cancel-source)}"
+  export PULSE_SINK="${PULSE_SINK:-$(grep -m1 '^alsa_output' <<<"$_xvf_nodes" || echo echo-cancel-sink)}"
+  export NOVA_HAILO_HW_AEC=xvf3800
+  unset _xvf_nodes
+fi
 export PULSE_SOURCE="${PULSE_SOURCE:-echo-cancel-source}"
 export PULSE_SINK="${PULSE_SINK:-echo-cancel-sink}"
 _cap="${NOVA_HAILO_CAPTURE_DEVICE:-pulse}"

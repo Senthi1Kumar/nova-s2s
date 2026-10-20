@@ -122,7 +122,7 @@ Clients **must ignore event types they do not know.**
 |---|---|---|
 | Required | `session.update` · mic audio · `playback.started` · `playback.stopped` | `session.created` · `response.audio.delta` · `response.done` · `error` |
 | Recommended | `session.arm` | `nova.fsm` · `wake.detected` |
-| Optional | `response.cancel` · `playback.interrupted` | `conversation.item.input_audio_transcription.completed` · `response.audio_transcript.delta` · `response.audio_transcript.done` · `input_audio_buffer.speech_started` · `input_audio_buffer.speech_stopped` · `nova.turn_metrics` |
+| Optional | `response.cancel` · `playback.interrupted` | `conversation.item.input_audio_transcription.completed` · `response.audio_transcript.delta` · `response.audio_transcript.done` · `input_audio_buffer.speech_started` · `input_audio_buffer.speech_stopped` · `nova.turn_metrics` · `output_audio.duck` |
 
 `nova.settings.*`, `nova.google.*`, `nova.llm_status`, `nova.tool_status` and
 `nova.research_status` belong to the operator UI and are not part of this contract.
@@ -420,6 +420,14 @@ muted, a wake word or tap is ignored until unmute, and the page gets `nova.mic` 
 its data channel. The page can mute the cabin itself with
 `{"type": "nova.mic.set", "muted": true}` (source `livekit`; a non-boolean answers
 `error` `bad_muted`). Cancel aborts the reply and closes the wake window.
+
+`{"type": "output_audio.duck", "gain": 0.3}` asks the device to play Nova's reply at that gain
+(0..1) from the next audio frame on, without dropping queued audio; `gain: 1.0` restores it.
+The Pi sends it when the driver starts talking over Nova and it is not yet clear whether that
+was "mm-hm" (volume back, she carries on) or an interruption (a cancelled `response.done`
+follows). A device should also reset to 1.0 on any interruption. Sent only with
+`NOVA_HAILO_XVF_TURNS=on` and a trusted echo canceller; a device that ignores it keeps today's
+behaviour.
 
 ### Nova's own voice
 

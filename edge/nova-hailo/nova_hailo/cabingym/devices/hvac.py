@@ -39,7 +39,15 @@ def _set_fan(ctx: ApiContext, args: dict[str, Any]) -> ApiResult:
         for st in c.HVAC_ZONES[zone]
     }
     level = max(targets.values())
-    speak = "Fan off." if level == 0 else ("Fan on max." if level == 6 else f"Fan set to {level}.")
+    if zone == "all" or zone not in ("driver", "passenger"):
+        speak = "Fan off." if level == 0 else ("Fan on max." if level == 6 else f"Fan set to {level}.")
+        return done(speak, targets)
+    # One side: name it, and say so when the other side differs (the cockpit shows the higher).
+    other = "passenger" if zone == "driver" else "driver"
+    other_level = int(ctx.snapshot[c.hvac_fan(other.capitalize())])
+    speak = f"{ZONE_LABEL[zone]} fan " + ("off." if level == 0 else f"set to {level}.")
+    if other_level != level:
+        speak += f" {ZONE_LABEL[other]} is still on {other_level}."
     return done(speak, targets)
 
 

@@ -52,3 +52,9 @@ def test_a_request_that_leaves_the_window_is_folded_not_forgotten():
     user = h.build_messages("You are Nova.", "why didn't you stop there?")[-1]["content"]
     assert "Earlier in this drive the driver asked: add a restaurant stop in Mountain View" in user
     assert len(h) == 2
+
+
+def test_the_note_says_results_are_on_the_map():
+    # Asked to "show those on the map", Nova answered it could not display a map; the pins are already there.
+    note = cabin_context({c.NAV_ACTIVE: False, c.NAV_RESULTS: ({"name": "WFM Coffee Bar", "lat": 0, "lon": 0},)})
+    assert "shown on the cockpit map as numbered pins: 1. WFM Coffee Bar" in note

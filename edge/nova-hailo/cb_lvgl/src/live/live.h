@@ -21,6 +21,8 @@ bool live_position_label(int gps_fix, int sats, const char *source, bool driving
 /* The car's IANA zone (Location.TimeZone: the GPS fix's, else the simulated drive's) becomes the process TZ, so
    every clock follows the car. False, and TZ unchanged, for an empty or malformed name. */
 bool live_set_timezone(const char *zone);
+/* Search-result pins on the map now: hidden once one is chosen (destination or stop) or a trip starts. */
+int live_pins_shown(void);
 
 /* Nova's language model, as GET/POST /v1/settings and the nova.settings observe frame describe it. */
 #define LIVE_LLM_PROVIDERS 4

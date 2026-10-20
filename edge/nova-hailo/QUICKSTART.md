@@ -6,11 +6,9 @@ control by voice.
 
 **You need**
 
-- Raspberry Pi 5 (8 GB) with the **AI HAT+ 2** (Hailo-10H) and the **WM8960 Audio HAT** (mic and speaker)
+- Raspberry Pi 5 (8 GB) with the **AI HAT+ 2** (Hailo-10H)
+- A **reSpeaker XVF3800** for the mic and speaker (USB; no driver to install). Plug it in before setup. The older **WM8960 Audio HAT** still works; `setup_pi.sh` prints its one-time driver install if that card is what you have. Use one board, not both.
 - Raspberry Pi OS **Trixie**, 64-bit, with the desktop, and a display on HDMI
-- Internet
-- From Senthil: the **API keys**, and the **`hailo-5.3.0` folder** if your Pi does not run HailoRT 5.3.0 yet
-  (`hailortcli fw-control identify` shows the version). Copy that folder to your home directory.
 
 ## 1. Get the code
 
@@ -40,9 +38,7 @@ cd edge/nova-hailo
 nano .env
 ```
 
-Make sure `GROQ_API_KEY` and `MAPBOX_API_KEY` are filled in (an older `.env` has no `MAPBOX_API_KEY` line:
-add it), plus `EXA_API_KEY` (web search) and `OPENROUTER_API_KEY` (backup model) if you have them. Keep this
-file private.
+Make sure `GROQ_API_KEY` and `MAPBOX_API_KEY` are filled in, plus `EXA_API_KEY` (web search) and `OPENROUTER_API_KEY` (backup model) if you have them.
 
 ## 3. Set up (once: about 45 minutes on a new Pi over Wi-Fi, 10–15 minutes when updating)
 
@@ -67,6 +63,7 @@ is a request. `Ctrl+C` in the terminal stops everything. To say **"Hey Nova"** f
 
 - "Take me to Mountain View." Nova plans the route, and the car drives it on the map with spoken
   turn-by-turn directions.
+- "Take me to Barbara Drive in Los Gatos via Los Altos, Cupertino and Campbell."
 - "Find a coffee place on the way", then "add the second one as a stop".
 - "Find a charger within 10 minutes."
 - "Set the temperature to 21", "open the sunroof", "turn the ambient light purple", "switch to sport mode".
@@ -78,7 +75,8 @@ is a request. `Ctrl+C` in the terminal stops everything. To say **"Hey Nova"** f
 | --- | --- |
 | `setup_pi.sh` stops with a message | Do what it says, then run it again |
 | The map is a grey placeholder | `MAPBOX_API_KEY` is missing in `.env` |
-| Nova does not react | Check the mic is the default input in the desktop's sound settings |
+| No sound, or Nova does not react | In the desktop sound settings, input and output are the XVF3800 (it appears as a USB card). The launcher sets its volume. Unplug and replug, then start again. |
+| You talk while Nova is speaking and nothing happens | With the XVF3800 the mic stays open: the board cancels its own echo. A short "mm-hm" is only acted on when you start with `NOVA_HAILO_XVF_TURNS=on`; otherwise it is logged. |
 | Nova says it can't reach a service | That key is missing in `.env` (web search needs `EXA_API_KEY`) |
 | Anything else | Send Senthil `/tmp/nova_server.log` and `/tmp/cb_lvgl.log` |
 

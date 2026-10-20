@@ -126,6 +126,11 @@ def p_place(desc: str) -> dict[str, Any]:
     return {"type": "string", "x-ground": "place", "description": desc}
 
 
+def p_places(desc: str) -> dict[str, Any]:
+    """An ordered list of place names, each resolved like p_place."""
+    return {"type": "array", "items": {"type": "string"}, "x-ground": "places", "description": desc}
+
+
 ZONE_LABEL = {
     "driver": "Driver side", "passenger": "Passenger side", "all": "Both sides",
     "front": "Front", "rear": "Rear", "rear_left": "Rear left", "rear_right": "Rear right",

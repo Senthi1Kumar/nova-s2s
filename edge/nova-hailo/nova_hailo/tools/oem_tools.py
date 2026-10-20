@@ -23,7 +23,7 @@ from nova_hailo.cabingym.cloud_tools import PREFIX as VEHICLE_PREFIX
 from nova_hailo.cabingym.cloud_tools import cloud_call
 from nova_hailo.cabingym.confirm import parse_confirmation
 from nova_hailo.cabingym.executor import VehicleExecutor
-from nova_hailo.cabingym.grounding import apply_focus_zone
+from nova_hailo.cabingym.grounding import apply_focus_zone, correct_nav_call, mark_unasked
 from nova_hailo.cabingym.router_jev import route_vehicle_jev, route_with_jev_vehicle
 from nova_hailo.cabingym.router_regex import route_vehicle_regex
 from nova_hailo.cabingym.runtime import CABIN_CONTROL, CabinEnv
@@ -188,6 +188,12 @@ class OemToolGateway:
             return self._finish_one(query, exact, search_again=False)
 
         jev = self._jev_routes(query)
+        if jev and self.cabin is not None and all(r.intent is Intent.CAPABILITY_UNAVAILABLE for r in jev):
+            # Jev called a car request unavailable ("Let's go to El Camino Park" on the local model);
+            # the cabin router below can do it, navigation included.
+            parsed = route_vehicle_regex(query, self.cabin)
+            if parsed is not None and parsed.kind == "vehicle":
+                jev = None
         if jev:
             if self.cabin is not None:
                 jev_outcome = next(
@@ -347,9 +353,10 @@ class OemToolGateway:
                 return ToolResult(ok=False, name=name, status="unavailable",
                                   speak="I can't reach that service right now.",
                                   reason="vehicle_not_configured").to_dict()
-            outcome = apply_focus_zone(
-                self.cabin, getattr(self, "_cabin_utterance", "") or "",
-                cloud_call(name, kwargs, self.cabin),
+            utterance = getattr(self, "_cabin_utterance", "") or ""
+            outcome = mark_unasked(
+                self.cabin, utterance, apply_focus_zone(
+                    self.cabin, utterance, correct_nav_call(self.cabin, utterance, cloud_call(name, kwargs, self.cabin))),
             )
             result = self.vehicle.run(outcome)
             self._remember_vehicle(getattr(self, "_cabin_utterance", "") or "", outcome, result)
@@ -433,6 +440,19 @@ class OemToolGateway:
             utterance, str(device), str(api or ""), args,
             str(result.get("status") or outcome.kind), str(result.get("speak") or ""),
         )
+
+    def rescue_claim(self, utterance: str) -> dict[str, Any] | None:
+        """Do what the model said it did but did not: "Go to Blink Charging Station" answered
+        with "Heading there" and no tool call. The regex route, navigation included, runs
+        once; None when it cannot parse the sentence or the change did not go through."""
+        if self.vehicle is None or self.cabin is None or not (utterance or "").strip():
+            return None
+        outcome = route_vehicle_regex(utterance.strip(), self.cabin)
+        if outcome is None or outcome.kind != "vehicle" or not outcome.calls:
+            return None
+        result = self.vehicle.run(outcome)
+        self._remember_vehicle(utterance, outcome, result)
+        return result if str(result.get("status") or "") == "success" else None
 
     def maybe_rescue_vehicle(self, utterance: str, tool_name: str, out: dict[str, Any]) -> dict[str, Any]:
         """Run the regex vehicle route when the cloud call clarified on the wrong device.

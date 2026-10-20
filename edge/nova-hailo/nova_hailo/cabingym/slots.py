@@ -20,7 +20,8 @@ _TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "sev
 
 
 def parse_number(text: str) -> float | None:
-    t = re.sub(r"[-,]", " ", (text or "").lower())
+    # Punctuation from speech-to-text ("to one.") would hide the last word; a decimal point stays.
+    t = re.sub(r"[-,!?;:]|\.(?!\d)", " ", (text or "").lower())
     half = 0.5 if re.search(r"\band\s+a\s+half\b", t) else 0.0
     m = re.search(r"(?<![\w.])(\d+(?:\.\d+)?)", t)
     if m:
@@ -353,3 +354,11 @@ def parse_within_min(text: str) -> dict[str, float] | None:
     if not n or n <= 0:
         return None
     return {"within_min": n * 60 if unit.startswith(("hour", "hr")) else n}
+
+
+_AFTER = re.compile(r"^\s*(and\s+)?then\b|\bafter\s+(that|this|it|there|we\s+get|the|[a-z]+'s)\b", re.I)
+
+
+def parse_after(text: str) -> bool | None:
+    """True for "after Kirk's, ...", "then ...": go there after the current destination."""
+    return True if _AFTER.search(text or "") else None

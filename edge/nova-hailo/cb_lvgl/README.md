@@ -64,8 +64,13 @@ The Map page renders Mapbox vector tiles natively with MapLibre Native (C API, p
 `.deps/maplibre/<preset>/`; CMake finds it, otherwise the page shows a placeholder). It draws off-screen in its
 own EGL context on a render thread and hands finished frames to LVGL; drag pans with a glide, the mouse wheel,
 double tap and +/− zoom, ⌖ recenters and follows the car, ☀/☾ switches night (`navigation-night-v1`: live
-traffic, with place names added from the same tiles) and day (`streets-v12`: shops, restaurants, transit). Frames are rendered only while something moves (30 fps touched,
-15 fps following, none idle). `MAPBOX_API_KEY` selects `mapbox://styles/mapbox/dark-v11` (the launchers read it
+traffic, with place names added from the same tiles) and day (`streets-v12`: shops, restaurants, transit). Frames are rendered only while something moves (30 fps touched or
+following, none idle). While following, the render thread moves the camera and the car every frame, drawing the car
+1.5 position samples behind real time and interpolating between them (`src/map/map_follow.c`), so a 5–10 Hz feed
+moves continuously; the puck is an LVGL image placed at the screen point each frame carries. Frames are read back
+asynchronously through GL pixel buffers (`CB_MAP_READBACK=sync` for the blocking path) and change hands by pointer.
+`CB_MAP_STATS=1` prints fps, per-stage ms and the follow camera's speed variation every 5 s (Pi 5 at 1920×1080,
+50 km/h drive: 30 fps, 2–3 %). `MAPBOX_API_KEY` selects `mapbox://styles/mapbox/dark-v11` (the launchers read it
 from nova-hailo's `.env` without printing it); without a token the OpenFreeMap dark style is used, and
 `CB_MAP_STYLE` overrides both. `build-*/map_probe` measures render + readback on a machine (Pi 5, V3D:
 59 fps unpaced, 1200×760).

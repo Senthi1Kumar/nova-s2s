@@ -15,6 +15,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from nova_hailo.cabingym import catalog as c
+from nova_hailo.cabingym.nav import Place, haversine_km
 
 MAX_RESULTS = 3
 MAX_STOPS = 4
@@ -26,6 +27,22 @@ def _place_names(items: Any, limit: int) -> list[str]:
         name = item.get("name") if isinstance(item, Mapping) else None
         if name:
             out.append(str(name))
+    return out
+
+
+def _results(snapshot: Mapping[str, Any]) -> list[str]:
+    here = None
+    if snapshot.get(c.LAT) is not None and snapshot.get(c.LON) is not None:
+        here = Place("here", float(snapshot[c.LAT]), float(snapshot[c.LON]))
+    out: list[str] = []
+    for item in list(snapshot.get(c.NAV_RESULTS) or ())[:MAX_RESULTS]:
+        if not isinstance(item, Mapping) or not item.get("name"):
+            continue
+        text = str(item["name"])
+        if here is not None and item.get("lat") is not None and item.get("lon") is not None:
+            km = haversine_km(here, Place("", float(item["lat"]), float(item["lon"])))
+            text += f" ({km:.1f} km away)"
+        out.append(text)
     return out
 
 
@@ -58,9 +75,10 @@ def cabin_context(
         lines.append(trip + ".")
     else:
         lines.append("Not navigating.")
-    results = _place_names(snapshot.get(c.NAV_RESULTS), MAX_RESULTS)
-    if results:
-        lines.append("Last place search: " + "; ".join(f"{i}. {n}" for i, n in enumerate(results, 1)) + ".")
+    results = _results(snapshot)
+    if results:   # with distances, so "how far is the second one?" needs no new search
+        lines.append("Last place search, shown on the cockpit map as numbered pins: "
+                     + "; ".join(f"{i}. {r}" for i, r in enumerate(results, 1)) + ".")
     pending = [_call_text(call) for call in (pending_calls or ())]
     if pending:
         lines.append("Waiting for the driver's yes or no on: " + "; ".join(pending) + ".")

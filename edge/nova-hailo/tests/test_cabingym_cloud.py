@@ -416,3 +416,60 @@ def test_a_name_with_its_town_is_scored_by_the_name():
     hits = MapboxNav("pk.secret", fetch=fetch).search("Dar, Los Gatos", Place("here", 37.4419, -122.1430))
     assert [p.name for p in hits] == ["Dar"]
     assert queries[0] == "Dar, Los Gatos"     # searched whole, so the map knows which Dar
+
+
+def _nav_with(features, queries=None):
+    from nova_hailo.cabingym.nav import MapboxNav
+
+    def fetch(path, params):
+        if queries is not None:
+            queries.append(params["q"])
+        return {"features": [_point(n, lon, lat) for n, lon, lat in features]}
+
+    return MapboxNav("pk.secret", fetch=fetch)
+
+
+def test_a_name_sharing_only_letters_is_not_the_place():
+    # "OpenAI office Palo Alto" matched "Immigration Law Offices Palo Alto" on "office" and "Palo Alto" alone.
+    from nova_hailo.cabingym.nav import Place
+
+    nav = _nav_with([("Palo Alto Office Center", -122.14, 37.44),
+                     ("Immigration Law Offices Palo Alto", -122.15, 37.44)])
+    assert nav.search("OpenAI office Palo Alto", Place("here", 37.4419, -122.1430)) == []
+
+
+def test_the_kind_of_place_does_not_sink_its_name():
+    from nova_hailo.cabingym.nav import Place
+
+    queries = []
+    nav = _nav_with([("OpenAI", -122.41, 37.76), ("Open Office Tenwork I", -122.30, 37.50)], queries)
+    hits = nav.search("the OpenAI office", Place("here", 37.4419, -122.1430))
+    assert [p.name for p in hits] == ["OpenAI"]
+    assert queries[0] == "OpenAI office"   # no "the": it steered the search to names starting with "The"
+
+
+def test_another_kind_of_venue_is_not_the_one_asked_for():
+    from nova_hailo.cabingym.nav import Place
+
+    nav = _nav_with([("Palo Alto Art Studio", -122.14, 37.44)])
+    assert nav.search("Palo Alto Art Center", Place("here", 37.4419, -122.1430)) == []
+    nav = _nav_with([("Lawn Bowling Green", -122.13, 37.43)])   # no kind of its own: still found
+    assert [p.name for p in nav.search("Bowling Green Park", Place("here", 37.4419, -122.1430))] == [
+        "Lawn Bowling Green"]
+
+
+def test_a_shop_named_with_its_street_and_town_is_found():
+    from nova_hailo.cabingym.nav import Place
+
+    nav = _nav_with([("CVS Pharmacy", -122.1615, 37.4449)])
+    hits = nav.search("CVS Pharmacy Middlefield Road Palo Alto", Place("here", 37.4447, -122.1610))
+    assert [p.name for p in hits] == ["CVS Pharmacy"]   # scored by the name before the street
+    hits = nav.search("CVS pharmacy near Palo Alto", Place("here", 37.4447, -122.1610))
+    assert [p.name for p in hits] == ["CVS Pharmacy"]
+
+
+def test_a_post_office_is_not_a_newspaper_called_post():
+    from nova_hailo.cabingym.nav import Place
+
+    nav = _nav_with([("Palo Alto Daily Post", -122.16, 37.44)])
+    assert nav.search("Palo Alto post office", Place("here", 37.4447, -122.1610)) == []

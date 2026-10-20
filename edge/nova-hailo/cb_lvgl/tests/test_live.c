@@ -194,6 +194,29 @@ static void cabin_writes_shown(void)
     CHECK(iv(m->fan_level) == 1);
 }
 
+/* Results show as pins; choosing one leaves only the destination; a new search shows pins again. */
+static void result_pins(void)
+{
+    const char *pois = "\"pois\":[{\"n\":1,\"name\":\"Taqueria La Cazuela\",\"lat\":37.4590,\"lon\":-122.1380},"
+                       "{\"n\":2,\"name\":\"Compadres Food Truck\",\"lat\":37.4602,\"lon\":-122.1351},"
+                       "{\"n\":3,\"name\":\"Ravenswood\",\"lat\":37.4605,\"lon\":-122.1350}]";
+    char f[1024];
+    snprintf(f, sizeof f, "{\"type\":\"nova.nav\",\"active\":false,\"route\":\"\",%s}", pois);
+    feed(f);
+    CHECK(live_pins_shown() == 3);
+    snprintf(f, sizeof f, "{\"type\":\"nova.nav\",\"active\":true,\"route\":\"\",\"destination\":"
+             "{\"name\":\"Taqueria La Cazuela\",\"lat\":37.4590,\"lon\":-122.1380},%s}", pois);
+    feed(f);
+    CHECK(live_pins_shown() == 0);   /* the chosen one is the destination now; the others go */
+    feed("{\"type\":\"nova.nav\",\"active\":true,\"route\":\"\",\"destination\":"
+         "{\"name\":\"Taqueria La Cazuela\",\"lat\":37.4590,\"lon\":-122.1380},"
+         "\"pois\":[{\"n\":1,\"name\":\"Blue Bottle\",\"lat\":37.4470,\"lon\":-122.1600}]}");
+    CHECK(live_pins_shown() == 1);   /* a new search on the way shows again */
+    feed("{\"type\":\"nova.nav\",\"active\":false,\"route\":\"\","
+         "\"pois\":[{\"n\":1,\"name\":\"Blue Bottle\",\"lat\":37.4470,\"lon\":-122.1600}]}");
+    CHECK(live_pins_shown() == 0);   /* the trip ended: its results are done */
+}
+
 static void position_label(void)
 {
     char t[80];
@@ -256,6 +279,7 @@ int main(void)
     session_requests();
     set_request();
     cabin_writes_shown();
+    result_pins();
     position_label();
     timezone_follows_car();
     llm_settings();

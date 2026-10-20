@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import signal
+import time
 import subprocess
 import sys
 import wave
@@ -257,3 +258,110 @@ def test_a_muted_cabin_stops_the_mic_stream():
     assert d.muted is True and not d.should_stream()
     asyncio.run(d.on_event({"type": "nova.mic", "muted": False, "source": "cockpit"}))
     assert d.should_stream()
+
+
+_DROP_DRIVER = r'''
+import asyncio, importlib.util, sys, types
+
+class _Stream:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *e): return False
+    def start(self): pass
+    def stop(self): pass
+    def write(self, b): pass
+
+sys.modules["sounddevice"] = types.SimpleNamespace(RawInputStream=_Stream, RawOutputStream=_Stream)
+
+class _WS:
+    def __init__(self, drop): self.drop = drop
+    async def send(self, m): pass
+    async def close(self): pass
+    def __aiter__(self): return self
+    async def __anext__(self):
+        if self.drop:                       # the link goes away shortly after opening
+            await asyncio.sleep(0.05)
+            raise StopAsyncIteration
+        await asyncio.Event().wait()
+
+spec = importlib.util.spec_from_file_location("nova_client", sys.argv[1])
+nc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(nc)
+opens = []
+
+async def _fake_open(url, token, ca):
+    opens.append(1)
+    print(f"open {len(opens)}", flush=True)
+    if sys.argv[2] == "refuse":
+        from websockets.datastructures import Headers
+        from websockets.exceptions import InvalidStatus
+        from websockets.http11 import Response
+        raise InvalidStatus(Response(401, "Unauthorized", Headers()))
+    return _WS(drop=len(opens) == 1)
+
+nc._open = _fake_open
+sys.exit(nc.main(["--wake", "server"]))
+'''
+
+
+def _drive(mode: str, until: str, timeout: float = 8.0):
+    p = subprocess.Popen([sys.executable, "-c", _DROP_DRIVER,
+                          str(ROOT / "examples/realtime/python/nova_client.py"), mode],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+    lines = []
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and p.poll() is None:
+            line = p.stdout.readline()
+            if not line:
+                break
+            lines.append(line.strip())
+            if line.strip() == until:
+                break
+        if p.poll() is None:
+            p.send_signal(signal.SIGINT)
+            p.wait(timeout=5)
+    finally:
+        if p.poll() is None:
+            p.kill()
+        out, err = p.communicate()
+    return p.returncode, lines + out.splitlines(), err
+
+
+def test_a_dropped_link_reconnects_instead_of_ending_the_conversation():
+    code, lines, err = _drive("drop", until="open 2")
+    assert "open 2" in lines, (lines, err)
+    assert "[conn] lost the link to Nova; reconnecting" in lines
+    assert lines.count("say 'Hey Nova, ...'") == 1   # greeted once, not on every reconnect
+    assert "Traceback" not in err
+
+
+def test_a_refused_connection_stops_rather_than_retrying_forever():
+    code, lines, err = _drive("refuse", until="__never__", timeout=5)
+    assert code == 1, (lines, err)
+    assert lines.count("open 1") == 1 and "open 2" not in lines
+    assert "refused" in err
+
+
+def test_the_server_can_duck_novas_voice_and_bring_it_back():
+    import asyncio
+    import struct
+
+    nc = nova_client
+
+    class _Spk:
+        gain = 1.0
+
+        def set_gain(self, g):
+            self.gain = g
+
+    spk = _Spk()
+    dev = nc.Device(ws=None, wake="none", echo_cancellation=True)
+    asyncio.run(dev.on_event({"type": "output_audio.duck", "gain": 0.3}, spk))
+    assert spk.gain == 0.3
+    asyncio.run(dev.on_event({"type": "output_audio.duck", "gain": 1.0}, spk))
+    assert spk.gain == 1.0
+    loud = struct.pack("<4h", 1000, -1000, 32767, -32768)
+    assert struct.unpack("<4h", nc.apply_gain(loud, 0.5)) == (500, -500, 16383, -16384)
+    assert nc.apply_gain(loud, 1.0) == loud

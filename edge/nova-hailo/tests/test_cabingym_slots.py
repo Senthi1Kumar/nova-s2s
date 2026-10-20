@@ -7,6 +7,8 @@ from nova_hailo.cabingym import slots as s
 @pytest.mark.parametrize("text,expected", [
     ("set it to 21", 21.0), ("twenty one and a half", 21.5), ("21.5 degrees", 21.5),
     ("a hundred percent", 100.0), ("sixty", 60.0), ("turn on the ac", None), ("someone", None),
+    # speech-to-text ends sentences with punctuation: "one." is still one
+    ("set the fan speed to one.", 1.0), ("twenty one, please!", 21.0), ("two?", 2.0),
 ])
 def test_parse_number(text, expected):
     assert s.parse_number(text) == expected
@@ -57,6 +59,7 @@ def test_parse_shade():
     ("turn off the seat heating", {"value": 0}), ("seat heating on high", {"value": 3}),
     ("turn the fan up", {"delta": 1}), ("fan down a bit", {"delta": -1}),
     ("turn on my seat heater", {"value": 2}), ("fan to 4", {"value": 4}), ("fan to max", {"value": 6}),
+    ("And turn on the AC and set the fan speed to one.", {"value": 1}),
 ])
 def test_parse_level(text, expected):
     max_level, on_level = (6, 3) if "fan" in text else (3, 2)

@@ -134,3 +134,52 @@ def test_mapbox_searches_along_the_route_and_times_the_drive():
     assert params["route_geometry"] == "polyline6" and params["time_deviation"] == 10 and params["route"]
     assert nav.drive_minutes(here, [hits[0], Place("x", 0, 0)]) == [4.0, None]
     assert seen[-1][0].startswith("/directions-matrix/v1/mapbox/driving-traffic/-122.143000,37.441900;")
+
+
+# ---- Kinds of places, "after X", names with a street or a "near" ---------------
+
+def test_a_car_wash_and_a_pharmacy_are_kinds_the_car_can_find():
+    cabin = _cabin()
+    out = route_vehicle_regex("find a car wash nearby", cabin)
+    assert out.calls[0].api == "find_nearby" and out.calls[0].args["category"] == "car_wash"
+    out = route_vehicle_regex("is there a pharmacy near me", cabin)
+    assert out.calls[0].args["category"] == "pharmacy"
+
+
+def _trip(cabin, dest=("Kirk's Steakburgers", 37.4447, -122.1610)):
+    cabin.store.set_targets({c.NAV_ACTIVE: True, c.NAV_DEST: dest[0], c.NAV_DEST_LAT: dest[1],
+                             c.NAV_DEST_LON: dest[2]})
+
+
+def test_after_the_destination_the_new_place_becomes_the_end():
+    cabin = _cabin()
+    _trip(cabin)
+    wash = {"name": "Auto Pride Hand Car Wash", "lat": 37.4300, "lon": -122.1380}
+    call = VehicleCall("navigation", "add_stop", {"destination": wash, "after": True})
+    out = VehicleExecutor(cabin).run(RouteOutcome("vehicle", [call], "", {}))
+    assert out["status"] == "success" and "After Kirk's Steakburgers, on to Auto Pride" in out["speak"]
+    assert cabin.store.get(c.NAV_DEST) == "Auto Pride Hand Car Wash"
+    assert [s["name"] for s in cabin.store.get(c.NAV_STOPS)] == ["Kirk's Steakburgers"]
+
+
+def test_the_destination_is_not_added_as_its_own_stop():
+    cabin = _cabin()
+    _trip(cabin)
+    kirks = {"name": "Kirk's Steakburgers", "lat": 37.4447, "lon": -122.1610}
+    out = VehicleExecutor(cabin).run(RouteOutcome("vehicle", [VehicleCall("navigation", "add_stop",
+                                                                          {"destination": kirks})], "", {}))
+    assert out["status"] == "clarify" and "already where we're going" in out["speak"]
+
+
+def test_after_is_heard_in_the_request():
+    from nova_hailo.cabingym.slots import parse_after
+    assert parse_after("After Kirk's, take me to a car wash") is True
+    assert parse_after("then a car wash") is True
+    assert parse_after("add a stop at the car wash") is None
+
+
+def test_the_context_note_gives_each_result_its_distance():
+    from nova_hailo.cabingym.context import cabin_context
+    snap = {c.NAV_ACTIVE: False, c.LAT: 37.4419, c.LON: -122.1430,
+            c.NAV_RESULTS: ({"name": "Teaspoon", "lat": 37.4447, "lon": -122.1610},)}
+    assert "1. Teaspoon (1.6 km away)" in cabin_context(snap)

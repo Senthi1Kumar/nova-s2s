@@ -3,6 +3,8 @@
 Jev sees the cabin store and the recent dialogue. Code still refuses to
 write a follow-up onto the driver when the passenger was the subject.
 """
+import pytest
+
 from nova_hailo.cabingym import catalog as c
 from nova_hailo.cabingym.router_jev import route_vehicle_jev, stage2_questions
 from nova_hailo.cabingym.runtime import CabinEnv
@@ -80,6 +82,35 @@ def test_cloud_call_without_a_zone_uses_the_passenger_from_the_dialogue():
     assert g.cabin.store.get(c.hvac_temp("Driver")) == 21.0
 
 
+@pytest.mark.parametrize("cloud_zone", [None, "driver"])
+def test_a_side_said_for_the_seat_heater_does_not_carry_to_the_fan(cloud_zone):
+    """"turn the seat on driver side only", then "set it to one speed." set only the
+    driver's fan, so the passenger fan stayed at 3 and the cockpit kept showing 3."""
+    g = OemToolGateway(enabled=["vehicle"], router="regex", jev_warm=False)
+    g.cabin.store.update({c.hvac_fan("Driver"): 3, c.hvac_fan("Passenger"): 3})
+    g.cabin.dialog = [{"user": "I'm freezing now can you turn the seat on driver side only?",
+                       "assistant": "Driver seat heating on medium."},
+                      {"user": "Set the heat to low.", "assistant": "Driver seat heating on low."},
+                      {"user": "And turn on the AC and set the fan speed to one.",
+                       "assistant": "Air conditioning on. Fan set to 3."}]
+    g._cabin_utterance = "set it to one speed."
+    kw = {"zone": cloud_zone} if cloud_zone else {}
+    out = g.execute("vehicle_hvac", action="set_fan", value=1, **kw)
+    assert out["status"] == "success"
+    assert g.cabin.store.get(c.hvac_fan("Driver")) == 1
+    assert g.cabin.store.get(c.hvac_fan("Passenger")) == 1
+
+
+def test_a_side_said_for_the_same_control_still_carries():
+    g = OemToolGateway(enabled=["vehicle"], router="regex", jev_warm=False)
+    g.cabin.store.update({c.hvac_fan("Driver"): 3, c.hvac_fan("Passenger"): 3})
+    g.cabin.dialog = [{"user": "turn the passenger fan down", "assistant": "Passenger fan set to 2."}]
+    g._cabin_utterance = "set it to one"
+    g.execute("vehicle_hvac", action="set_fan", value=1)
+    assert g.cabin.store.get(c.hvac_fan("Passenger")) == 1
+    assert g.cabin.store.get(c.hvac_fan("Driver")) == 3
+
+
 def test_ambient_red_is_a_real_write():
     jev = FakeJev(
         {"dev.lights": n(0.96)},
@@ -89,3 +120,17 @@ def test_ambient_red_is_a_real_write():
     out = g.take_cabin_turn("set the ambient light to red")
     assert g.cabin.store.get(c.AMBIENT_COLOR) == "red"
     assert out["speak"] == "Ambient light set to red."
+
+
+def test_t9_a_side_jev_guessed_without_one_said_is_the_default():
+    """"Okay, set the fan speed to one." changed only the driver's fan."""
+    jev = FakeJev({"dev.hvac": n(0.95)}, {"hvac.set_fan": n(0.93), "hvac.set_fan.zone": ch("driver")})
+    out = route_vehicle_jev("Okay, set the fan speed to one.", CabinEnv(), client=jev)
+    assert out.calls[0].args["zone"] == "all"
+    assert out.calls[0].args["value"] == 1
+
+
+def test_a_side_the_driver_names_still_wins_over_jev():
+    jev = FakeJev({"dev.hvac": n(0.95)}, {"hvac.set_fan": n(0.93), "hvac.set_fan.zone": ch("all")})
+    out = route_vehicle_jev("set the passenger fan to one", CabinEnv(), client=jev)
+    assert out.calls[0].args["zone"] == "passenger"

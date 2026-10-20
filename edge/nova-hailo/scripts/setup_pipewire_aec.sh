@@ -9,6 +9,25 @@ set -euo pipefail
 
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d"
 CONF="$CONF_DIR/99-nova-echo-cancel.conf"
+
+# The reSpeaker XVF3800 cancels echo on the board, using what is played through
+# it as the reference. A WebRTC canceller on top would process the same echo
+# twice and smear the voice, so with the array plugged in the module goes away.
+if grep -qi "XVF3800" /proc/asound/cards 2>/dev/null; then
+  if [[ -f "$CONF" ]]; then
+    rm -f "$CONF"
+    echo "[aec] XVF3800 found: removed the software echo canceller (the board does it)"
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null \
+        && echo "[aec] restarted pipewire (user session)" \
+        || echo "[aec] pipewire restart skipped (not running as a user service)"
+    fi
+  else
+    echo "[aec] XVF3800 found: echo cancelled on the board"
+  fi
+  exit 0
+fi
+
 MIC_TARGET="${NOVA_AEC_MIC_TARGET:-}"
 SPK_TARGET="${NOVA_AEC_SPK_TARGET:-}"
 

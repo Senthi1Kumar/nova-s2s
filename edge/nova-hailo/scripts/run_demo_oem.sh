@@ -54,6 +54,7 @@ export PYTHONPATH="${ROOT}/../..:${ROOT}:${PYTHONPATH:-}"
 # capture gain + ALC on every start. Never fatal: the script exits 0 when the
 # card is missing.
 "$ROOT/scripts/set_wm8960_mic_gain.sh" "${WM8960_GAIN_PCT:-100}" || true
+"$ROOT/scripts/set_xvf3800_levels.sh" || true
 
 # PipeWire WebRTC AEC + HMI device names. Idempotent; skip with NOVA_HAILO_AEC=0.
 # HMI is a second process — hmi_qt/run.sh sources the same env file.

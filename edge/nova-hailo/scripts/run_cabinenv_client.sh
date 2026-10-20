@@ -9,6 +9,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+"$ROOT/scripts/set_xvf3800_levels.sh" || true
 if [[ "${NOVA_HAILO_AEC:-1}" != "0" ]]; then
   NOVA_AEC_QUIET=1 "$ROOT/scripts/setup_pipewire_aec.sh" || true
   # shellcheck source=/dev/null

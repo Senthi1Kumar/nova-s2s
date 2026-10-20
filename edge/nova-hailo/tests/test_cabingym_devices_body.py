@@ -57,6 +57,11 @@ def test_fan_and_flags():
     assert res.targets == {c.hvac_fan("Driver"): 3, c.hvac_fan("Passenger"): 3}
     assert res.speak == "Fan set to 3."
     assert run(hvac.DEVICE, "set_fan", {"zone": "all", "value": 0}).speak == "Fan off."
+    # One side changed: say which, and that the other side differs (the cockpit shows the higher one).
+    one = run(hvac.DEVICE, "set_fan", {"zone": "driver", "value": 1}, **{"hvac.passenger.fan": 3})
+    assert one.speak == "Driver side fan set to 1. Passenger side is still on 3."
+    same = run(hvac.DEVICE, "set_fan", {"zone": "driver", "value": 2}, **{"hvac.passenger.fan": 2})
+    assert same.speak == "Driver side fan set to 2."
     assert run(hvac.DEVICE, "set_ac", {"on": False}).targets == {c.AC: False}
     assert run(hvac.DEVICE, "set_defrost", {"target": "rear", "on": True}).targets == {c.DEFROST_REAR: True}
     assert run(hvac.DEVICE, "set_recirculation", {"on": False}).speak == "Fresh air on."

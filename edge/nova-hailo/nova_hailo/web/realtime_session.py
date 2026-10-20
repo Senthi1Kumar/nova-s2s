@@ -22,6 +22,7 @@ import numpy as np
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
+from nova_hailo import xvf3800
 from nova_hailo.audio_gate import (
     DEFAULT_MIN_PEAK,
     DEFAULT_MIN_RMS,
@@ -30,27 +31,19 @@ from nova_hailo.audio_gate import (
     accept_utterance,
 )
 from nova_hailo.bench.session_tracker import BenchTracker
+from nova_hailo.cabingym.confirm import parse_confirmation
+from nova_hailo.cabingym.events import vehicle_delta_event, vehicle_snapshot_event
 from nova_hailo.metrics import Timer, TurnMetrics
 from nova_hailo.pipeline import NovaPipeline
-from nova_hailo.session_log import current as session_log_current
-from nova_hailo.web.dtln import DEFAULT_STRENGTH, create_dtln
-from nova_hailo.web import settings_ops
-from nova_hailo.cabingym.events import vehicle_delta_event, vehicle_snapshot_event
-from nova_hailo.web.cards import delivery_card_events, turn_card
-from nova_hailo.web.observe import HUB as OBSERVERS
-from nova_hailo.cabingym.confirm import parse_confirmation
-from nova_hailo.web.echo_guard import EchoGuard, fold_words
-from nova_hailo.web.session_control import CONTROL
-from nova_hailo.web.research_speech import delivery_trace_events, research_announcement
-from nova_hailo.web.settings_ops import (
-    google_connect_payload as _google_connect_payload,
-    google_disconnect_payload as _google_disconnect_payload,
-    integrations_snapshot as _integrations_snapshot,
-)
 from nova_hailo.pvad_optional import OptionalFireRedPVAD
 from nova_hailo.session_fsm import SessionFSM, SessionState, TurnTerminal
+from nova_hailo.session_log import current as session_log_current
 from nova_hailo.voice_loop import prepare_for_whisper
 from nova_hailo.wake_kws import WakeWordDetector
+from nova_hailo.web import settings_ops
+from nova_hailo.web.cards import delivery_card_events, turn_card
+from nova_hailo.web.dtln import DEFAULT_STRENGTH, create_dtln
+from nova_hailo.web.echo_guard import EchoGuard, fold_words
 from nova_hailo.web.fail_closed import (
     FAIL_CLOSED_COOLDOWN_S,
     FAIL_CLOSED_SPEAK,
@@ -63,7 +56,19 @@ from nova_hailo.web.nemo_wait_budget import (
     DEFAULT_NEMO_WAIT_SCALE,
     nemo_wait_budget_s,
 )
-
+from nova_hailo.web.observe import HUB as OBSERVERS
+from nova_hailo.web.research_speech import delivery_trace_events, research_announcement
+from nova_hailo.web.session_control import CONTROL
+from nova_hailo.web.settings_ops import (
+    google_connect_payload as _google_connect_payload,
+)
+from nova_hailo.web.settings_ops import (
+    google_disconnect_payload as _google_disconnect_payload,
+)
+from nova_hailo.web.settings_ops import (
+    integrations_snapshot as _integrations_snapshot,
+)
+from nova_hailo.web.turn_taking import DUCK_GAIN, Duck, TurnTaker, board_unsettled, turn_mode
 from nova_hailo.web.vad import create_vad_segmenter
 
 # How often to check for a finished async research job. Short enough that a
@@ -156,6 +161,46 @@ def _transcript_is_echo(user: str, last_assistant: str) -> bool:
     return bool(uf and pf and _echo_coverage(uf, pf) >= ECHO_COVERAGE)
 
 
+_YES = {"1", "true", "yes", "on"}
+_NO = {"", "0", "false", "no", "off"}
+
+
+def client_aec_trusted(env: str, cfg_trust: bool, hw_aec: str) -> bool:
+    """Whether a client's echo-cancel claim is believed: NOVA_HAILO_TRUST_CLIENT_AEC if set, else
+    voice.trust_client_aec, or a board on this Pi that cancels echo (NOVA_HAILO_HW_AEC)."""
+    env = (env or "").strip().lower()
+    if env:
+        return env in _YES
+    return bool(cfg_trust) or (hw_aec or "").strip().lower() not in _NO
+
+
+SUPERSEDE_MIN_S = 0.45   # shorter speech during transcribing/thinking is a filler, not a correction
+
+
+def supersedes(*, hw_aec: bool, state: SessionState, audio_s: float) -> bool:
+    """New speech replaces the turn in flight; only with a trusted canceller (else it may be echo)."""
+    return (hw_aec and state in (SessionState.TRANSCRIBING, SessionState.THINKING)
+            and audio_s >= SUPERSEDE_MIN_S)
+
+
+def fold_superseded(prefix: str, text: str) -> str:
+    """The replaced turn's words, then the new ones, so the model sees what was corrected."""
+    prefix, text = (prefix or "").strip(), (text or "").strip()
+    if not prefix or text.casefold().startswith(prefix.casefold()):
+        return text
+    return f"{prefix} {text}"
+
+
+def echo_drop(*, guard_hit: bool, text_hit: bool, suspect: bool, hw_aec: bool, answering: bool) -> bool:
+    """Whether a transcript is Nova's own voice. With a trusted canceller only speech that began
+    over her can be; a correction repeating her words afterwards is the driver."""
+    if answering:
+        return False
+    if hw_aec:
+        return suspect and (guard_hit or text_hit)
+    return guard_hit or (suspect and text_hit)
+
+
 def should_interrupt_on_user_speech(
     *,
     fsm_state: SessionState,
@@ -230,6 +275,7 @@ class PendingUtterance:
     speech_stopped_at: float | None = None
     turn_revision: int = 0
     echo_suspect: bool = False
+    prefix: str = ""  # the words of a turn this one replaced
 
 
 def _concat_audio(left: np.ndarray | None, right: np.ndarray) -> np.ndarray:
@@ -250,6 +296,7 @@ class RealtimeSession:
     fail_closed_cooldown_s = 6.0
     dedupe_user_s = 8.0
     _last_audible_mono = 0.0
+    _inflight_text = ""
     _last_barge_mono = 0.0
     _utterance_started_mono: float | None = None
     _last_user_turn: tuple[str, float] | None = None
@@ -345,11 +392,13 @@ class RealtimeSession:
             flush=True,
         )
         self.echo_tail_ms = int(cfgv.get("voice", "echo_tail_ms", default=400) or 400)
-        trust_env = (os.environ.get("NOVA_HAILO_TRUST_CLIENT_AEC") or "").strip().lower()
-        self.trust_client_aec = (
-            trust_env in {"1", "true", "yes", "on"} if trust_env
-            else bool(cfgv.get("voice", "trust_client_aec", default=False))
+        hw_aec = os.environ.get("NOVA_HAILO_HW_AEC") or ""
+        self.trust_client_aec = client_aec_trusted(
+            os.environ.get("NOVA_HAILO_TRUST_CLIENT_AEC") or "",
+            bool(cfgv.get("voice", "trust_client_aec", default=False)),
+            hw_aec,
         )
+        print(f"[voice] trust_client_aec={self.trust_client_aec} hw_aec={hw_aec or 'none'}", flush=True)
         self.echo_suspect_s = float(cfgv.get("voice", "echo_suspect_s", default=1.5) or 0.0)
         self.fail_closed_cooldown_s = float(
             cfgv.get("voice", "fail_closed_cooldown_s", default=6.0) or 0.0)
@@ -1302,6 +1351,8 @@ class RealtimeSession:
         )
         if speaking and self.pvad.available and self.pvad.feed_pcm16(pcm):
             self._barge_in(reason="pvad_target_speech")
+        self._xvf_frame(speaking)
+        self._duck_tick(speaking)
 
         # Echo guard: the speaker feeds the mic, so while Nova is speaking the
         # VAD sees Nova's own voice, barges in, then starts a fresh turn from
@@ -1376,7 +1427,15 @@ class RealtimeSession:
                 else:
                     self._utterance_started_mono = time.monotonic()
                     await self._start_nemo_stream(reuse=False)
-                    if should_interrupt_on_user_speech(
+                    if self._duck_allowed(speaking):
+                        # V2b: quieter at the first syllable; _duck_tick or _judge_short decides.
+                        if self._duck_state_get().start(time.monotonic()):
+                            self._set_nova_gain(DUCK_GAIN)
+                            print("[turn] speech over Nova: ducked, deciding", flush=True)
+                        self.vad.mark_barge_in()   # keep a short "stop" or "mm-hm" for its words
+                        self._utterance_audio = None
+                        self._turn_revision = 0
+                    elif should_interrupt_on_user_speech(
                         fsm_state=self.fsm.state,
                         tts_speaking=speaking,
                         barge_in_while_speaking=self._barge_allowed(),
@@ -1397,6 +1456,8 @@ class RealtimeSession:
         await self._nemo_send_pcm(pcm)
 
         for ev, payload in vad_events:
+            if ev == "speech_stopped" and payload is None:
+                self._duck_dropped()
             if ev == "speech_stopped" and payload is not None:
                 print(
                     f"[vad] speech_stopped sec={float(payload.size) / 16000.0:.2f} "
@@ -1534,12 +1595,133 @@ class RealtimeSession:
             }
         )
 
+    def _duck_state_get(self) -> Duck:
+        duck = self.__dict__.get("_duck_state")
+        if duck is None:
+            duck = self._duck_state = Duck()
+        return duck
+
+    def _duck_allowed(self, speaking: bool) -> bool:
+        """Duck-then-decide: switched on, Nova audible, canceller trusted, board not unsettled."""
+        if turn_mode() != "on" or not speaking or not self._hw_aec():
+            return False
+        board = xvf3800.board()
+        return not board_unsettled(board.latest() if board is not None else None)
+
+    def _set_nova_gain(self, gain: float) -> None:
+        self._schedule_send({"type": "output_audio.duck", "gain": round(float(gain), 2)})
+
+    def _duck_tick(self, speaking: bool) -> None:
+        duck = self.__dict__.get("_duck_state")
+        if duck is None or not duck.active:
+            return
+        try:
+            vad_speech = self.__dict__.get("_speech_started_mono") is not None
+            vad = self.__dict__.get("vad")
+            prob = getattr(vad, "last_prob", None)
+            voiced = None if prob is None else prob >= float(getattr(getattr(vad, "cfg", None), "threshold", 0.5))
+            decision = duck.tick(time.monotonic(), vad_speech=vad_speech, nova_audible=speaking, voiced=voiced)
+            if decision == "barge":
+                print("[turn] kept talking over Nova: she stops", flush=True)
+                self._barge_in(reason="sustained_speech", abort_nemo=False)
+            elif decision == "restore":
+                self._set_nova_gain(1.0)
+        except Exception as exc:   # never cost the driver the audio loop
+            duck.active = False
+            print(f"[turn] duck stopped: {type(exc).__name__}: {exc}", flush=True)
+
+    def _duck_dropped(self) -> None:
+        """A sound too short to be words while ducked: restore Nova's volume now."""
+        duck = self.__dict__.get("_duck_state")
+        if duck is None or not duck.active:
+            return
+        duck.short_ended("")
+        self._set_nova_gain(1.0)
+        print("[turn] too short to be words: she carries on", flush=True)
+
+    def _side_transcript(self, audio: np.ndarray) -> str:
+        prepared, _info = prepare_for_whisper(audio, src_sr=16000)
+        stt = self.pipeline._ensure_stt()
+        return str(self.pipeline._with_genai(lambda: stt.transcribe(prepared)) or "").strip()
+
+    def _judge_short(self, item: PendingUtterance) -> None:
+        """A short utterance while ducked: a backchannel restores Nova, anything else becomes the turn."""
+        text = ""
+        try:
+            text = self._side_transcript(item.audio)
+        except Exception as exc:
+            print(f"[turn] could not transcribe the short utterance: {exc}", flush=True)
+        decision = self._duck_state_get().short_ended(text)
+        print(f"[turn] short speech over Nova {text!r}: "
+              f"{'she carries on' if decision == 'restore' else 'she stops'}", flush=True)
+        if decision == "restore":
+            self._set_nova_gain(1.0)
+            return
+        item.kind = "barge_in"
+        # A finished sidecar result, so the turn reuses these words instead of transcribing again.
+        done = threading.Event()
+        done.set()
+        item.nemo_result = {"text": text, "event": done, "audio_sec": float(item.audio.size) / 16000.0}
+        item.t0 = time.monotonic()
+        self._pending.append(item)
+        self._call_on_loop(lambda: self._barge_in(reason="short_stop", abort_nemo=False))
+
+    def _xvf_frame(self, speaking: bool) -> None:
+        """Log what the board and turn rules see while Nova plays; never raises."""
+        if turn_mode() == "off" or not self._hw_aec() or self.__dict__.get("_xvf_broken"):
+            return
+        try:
+            self._xvf_frame_inner(speaking)
+        except Exception as exc:   # logging must never cost the driver the audio loop
+            self._xvf_broken = True
+            print(f"[xvf] turn logging stopped for this session: {type(exc).__name__}: {exc}", flush=True)
+
+    def _xvf_frame_inner(self, speaking: bool) -> None:
+        board = xvf3800.board()
+        if board is None:
+            return
+        state = board.latest()
+        tt = self.__dict__.get("_turn_taker")
+        if tt is None:
+            tt = self._turn_taker = TurnTaker()
+            self._xvf_play = None
+        vad_speech = self.__dict__.get("_speech_started_mono") is not None   # unset before the first VAD event
+        now = time.monotonic()
+        if speaking:
+            play = self._xvf_play or {"t0": now, "quiet": 0.0, "voiced": 0.0, "fallback": 0}
+            self._xvf_play = play
+            if state is not None:
+                key = "voiced" if vad_speech else "quiet"
+                play[key] = max(play[key], state.speech_energy)
+        elif self._xvf_play is not None:
+            play, self._xvf_play = self._xvf_play, None
+            print(f"[xvf] Nova spoke {now - play['t0']:.1f}s: board energy max {play['quiet']:.0f} with no "
+                  f"speech heard, {play['voiced']:.0f} with speech, unsettled frames {play['fallback']}", flush=True)
+        before = tt._start
+        decision = tt.frame(now, nova_audible=speaking, vad_speech=vad_speech, board=state)
+        if decision == "fallback" and self._xvf_play is not None:
+            self._xvf_play["fallback"] += 1
+        elif decision == "listening" and before is None:
+            print(f"[turn] speech over Nova (board energy {state.speech_energy:.0f})", flush=True)
+        elif decision == "barge":
+            print(f"[turn] would barge: speech over Nova for {tt.hold_s:.1f}s, energy max {tt.peak_energy:.0f}",
+                  flush=True)
+        elif decision == "idle" and before is not None and not tt._decided and tt.last_short_s:
+            print(f"[turn] short speech over Nova ({tt.last_short_s:.2f}s, energy max {tt.peak_energy:.0f}): "
+                  f"would check its words for a backchannel", flush=True)
+
+    def _hw_aec(self) -> bool:
+        """The client cancels echo and this Pi trusts the claim (an XVF3800 here)."""
+        return getattr(self, "_client_aec", None) is True and bool(getattr(self, "trust_client_aec", False))
+
     def _echo_suspect(self, started: float | None) -> bool:
         """Speech that began while Nova was audible, within ``echo_suspect_s`` after,
         or right after a barge-in, may be her own voice: it gets no fail-closed reply
         and cannot seed the next prompt."""
         if started is None or self.echo_suspect_s <= 0:
             return False
+        if self._hw_aec():   # the board cancels her voice; only speech begun over her can be her
+            return bool(self._last_audible_mono) and started - self._last_audible_mono < 0.25
         if self._last_audible_mono and started - self._last_audible_mono < self.echo_suspect_s:
             return True
         return 0.0 <= started - self._last_barge_mono < self.echo_suspect_s
@@ -1991,6 +2173,7 @@ class RealtimeSession:
         kind: str = "overlap",
         turn_revision: int = 0,
         echo_suspect: bool = False,
+        prefix: str = "",
     ):
         # Overlap (echo/backlog while a turn is in flight without interrupt)
         # is dropped. Barge-in audio captured during INTERRUPTING must wait
@@ -2003,6 +2186,7 @@ class RealtimeSession:
             speech_stopped_at=speech_stopped_at,
             turn_revision=turn_revision,
             echo_suspect=echo_suspect,
+            prefix=prefix,
         )
         interrupting = self.fsm.state == SessionState.INTERRUPTING or kind == "barge_in"
         busy = self.fsm.state in {
@@ -2013,6 +2197,19 @@ class RealtimeSession:
         if not self._turn_lock.acquire(blocking=False):
             if interrupting:
                 self._pending.append(item)
+                return
+            duck = self.__dict__.get("_duck_state")
+            if busy and duck is not None and duck.active:
+                threading.Thread(target=self._judge_short, args=(item,), daemon=True,
+                                 name="judge-short").start()
+                return
+            if busy and supersedes(hw_aec=self._hw_aec(), state=self.fsm.state,
+                                   audio_s=float(item.audio.size) / 16000.0):
+                item.kind = "barge_in"   # waits for the lock like a barge-in
+                item.prefix = self._inflight_text
+                print("[asr] new speech replaces the turn in flight", flush=True)
+                self._pending.append(item)
+                self._barge_in(reason="superseded")
                 return
             if busy:
                 print("[asr] drop overlapping utterance (turn in flight)", flush=True)
@@ -2028,8 +2225,10 @@ class RealtimeSession:
                     speech_stopped_at=item.speech_stopped_at,
                     turn_revision=item.turn_revision,
                     echo_suspect=item.echo_suspect,
+                    prefix=item.prefix,
                 )
             finally:
+                self._inflight_text = ""
                 self._turn_lock.release()
             if self._closed:
                 return
@@ -2043,6 +2242,7 @@ class RealtimeSession:
                 kind=nxt.kind,
                 turn_revision=nxt.turn_revision,
                 echo_suspect=nxt.echo_suspect,
+                prefix=nxt.prefix,
             )
 
         threading.Thread(target=worker, daemon=True, name="realtime-turn").start()
@@ -2055,6 +2255,7 @@ class RealtimeSession:
         speech_stopped_at: float | None = None,
         turn_revision: int = 0,
         echo_suspect: bool = False,
+        prefix: str = "",
     ):
         self.pipeline.begin_turn()
         self._first_audio_ack_at = None
@@ -2197,6 +2398,9 @@ class RealtimeSession:
             )
             return
 
+        transcript = fold_superseded(prefix, transcript)
+        self._inflight_text = transcript
+
         last_speak = ""
         hist = getattr(self.pipeline, "history", None)
         if hist is not None and getattr(hist, "_turns", None):
@@ -2212,11 +2416,11 @@ class RealtimeSession:
         # while Nova was audible or just after, and never while a route prompt
         # was what played; the word-pair guard covers every spoken clause.
         text_echo = (
-            echo_suspect
-            and self._audible_kind != "guidance"
+            self._audible_kind != "guidance"
             and _transcript_is_echo(transcript, last_speak)
         )
-        if not answering and (guard.is_echo(transcript) or text_echo):
+        if echo_drop(guard_hit=guard.is_echo(transcript), text_hit=text_echo, suspect=echo_suspect,
+                     hw_aec=self._hw_aec(), answering=answering):
             print(f"[asr] skip TTS-echo transcript: {transcript!r}", flush=True)
             self._skip_turn(generation_id, "tts_echo")
             return

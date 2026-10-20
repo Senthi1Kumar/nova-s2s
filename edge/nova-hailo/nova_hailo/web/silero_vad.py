@@ -190,6 +190,7 @@ class SileroVadSegmenter:
             self._buf = self._buf[WINDOW:]
             self._sample_i += WINDOW
             prob = self._model(chunk)
+            self.last_prob = prob   # read by the turn-taking duck, frame by frame
 
             if prob >= self.cfg.threshold and self._temp_end:
                 self._temp_end = 0

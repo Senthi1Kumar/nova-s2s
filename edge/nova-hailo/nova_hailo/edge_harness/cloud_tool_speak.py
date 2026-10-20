@@ -43,9 +43,11 @@ _AMOUNT_RE = re.compile(
 _CLAIM_RE = re.compile(
     r"\b(?:i(?:'ve|\s+have)|i\s+just|i'll|i\s+will|i'm)\s+(?:just\s+|now\s+|gone\s+ahead\s+and\s+)?"
     r"(?:added|add|set|turned|turn|switched|switch|opened|open|closed|close|started|start|changed|"
-    r"adjusted|increased|decreased|lowered|raised|locked|unlocked|rerouted|routed|navigating|"
+    r"adjusted|increased|decreased|lowered|raised|locked|unlocked|rerouted|reroute|routed|route|navigating|"
     r"updated|dimmed|brightened|cancell?ed|stopped)\b"
     r"|\b(?:added|adding)\s+(?:a\s+|the\s+|your\s+)?stop\b"
+    r"|\b(?:added|adding)\s+[^.?!]{1,60}?\s+as\s+a\s+stop\b"
+    r"|\bsetting\s+(?:the\s+|your\s+|a\s+)?route\b"
     r"|\b(?:now\s+)?(?:navigating|heading|routing)\s+(?:you\s+)?to\b"
     r"|\bis\s+now\s+(?:on|off|set|open|closed|at)\b",
     re.I,

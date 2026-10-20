@@ -151,7 +151,7 @@ cabingym:
   adapter: sim
   # Spoken turn-by-turn from the route. Mute still only closes the mic.
   voice_guidance: true
-  # Simulated drive streamed at 5 Hz (speed, gear, GPS, charge) + nova.nav for displays.
+  # Simulated drive streamed at 10 Hz (speed, gear, GPS, charge) + nova.nav for displays.
   # autoplay: [start, work] drives without a voice command; route_service: auto | mapbox | osrm | off
   sim_drive:
     enabled: true

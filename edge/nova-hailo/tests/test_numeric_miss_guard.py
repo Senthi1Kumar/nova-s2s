@@ -228,3 +228,42 @@ def test_a_question_after_a_lookup_gets_no_tools():
     p, _ = _cloud_pipeline(llm, _Gateway("success"))
     _turn(p, "What's the best restaurant in Mountain View?")
     assert llm.offered[1][0] == "none"
+
+
+def test_the_rest_of_a_false_claims_sentence_is_not_spliced_on():
+    """"I haven't changed anything in the car yet. 0.3 kilometres away." """
+    p, gid, queued = _pipeline()
+    st = _state(claim_flags={"wrote": False, "warned": False})
+    p._emit_validated_clause("Heading to Blink Charging Station,", gid, st)
+    p._emit_validated_clause("0.3 kilometres away.", gid, st)
+    p._emit_validated_clause("Anything else?", gid, st)
+    assert queued == [CLAIM_WITHOUT_ACTION_SPEAK, "Anything else?"]
+
+
+def test_a_false_claim_is_rescued_when_the_router_can_do_it():
+    p, gid, queued = _pipeline()
+    p.oem_gateway = SimpleNamespace(
+        _cabin_utterance="Go to Blink Charging Station.",
+        rescue_claim=lambda u: {"status": "success", "speak": "Navigating to Blink Charging Station. About 2 minutes."},
+    )
+    st = _state(claim_flags={"wrote": False, "warned": False})
+    p._emit_validated_clause("Heading to Blink Charging Station now.", gid, st)
+    assert queued == ["Navigating to Blink Charging Station. About 2 minutes."]
+    assert st["claim_flags"]["wrote"] is True
+
+
+def test_t41_the_models_own_narration_is_not_spoken_after_the_vehicle_line():
+    """"Navigating to Wade Institute of Technology. About 1 minute. let me search for it." """
+    llm = _ScriptedLLM([([_ADD], "let me search for it"), ([], "")])
+    p, queued = _cloud_pipeline(llm, _Gateway("success"))
+    _turn(p, "Okay, let's add Don Giovanni as a stop.")
+    assert queued == ["Added a stop at Don Giovanni."]
+
+
+@pytest.mark.parametrize("text", [
+    "Adding Blue Bottle Coffee as a stop on the way to Menlo Park.",
+    "Setting the route to Los Altos Hills via Juniper Flyway.",
+    "I think you mean Los Altos Hills, and I'll route you there via Junipero Serra Boulevard.",
+])
+def test_v1c_route_claims_the_guard_missed(text):
+    assert claims_vehicle_action(text) is True

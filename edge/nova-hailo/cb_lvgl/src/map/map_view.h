@@ -5,8 +5,10 @@
 
 /* The live map as an LVGL object: Mapbox vector tiles rendered by MapLibre Native off-screen (map_engine) and
    drawn as an image. Drag pans like Google Maps (with a glide on release), double tap zooms in, and follow mode
-   keeps the car centred until the driver drags. Frames are rendered only while something moves: up to 30 fps
-   while touched or animating, 15 fps while following a moving car, none while idle or while the page is hidden.
+   keeps the car centred until the driver drags. Frames are rendered only while something moves: 30 fps while
+   touched, animating or following a moving car (the display refreshes at 60 Hz then), none while idle or while
+   the page is hidden. The worker moves the car and the follow camera every frame between position samples; the
+   puck is drawn by LVGL at the point each frame carries, so it never drifts from the road under it.
    Without MapLibre (no CB_HAVE_MAP) or without a token for a mapbox:// style it shows a placeholder. */
 typedef struct {
     const char *style_url;      /* NULL: CB_MAP_STYLE env, else the night style (Mapbox with a token, else OpenFreeMap) */
@@ -21,6 +23,9 @@ void map_view_set_car(lv_obj_t *mv, double lat, double lon, double heading_deg);
    route while navigating is first shown whole (overview), then the camera returns to the car. */
 void map_view_set_route(lv_obj_t *mv, const double (*lonlat)[2], int n, const char *congestion);
 void map_view_set_stops(lv_obj_t *mv, const route_stop_t *stops, int n, const route_stop_t *dest);   /* NULL dest clears */
+/* The last place search as numbered pins (n == 0 clears). A new set is framed with the car: while navigating for a
+   few seconds before the camera returns to the car, otherwise until the driver recenters. */
+void map_view_set_results(lv_obj_t *mv, const route_stop_t *places, int n);
 void map_view_set_follow(lv_obj_t *mv, bool follow);
 bool map_view_following(lv_obj_t *mv);
 /* Navigating: while following, the map turns heading-up with a tilted look-ahead (the car low in the view). */

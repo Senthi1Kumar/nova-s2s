@@ -635,3 +635,237 @@ def test_barge_policy_matrix(aec, trust, server, allowed):
     s = _session()
     s._client_aec, s.trust_client_aec, s.barge_in_while_speaking = aec, trust, server
     assert s._barge_allowed() is allowed
+
+
+def test_with_the_board_cancelling_echo_only_speech_over_nova_is_suspect():
+    """"It's Lucy Stern Community Center." right after Nova said "Navigating to
+    Lucie Stern Community Center" was dropped as echo. With the XVF3800 trusted, speech that
+    starts after Nova stopped is the driver."""
+    s = _session()
+    s._client_aec, s.trust_client_aec, s.echo_suspect_s = True, True, 1.5
+    s._last_audible_mono, s._last_barge_mono = 100.0, 0.0
+    assert s._echo_suspect(100.1) is True      # began while she was audible
+    assert s._echo_suspect(100.8) is False     # began after she stopped
+    s.trust_client_aec = False                 # no trusted canceller: the old 1.5 s window
+    assert s._echo_suspect(100.8) is True
+
+
+@pytest.mark.parametrize("hw,state,audio_s,yes", [
+    (True, "THINKING", 0.9, True),        # a correction while Nova thinks replaces the turn
+    (True, "TRANSCRIBING", 0.6, True),
+    (True, "THINKING", 0.3, False),       # a quick "okay" does not cancel anything
+    (False, "THINKING", 0.9, False),      # no trusted canceller: may be her echo backlog
+    (True, "SPEAKING", 0.9, False),       # while she is audible, barge-in already handles it
+])
+def test_speech_during_thinking_supersedes_the_turn(hw, state, audio_s, yes):
+    from nova_hailo.session_fsm import SessionState
+    from nova_hailo.web.realtime_session import supersedes
+    assert supersedes(hw_aec=hw, state=SessionState(state), audio_s=audio_s) is yes
+
+
+@pytest.mark.parametrize("prefix,text,out", [
+    ("Find theaters with Dolby Atmos.", "No, no, the ones showing Jailer 2.",
+     "Find theaters with Dolby Atmos. No, no, the ones showing Jailer 2."),
+    ("", "Stop the navigation.", "Stop the navigation."),
+    ("Take me to Kirk's", "Take me to Kirk's Steakburgers", "Take me to Kirk's Steakburgers"),
+])
+def test_a_superseding_utterance_keeps_the_words_it_replaced(prefix, text, out):
+    from nova_hailo.web.realtime_session import fold_superseded
+    assert fold_superseded(prefix, text) == out
+
+
+@pytest.mark.parametrize("guard,text,suspect,hw,answering,drop", [
+    (True, False, False, True, False, False),   # board trusted, spoke after Nova: keep the correction
+    (True, False, True, True, False, True),     # board trusted, spoke over Nova: her words, drop
+    (True, False, False, False, False, True),   # no trusted canceller: the word-pair guard still drops
+    (False, True, True, False, False, True),
+    (True, True, True, True, True, False),      # a yes or no to a pending question is an answer
+    (False, False, True, True, False, False),
+])
+def test_echo_drop_decision(guard, text, suspect, hw, answering, drop):
+    from nova_hailo.web.realtime_session import echo_drop
+    assert echo_drop(guard_hit=guard, text_hit=text, suspect=suspect, hw_aec=hw, answering=answering) is drop
+
+
+@pytest.mark.parametrize("env,cfg,hw,trusted", [
+    ("", False, "", False),          # nothing says the claim is real
+    ("", True, "", True),            # voice.trust_client_aec
+    ("", False, "xvf3800", True),    # this Pi's mic is a board that cancels echo itself
+    ("0", False, "xvf3800", False),  # the env switch still wins, both ways
+    ("1", False, "", True),
+    ("", False, "0", False),
+])
+def test_a_hardware_canceller_on_this_pi_makes_the_client_claim_trusted(env, cfg, hw, trusted):
+    from nova_hailo.web.realtime_session import client_aec_trusted
+    assert client_aec_trusted(env, cfg, hw) is trusted
+
+
+def test_the_session_logs_what_the_board_rules_would_do(monkeypatch, capsys):
+    """Log-only wiring in RealtimeSession: no behaviour change, just [turn] / [xvf] lines."""
+    import nova_hailo.web.realtime_session as rs
+    from nova_hailo.xvf3800 import BoardState
+
+    states = iter([BoardState(t, (0, 0, 0, e), True, False) for t, e in [(0, 0)] * 5 + [(0, 9e5)] * 40 + [(0, 0)] * 30])
+
+    class _Board:
+        def latest(self, max_age_s=0.25):
+            return next(states, None)
+
+    monkeypatch.setattr(rs.xvf3800, "board", lambda: _Board())
+    monkeypatch.setenv("NOVA_HAILO_XVF_TURNS", "log")
+    s = rs.RealtimeSession.__new__(rs.RealtimeSession)
+    s._client_aec, s.trust_client_aec = True, True
+    s._speech_started_mono = None
+    clock = [100.0]
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock[0])
+    for i in range(75):
+        s._speech_started_mono = clock[0] if 5 <= i < 45 else None
+        s._xvf_frame(speaking=i < 70)
+        clock[0] += 0.02
+    out = capsys.readouterr().out
+    assert "[turn] speech over Nova" in out
+    assert "[turn] would barge" in out
+    assert "[xvf] Nova spoke" in out
+
+
+def test_the_board_hook_works_before_any_vad_event_and_never_breaks_the_audio_loop(monkeypatch, capsys):
+    """The first frame read _speech_started_mono before the VAD had set it; the
+    AttributeError closed the WebSocket and the client reconnected in a loop."""
+    import nova_hailo.web.realtime_session as rs
+    from nova_hailo.xvf3800 import BoardState
+
+    class _Board:
+        def latest(self, max_age_s=0.25):
+            return BoardState(0.0, (0, 0, 0, 0.0), True, False)
+
+    monkeypatch.setattr(rs.xvf3800, "board", lambda: _Board())
+    s = rs.RealtimeSession.__new__(rs.RealtimeSession)
+    s._client_aec, s.trust_client_aec = True, True
+    s._xvf_frame(speaking=True)            # no _speech_started_mono yet
+
+    class _Broken:
+        def latest(self, max_age_s=0.25):
+            raise RuntimeError("usb went away")
+
+    monkeypatch.setattr(rs.xvf3800, "board", lambda: _Broken())
+    s._xvf_frame(speaking=True)            # logs, does not raise
+    s._xvf_frame(speaking=True)
+    out = capsys.readouterr().out
+    assert out.count("[xvf] turn logging stopped") == 1
+
+
+# ---- V2b: duck at the first syllable, then decide ----------------------------------------
+
+def _duck_session(monkeypatch, board_state=None):
+    import nova_hailo.web.realtime_session as rs
+    from nova_hailo.web.turn_taking import Duck
+
+    class _Board:
+        def latest(self, max_age_s=0.25):
+            return board_state
+
+    monkeypatch.setattr(rs.xvf3800, "board", lambda: _Board())
+    monkeypatch.setenv("NOVA_HAILO_XVF_TURNS", "on")
+    s = rs.RealtimeSession.__new__(rs.RealtimeSession)
+    s._client_aec, s.trust_client_aec = True, True
+    s.sent, s.barges = [], []
+    s._schedule_send = lambda ev, mirror=True: s.sent.append(ev)
+    s._barge_in = lambda reason, abort_nemo=True: s.barges.append(reason)
+    s._call_on_loop = lambda fn, *a: fn(*a)
+    s._pending = collections.deque(maxlen=4)
+    s._duck_state = Duck()
+    return s
+
+
+def test_ducking_is_allowed_only_with_a_trusted_settled_board_while_nova_speaks(monkeypatch):
+    from nova_hailo.xvf3800 import BoardState
+
+    s = _duck_session(monkeypatch, BoardState(0.0, (0, 0, 0, 0), True, False))
+    assert s._duck_allowed(speaking=True) is True
+    assert s._duck_allowed(speaking=False) is False
+    s = _duck_session(monkeypatch, BoardState(0.0, (0, 0, 0, 0), False, False))    # canceller not settled
+    assert s._duck_allowed(speaking=True) is False
+    monkeypatch.setenv("NOVA_HAILO_XVF_TURNS", "log")
+    s = _duck_session(monkeypatch, BoardState(0.0, (0, 0, 0, 0), True, False))
+    monkeypatch.setenv("NOVA_HAILO_XVF_TURNS", "log")
+    assert s._duck_allowed(speaking=True) is False
+
+
+def _item():
+    import numpy as np
+    import nova_hailo.web.realtime_session as rs
+
+    return rs.PendingUtterance(audio=np.zeros(8000, dtype=np.float32), nemo_result=None, t0=0.0)
+
+
+def test_mm_hm_over_nova_brings_her_volume_back_and_is_not_a_turn(monkeypatch):
+    s = _duck_session(monkeypatch)
+    s._duck_state.start(0.0)
+    s._side_transcript = lambda audio: "Mm-hm."
+    s._judge_short(_item())
+    assert s.sent == [{"type": "output_audio.duck", "gain": 1.0}]
+    assert not s._pending and not s.barges
+
+
+def test_stop_over_nova_stops_her_and_becomes_the_turn_without_a_second_transcription(monkeypatch):
+    s = _duck_session(monkeypatch)
+    s._duck_state.start(0.0)
+    s._side_transcript = lambda audio: "Stop."
+    s._judge_short(_item())
+    assert s.barges == ["short_stop"]
+    item = s._pending[0]
+    assert item.kind == "barge_in" and item.nemo_result["text"] == "Stop."
+    # The turn waits on the sidecar event before reading the text: it must already be set.
+    assert item.nemo_result["event"].is_set() and item.nemo_result["audio_sec"] == 0.5
+
+
+def test_talking_on_past_the_hold_stops_nova(monkeypatch):
+    import nova_hailo.web.realtime_session as rs
+
+    s = _duck_session(monkeypatch)
+    clock = [50.0]
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock[0])
+    s._duck_state.start(50.0)
+    s._speech_started_mono = 50.0
+    clock[0] = 50.3
+    s._duck_tick(speaking=True)
+    assert not s.barges
+    clock[0] = 50.55
+    s._duck_tick(speaking=True)
+    assert s.barges == ["sustained_speech"]
+
+
+def test_nova_finishing_while_ducked_brings_the_volume_back(monkeypatch):
+    import nova_hailo.web.realtime_session as rs
+
+    s = _duck_session(monkeypatch)
+    monkeypatch.setattr(rs.time, "monotonic", lambda: 10.0)
+    s._duck_state.start(9.9)
+    s._duck_tick(speaking=False)
+    assert s.sent == [{"type": "output_audio.duck", "gain": 1.0}]
+
+
+def test_the_duck_counts_the_vads_voiced_frames(monkeypatch):
+    import nova_hailo.web.realtime_session as rs
+    from types import SimpleNamespace as NS
+
+    s = _duck_session(monkeypatch)
+    s.vad = NS(last_prob=0.9, cfg=NS(threshold=0.55))
+    s._speech_started_mono = 1.0
+    clock = [1.0]
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock[0])
+    s._duck_state.start(1.0)
+    for i in range(40):                      # 0.3 s voiced, then hangover with low probability
+        clock[0] += 0.02
+        s.vad.last_prob = 0.9 if i < 15 else 0.1
+        s._duck_tick(speaking=True)
+    assert not s.barges and s._duck_state.active
+
+
+def test_a_sound_too_short_to_judge_brings_novas_volume_back_at_once(monkeypatch):
+    s = _duck_session(monkeypatch)
+    s._duck_state.start(0.0)
+    s._duck_dropped()
+    assert s.sent == [{"type": "output_audio.duck", "gain": 1.0}] and not s._duck_state.active
+    s._duck_dropped()                        # nothing ducked: nothing sent
+    assert len(s.sent) == 1

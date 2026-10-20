@@ -52,8 +52,10 @@ for i in $(seq 1 120); do
 done
 echo "pipeline reachable through the tunnel"
 
+# CB_ARGS adds cockpit flags (CB_ARGS=--perf logs the UI's refresh rate); CB_MAP_STATS=1 logs the map's.
+# shellcheck disable=SC2086
 NOVA_ENV_FILE=${NOVA_ENV_FILE:-$NOVA/.env} "$HERE/with_mapbox.sh" "$CB/build-sw/cb_lvgl" --fullscreen \
-  --layout "${CB_LAYOUT:-b}" --live "ws://127.0.0.1:$PORT/v1/observe" > /tmp/cb_lvgl_laptop.log 2>&1 &
+  --layout "${CB_LAYOUT:-b}" --live "ws://127.0.0.1:$PORT/v1/observe" ${CB_ARGS:-} > /tmp/cb_lvgl_laptop.log 2>&1 &
 UI=$!
 PIDS+=($UI)
 echo "cockpit started (log /tmp/cb_lvgl_laptop.log)"

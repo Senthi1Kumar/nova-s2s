@@ -37,7 +37,8 @@ flowchart LR
 
 | | |
 | --- | --- |
-| Share branch | `share/nova-hailo-poc-v002` |
+| CabinEnv demo | `main` — [QUICKSTART.md](QUICKSTART.md) |
+| Share branch | `share/nova-hailo-poc-v002` (older Qt HMI flow, below) |
 | Repo | https://github.com/Senthi1Kumar/nova-s2s.git |
 | App dir after clone | `nova-s2s/edge/nova-hailo` |
 | HailoRT | **5.3.0** (AI HAT+ 2). HEF + C++ GenAI API follow `hailortcli fw-control identify` |
@@ -46,11 +47,12 @@ flowchart LR
 | TTS | **Piper** (`en_US-amy-low`), ~311 ms to first audio chunk |
 | Search | **Exa only** (`EXA_API_KEY`). No Brave/Serper fallback |
 | Python env | **`uv`** with system Python + `--system-site-packages` (see below) |
-| HMI | PySide6 + QML (`hmi_qt/run.sh`). Live WS — not a mock / not C++ Qt |
+| Audio | **reSpeaker XVF3800** (CabinEnv: USB, echo cancelled on the board). **WM8960 HAT** is the older Qt HMI path |
+| HMI | CabinEnv cockpit (`cb_lvgl`) on `main`. Qt HMI: PySide6 + QML (`hmi_qt/run.sh`) on the share branch |
 
 This device is **self-contained** for Local mode. Cloud LLM is optional and
 needs a network + the cloud provider's key. No Tailscale / tunnel to another Pi.
-Connect *this* Pi to the car (or HDMI + HAT audio) and run locally.
+Connect *this* Pi to the car (or HDMI, plus the XVF3800 or the WM8960) and run locally.
 
 ## Prerequisites
 
@@ -60,6 +62,7 @@ tools fail closed (`can't reach that service`). Never commit `.env`.
 ### Hardware / firmware
 
 - Raspberry Pi 5 + Hailo-10H AI HAT+ 2
+- CabinEnv audio: reSpeaker XVF3800 (USB). No extra driver. `scripts/setup_pi.sh` adds a udev rule so Nova can read the board's speech-energy status. The older WM8960 Audio HAT needs its own driver; the script prints that install when the card is absent.
 - HailoRT **5.3.0** (`hailortcli fw-control identify` → `Firmware Version: 5.3.0`)
 - System package **`hailo_platform`** from `h10-hailort` / hailo-apps — **not pip**.
   Older 5.1.1 HEFs will not load on 5.3.0 firmware.
@@ -297,9 +300,12 @@ wrapper only: `./scripts/build_hailo_llm_cpp.sh`.
 
 ## Audio / display
 
-- **HMI on this Pi** (`hmi_qt/run.sh`): HDMI + this Pi’s mic/speakers (WM8960 or USB). Say **Nova** (or PTT).
+CabinEnv (`scripts/run_cabinenv.sh`) uses the **reSpeaker XVF3800**. It is a USB sound card; echo is cancelled on the board, so the launchers do not add PipeWire's WebRTC canceller on top. They set playback and capture to 100% (`XVF3800_PLAYBACK_PCT`, `XVF3800_CAPTURE_PCT`). The client declares echo cancellation, and with `NOVA_HAILO_HW_AEC=xvf3800` the server trusts that, so speech during playback can interrupt. A short overlap ("mm-hm" versus "stop") is acted on only when `NOVA_HAILO_XVF_TURNS=on`; the default is to log it. Protocol: [`docs/api/realtime.md`](docs/api/realtime.md).
+
+The older **WM8960 Audio HAT** still uses PipeWire echo-cancel ([`docs/pipewire-aec.md`](docs/pipewire-aec.md)). `voice.barge_in_while_speaking` stays false for that card.
+
+- **Qt HMI on this Pi** (`hmi_qt/run.sh`, share branch): HDMI + this Pi’s mic and speakers. Say **Nova** (or PTT).
 - **Browser on this Pi**: `http://localhost:8766/` (secure context for mic).
-- `voice.barge_in_while_speaking: false` (WM8960 self-echo). Stop / Esc still works.
 - One voice session at a time: close the other client first.
 
 Laptop SSH is **optional** for development only (`ssh -L 8766:localhost:8766`,

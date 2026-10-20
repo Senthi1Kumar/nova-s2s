@@ -38,6 +38,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from websockets.asyncio.client import connect
+from websockets.exceptions import InvalidStatus, WebSocketException
 
 RATE = 16000
 FRAME_MS = 20
@@ -46,6 +47,8 @@ SILENCE_TAIL_S = 1.5  # lets server VAD see the end of speech in --wav mode
 STREAM_STATES_NO_AEC = {"ARMED", "LISTENING", "TRANSCRIBING", "THINKING"}
 
 UI_QUEUE_MAX = 64
+# After the link to Nova drops (Wi-Fi, an SSH tunnel): retry after these waits, then every last one.
+RECONNECT_S = (1.0, 2.0, 4.0, 8.0, 15.0)
 UI_LEVEL_HZ = 10
 # nova.fsm has more states than a screen needs (docs/api/ui-state.md).
 _UI_STATES = {
@@ -254,6 +257,11 @@ class Device:
             self.reply.append(pcm)
             if speaker is not None:
                 speaker.write(pcm)
+        elif t == "output_audio.duck":
+            # The driver started talking over Nova: quieter while the server decides whether
+            # it was "mm-hm" (back to full volume) or an interruption (a cancel follows).
+            if speaker is not None and hasattr(speaker, "set_gain"):
+                speaker.set_gain(float(ev.get("gain", 1.0)))
         elif t == "conversation.item.input_audio_transcription.completed":
             print(f"you : {ev.get('transcript', '')}", flush=True)
         elif t == "response.audio_transcript.done":
@@ -278,15 +286,28 @@ class Device:
     async def _interrupt(self, speaker) -> None:
         if speaker is not None:
             speaker.flush()
+            if hasattr(speaker, "set_gain"):
+                speaker.set_gain(1.0)
         self.reply.clear()
         self.playing = False
         await self.ws.send(json.dumps({"type": "playback.interrupted"}))
+
+
+def apply_gain(frame: bytes, gain: float) -> bytes:
+    """int16 PCM scaled by gain; 1.0 is passed through untouched."""
+    if gain >= 0.999:
+        return frame
+    import numpy as np
+
+    pcm = np.frombuffer(frame, dtype="<i2").astype(np.float32) * gain
+    return np.clip(pcm, -32768, 32767).astype("<i2").tobytes()
 
 
 class Player:
     """Speaker output on its own thread, so playback never blocks the socket."""
 
     def __init__(self, sd):
+        self.gain = 1.0
         self.q: queue.Queue[bytes] = queue.Queue()
         self.out = sd.RawOutputStream(samplerate=RATE, channels=1, dtype="int16")
         self.out.start()
@@ -303,9 +324,12 @@ class Player:
             except queue.Empty:
                 return
 
+    def set_gain(self, gain: float) -> None:
+        self.gain = max(0.0, min(1.0, gain))   # applied per 20 ms frame: takes effect at once
+
     def _run(self) -> None:
         while True:
-            self.out.write(self.q.get())
+            self.out.write(apply_gain(self.q.get(), self.gain))
 
     def stop(self) -> None:
         self.flush()
@@ -318,7 +342,14 @@ async def _open(url, token, ca):
         additional_headers={"Authorization": f"Bearer {token}"},
         ssl=_ssl_context(url, ca),
         max_size=None,
+        ping_interval=20,
+        ping_timeout=40,   # a Wi-Fi stall shorter than this does not drop the conversation
     )
+
+
+def _refused(e: Exception) -> bool:
+    """The server answered and said no: retrying cannot fix a bad token or URL."""
+    return isinstance(e, InvalidStatus) and e.response.status_code in (401, 403, 404)
 
 
 async def _reader(ws, device: Device, speaker=None):
@@ -446,6 +477,8 @@ async def run_wav(url, token, wav_in, wav_out, *, wake, echo_cancellation,
 
 
 async def run_live(url, token, *, wake, echo_cancellation, ca=None, ui_cmd=None) -> int:
+    """The mic, the speaker and the screen stay up for the whole run; the session with Nova is opened again
+    whenever the link drops, so a Wi-Fi hiccup costs a few seconds, not the conversation."""
     import sounddevice as sd
 
     loop = asyncio.get_running_loop()
@@ -453,41 +486,88 @@ async def run_live(url, token, *, wake, echo_cancellation, ca=None, ui_cmd=None)
     player = Player(sd)
     holder: dict = {}
     ui = _open_ui(ui_cmd, loop, holder)
-    ws = await _open(url, token, ca)
-    device = Device(ws, wake=wake, echo_cancellation=echo_cancellation, ui=ui)
 
     def on_mic(indata, frames, t, status):
         loop.call_soon_threadsafe(lambda b=bytes(indata): mic.full() or mic.put_nowait(b))
 
     async def arm_from_enter():
+        device, ws = holder.get("device"), holder.get("ws")
+        if device is None or ws is None:
+            return
         device.arm_pending = True
         await ws.send(json.dumps({"type": "session.arm"}))
         print("[wake] local (Enter)", flush=True)
 
-    reader = asyncio.create_task(_reader(ws, device, speaker=player))
-    await ws.send(_session_update(wake, echo_cancellation))
-    await _ui_connected(holder, device, ws)
     if wake == "device":
         _on_enter(loop, lambda: asyncio.ensure_future(arm_from_enter()))
-    print({"server": "say 'Hey Nova, ...'", "device": "press Enter, then speak"}.get(
-        wake, "open mic: just speak"), flush=True)
+    attempt, greeted = 0, False
     with sd.RawInputStream(samplerate=RATE, channels=1, dtype="int16",
                            blocksize=FRAME_BYTES // 2, callback=on_mic):
         try:
-            while not reader.done():
-                frame = await mic.get()
+            while True:
+                try:
+                    ws = await _open(url, token, ca)
+                except (OSError, TimeoutError, WebSocketException) as e:
+                    if _refused(e):
+                        print(f"[conn] Nova refused the connection ({e}); not retrying",
+                              file=sys.stderr, flush=True)
+                        return 1
+                    wait = RECONNECT_S[min(attempt, len(RECONNECT_S) - 1)]
+                    attempt += 1
+                    print(f"[conn] cannot reach Nova ({type(e).__name__}); retrying in {wait:g} s",
+                          flush=True)
+                    if ui is not None:
+                        ui.send({"conn": "connecting"})
+                    await asyncio.sleep(wait)
+                    continue
+                if attempt:
+                    print("[conn] reconnected", flush=True)
+                attempt = 0
+                device = Device(ws, wake=wake, echo_cancellation=echo_cancellation, ui=ui)
+                reader = asyncio.create_task(_reader(ws, device, speaker=player))
+                try:
+                    await ws.send(_session_update(wake, echo_cancellation))
+                    await _ui_connected(holder, device, ws)
+                    if not greeted:
+                        print({"server": "say 'Hey Nova, ...'", "device": "press Enter, then speak"}.get(
+                            wake, "open mic: just speak"), flush=True)
+                        greeted = True
+                    while not mic.empty():   # sound from while the link was down is stale
+                        mic.get_nowait()
+                    while True:
+                        # whichever comes first: the next mic frame, or the link ending (a stalled mic
+                        # must not hide a dropped link)
+                        get = asyncio.ensure_future(mic.get())
+                        await asyncio.wait({get, reader}, return_when=asyncio.FIRST_COMPLETED)
+                        if not get.done():
+                            get.cancel()
+                            break
+                        frame = get.result()
+                        if ui is not None:
+                            ui.level(frame)
+                        if device.should_stream():
+                            await ws.send(frame)
+                        if reader.done():
+                            break
+                except WebSocketException:
+                    pass   # the link dropped mid-send: reconnect below
+                finally:
+                    holder.pop("device", None)
+                    holder.pop("ws", None)
+                    reader.cancel()
+                    try:
+                        await ws.close()
+                    except (OSError, WebSocketException):
+                        pass
+                player.flush()
+                print("[conn] lost the link to Nova; reconnecting", flush=True)
                 if ui is not None:
-                    ui.level(frame)
-                if device.should_stream():
-                    await ws.send(frame)
+                    ui.send({"conn": "down"})
         finally:
-            reader.cancel()
-            await ws.close()
             player.stop()
             if ui is not None:
                 ui.send({"conn": "down"})
                 ui.close()
-    return 0
 
 
 def record(path: str, seconds: float) -> int:

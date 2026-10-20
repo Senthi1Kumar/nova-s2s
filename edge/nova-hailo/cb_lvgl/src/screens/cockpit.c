@@ -251,12 +251,14 @@ static void icon_draw(lv_event_t *e)
         arc.end_angle = 360;
         arc.color = c;
         lv_draw_arc(layer, &arc);
+        /* The dot is an arc too (as wide as its radius: a disc), so it shares the ring's centre exactly; an odd
+           pixel rect around the same point sat half a pixel low and right of it. */
+        arc.radius = 4;
+        arc.width = 4;
+        lv_draw_arc(layer, &arc);
         lv_draw_rect_dsc_t r;
         lv_draw_rect_dsc_init(&r);
         r.bg_color = c;
-        r.radius = LV_RADIUS_CIRCLE;
-        lv_area_t dot = { cx - 3, cy - 3, cx + 3, cy + 3 };
-        lv_draw_rect(layer, &r, &dot);
         for(int i = 0; i < 4; i++) {   /* the four ticks of a target */
             int32_t dx = i == 0 ? 1 : i == 1 ? -1 : 0, dy = i == 2 ? 1 : i == 3 ? -1 : 0;
             lv_area_t t = { cx + dx * 11 - (dx ? 0 : 1), cy + dy * 11 - (dy ? 0 : 1), cx + dx * 14 + (dx ? 0 : 1),
@@ -358,12 +360,10 @@ static void maneuver_draw(lv_event_t *e)
         arc.start_angle = 0;
         arc.end_angle = 360;
         lv_draw_arc(layer, &arc);
-        lv_draw_rect_dsc_t r;
-        lv_draw_rect_dsc_init(&r);
-        r.bg_color = cb_col(CB_CYAN);
-        r.radius = LV_RADIUS_CIRCLE;
-        lv_area_t dot = { (int32_t)cx - 6, (int32_t)cy - 6, (int32_t)cx + 6, (int32_t)cy + 6 };
-        lv_draw_rect(layer, &r, &dot);
+        arc.color = cb_col(CB_CYAN);   /* the dot as a disc-wide arc: concentric with the ring by construction */
+        arc.radius = 7;
+        arc.width = 7;
+        lv_draw_arc(layer, &arc);
         return;
     }
     if(s_nav_kind == NAV_M_UTURN) {

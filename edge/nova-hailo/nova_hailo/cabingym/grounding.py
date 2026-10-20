@@ -46,6 +46,7 @@ NUMERIC_PARSERS: dict[str, Callable[[str], Mapping[str, Any] | None]] = {
 BOOL_PARSERS: dict[str, Callable[[str], bool | None]] = {
     "on_off": s.parse_on_off, "lock": s.parse_lock, "fold": s.parse_fold,
     "recirc": s.parse_recirc, "mute": s.parse_mute, "along_route": s.parse_along_route,
+    "after": s.parse_after,
 }
 SPAN_PARSERS: dict[str, Callable[[str], str | None]] = {
     "message": s.extract_message, "media": s.extract_media_query,
@@ -110,7 +111,8 @@ _PLACE_SPAN = re.compile(
 # What follows the place in a spoken stop request, not part of its name.
 _PLACE_TAIL = re.compile(
     r"\s+(?:(?:on|along)\s+(?:the|our|my)\s+way|as\s+a\s+(?:new\s+)?stop|at\s+a\s+stop|"
-    r"to\s+(?:pick|drop)\b|right\s+now|please)\b.*$", re.I)
+    r"to\s+(?:pick|drop)\b|right\s+now|please|via|by\s+way\s+of|passing\s+through|going\s+through)\b.*$",
+    re.I)
 
 
 # "the second one" names a place from the last search (Nav.LastResults).
@@ -118,6 +120,38 @@ _ORDINALS = {"first": 0, "1st": 0, "closest": 0, "nearest": 0, "second": 1, "2nd
              "third": 2, "3rd": 2, "last": -1}
 _ORDINAL = re.compile(r"\b(first|1st|closest|nearest|second|2nd|third|3rd|last)\s+(one|option|place|result)\b",
                       re.I)
+
+
+# "Barbara Drive in Los Gatos" is searched as "Barbara Drive, Los Gatos", the form the place
+# search reads as a name plus the town to look in.
+_IN_TOWN = re.compile(r"^(?P<name>.+?)\s+in\s+(?P<town>[A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){0,2})\s*$")
+_VIA = re.compile(r"\b(?:via|by\s+way\s+of|passing\s+through|going\s+through)\s+(?P<v>.+?)\s*[.!?]*$", re.I)
+
+
+def town_form(name: str) -> str:
+    m = _IN_TOWN.match((name or "").strip())
+    return f"{m.group('name')}, {m.group('town')}" if m else (name or "").strip()
+
+
+_HIGHWAY = re.compile(r"\b(?:us|i|ca|sr|hwy|highway|interstate|route|freeway)?[-\s]?\d{1,3}\b|"
+                      r"\b(?:highway|freeway|interstate)\b", re.I)
+
+
+def split_places(value: Any) -> list[str]:
+    """['Los Altos', 'Cupertino'] or "Los Altos, Cupertino and Campbell" -> names in order."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    out: list[str] = []
+    for item in items:
+        for part in re.split(r"\s*,\s*|\s+(?:and|then)\s+", str(item or "")):
+            part = part.strip(" .!?")
+            if part:
+                out.append(part)
+    return out
+
+
+def parse_via(text: str) -> list[str]:
+    m = _VIA.search(text or "")
+    return split_places(m.group("v")) if m else []
 
 
 def resolve_place(text: str, cabin: CabinEnv) -> tuple[dict[str, Any] | None, str]:
@@ -134,11 +168,30 @@ def resolve_place(text: str, cabin: CabinEnv) -> tuple[dict[str, Any] | None, st
             return _place(results[index]), "entity"
     m = _PLACE_SPAN.search(text)
     if m and cabin.allow_poi_search:
-        query = _PLACE_TAIL.sub("", m.group("q")).strip() or m.group("q")
+        query = town_form(_PLACE_TAIL.sub("", m.group("q")).strip(" .!?") or m.group("q"))
         found = cabin.nav.search(query, here(snap))
         if found:
             return found[0].to_dict(), "span"
     return None, "missing"
+
+
+# A name close to one place in the last search results wins over a fresh search.
+_HEARD_MIN = 0.6
+_HEARD_MARGIN = 0.2
+
+
+def _sounds_like_a_result(name: str, snap: Mapping[str, Any]) -> dict[str, Any] | None:
+    from nova_hailo.cabingym.nav import name_score
+
+    results = [r for r in (snap.get(c.NAV_RESULTS) or ()) if isinstance(r, Mapping) and r.get("name")]
+    if not results:
+        return None
+    scored = sorted(((name_score(name, str(r["name"])), i) for i, r in enumerate(results)), reverse=True)
+    best, i = scored[0]
+    runner = scored[1][0] if len(scored) > 1 else 0.0
+    if best >= _HEARD_MIN and best - runner >= _HEARD_MARGIN:
+        return _place(results[i])
+    return None
 
 
 def _place_by_name(name: str, cabin: CabinEnv) -> dict[str, Any] | None:
@@ -151,11 +204,35 @@ def _place_by_name(name: str, cabin: CabinEnv) -> dict[str, Any] | None:
     hit = s.match_entity(name, [n for n, _ in cands])
     if hit is not None:
         return next(p for n, p in cands if n == hit)
+    heard = _sounds_like_a_result(name, snap)
+    if heard is not None:
+        return heard
     if cabin.allow_poi_search:
-        found = cabin.nav.search(name, here(snap))
+        found = cabin.nav.search(town_form(name), here(snap))
         if found:
             return found[0].to_dict()
     return None
+
+
+def _ground_places(g: Grounded, pname: str, names: list[str], cabin: CabinEnv, how: str = "parser") -> None:
+    """Each name resolved like a destination. One that cannot be found makes the call ask:
+    a route that silently skips a "via" is the wrong route."""
+    if not names:
+        return
+    places, skipped = [], []
+    for name in dict.fromkeys(names):
+        place = _place_by_name(name, cabin)
+        if place is None and _HIGHWAY.search(name):
+            skipped.append(name)      # a road by number cannot be searched as a place
+            continue
+        if place is None:
+            g.missing.append(pname)
+            g.unresolved[pname] = name
+            return
+        places.append(place)
+    _set(g, pname, places, how)
+    if skipped:
+        g.args["_skipped_via"] = skipped
 
 
 def _finish(api: Api, g: Grounded) -> Grounded:
@@ -165,6 +242,136 @@ def _finish(api: Api, g: Grounded) -> Grounded:
     if api.requires_any and not any(k in g.args for k in api.requires_any):
         g.missing.append("|".join(api.requires_any))
     return g
+
+
+# Topics that tell what a sentence is about. "drive" (speed, range) and "cabin" (inside,
+# people) are questions about the car, not a request to change another control.
+_TOPICS = ("hvac", "lights", "media", "seats", "windows", "doors", "body", "system", "phone", "navigation")
+
+
+def _about(cabin: CabinEnv, text: str) -> set[str]:
+    return {name for name in _TOPICS
+            if name in cabin.devices and re.search(cabin.devices[name].keywords, text or "", re.I)}
+
+
+def asked_for(cabin: CabinEnv, device: str, api: Api, text: str) -> bool:
+    """False only when the sentence, or failing that the last turn, is about another control."""
+    if not (text or "").strip():
+        return True
+    if device in _about(cabin, text) or any(re.search(p, text, re.I) for p in api.patterns):
+        return True
+    if _about(cabin, text) - {device}:
+        return False
+    for turn in reversed(cabin.dialog or []):
+        prev = str(turn.get("user") or "")
+        if prev.strip():
+            about = _about(cabin, prev)
+            return not about or device in about
+    return True
+
+
+def _split_via(api: Api, raw: dict[str, Any]) -> dict[str, Any]:
+    """A model that writes "Lucie Stern Community Center via Hopkins Avenue" as the destination
+    means a destination and a place to pass through."""
+    dest = raw.get("destination")
+    if "via" not in api.params or not isinstance(dest, str):
+        return raw
+    m = _VIA.search(dest)
+    if not m or not dest[:m.start()].strip(" ,"):
+        return raw
+    raw["destination"] = dest[:m.start()].strip(" ,")
+    names = split_places(m.group("v")) + split_places(raw.get("via") or [])
+    raw["via"] = list(dict.fromkeys(n.strip() for n in names if n.strip()))
+    return raw
+
+
+_STOP_AT = re.compile(r"\bstop\s+(?:off\s+)?(?:at|by)\s+\S", re.I)
+_FIRST_THEN = re.compile(
+    r"\bfirst\b[,\s]*(?:let'?s\s+)?(?:go\s+to\s+|stop\s+at\s+|head\s+to\s+|to\s+)?(?:the\s+)?(?P<a>.+?)"
+    r"\s*,?\s+(?:and\s+)?then\s+(?:go\s+to\s+|head\s+to\s+|to\s+)?(?:the\s+)?(?P<b>.+?)\s*[.!?]*$", re.I)
+
+
+def _names_current_destination(name: str, snap: Mapping[str, Any]) -> bool:
+    """ "the theatre" while navigating to Landmark's Aquarius Theatre."""
+    dest = str(snap.get(c.NAV_DEST) or "")
+    words = set(re.findall(r"[a-z]+", name.lower())) - {"the", "a", "an", "back", "there"}
+    return bool(dest and snap.get(c.NAV_ACTIVE) and words and words <= set(re.findall(r"[a-z]+", dest.lower())))
+
+
+def _named(query: str) -> bool:
+    """ "the Bank of America" names one place; "a bank" names a kind."""
+    words = re.findall(r"[A-Za-z']+", query)
+    return any(w[0].isupper() for w in words if w.lower() not in {"the", "a", "an", "i"})
+
+
+def correct_nav_call(cabin: CabinEnv, text: str, outcome: RouteOutcome) -> RouteOutcome:
+    """Fix a navigation call the sentence contradicts: "stop at X", "first X, then Y", "go to <name>"."""
+    if outcome.kind != "vehicle" or len(outcome.calls) != 1 or not (text or "").strip():
+        return outcome
+    call = outcome.calls[0]
+    if call.device != "navigation":
+        return outcome
+    snap = cabin.store.snapshot()
+    fixed: VehicleCall | None = None
+    if call.api == "stop_navigation" and _STOP_AT.search(text):
+        place, how = resolve_place(text, cabin)
+        if place is not None:
+            api = "add_stop" if snap.get(c.NAV_ACTIVE) else "navigate_to"
+            fixed = VehicleCall("navigation", api, {"destination": place}, {"destination": how}, call.score)
+    elif call.api == "find_nearby" and (span := _PLACE_SPAN.search(text)) and _named(span.group("q")):
+        from nova_hailo.cabingym.nav import name_score
+
+        place, how = resolve_place(text, cabin)
+        query = _PLACE_TAIL.sub("", span.group("q")).strip(" .!?")
+        if place is not None and name_score(query, str(place.get("name") or "")) >= 0.6:
+            fixed = VehicleCall("navigation", "navigate_to", {"destination": place}, {"destination": how}, call.score)
+    elif call.api == "navigate_to" and isinstance(call.args.get("destination"), Mapping):
+        m = _FIRST_THEN.search(text)
+        if m:
+            from nova_hailo.cabingym.nav import name_score
+
+            dest = call.args["destination"]
+            first, then = m.group("a").strip(" ,"), m.group("b").strip(" ,")
+            if name_score(first, str(dest.get("name") or "")) >= 0.5:
+                if _names_current_destination(then, snap):
+                    final = {"name": snap[c.NAV_DEST], "lat": snap[c.NAV_DEST_LAT], "lon": snap[c.NAV_DEST_LON]}
+                else:
+                    final = _place_by_name(then, cabin)
+                if final is not None and str(final.get("name")) != str(dest.get("name")):
+                    args = dict(call.args)
+                    args["destination"] = final
+                    args["via"] = [dest, *list(call.args.get("via") or ())]
+                    fixed = VehicleCall("navigation", "navigate_to", args,
+                                        {**call.grounding, "destination": "first_then"}, call.score)
+    if fixed is None:
+        return outcome
+    return RouteOutcome("vehicle", [fixed], outcome.speak, {**outcome.trace, "corrected": call.api})
+
+
+def mark_unasked(cabin: CabinEnv, text: str, outcome: RouteOutcome) -> RouteOutcome:
+    """Tag cloud writes to a cabin control the sentence did not ask for; the gate (G10) then
+    confirms them instead of acting. Reads and navigation are left alone."""
+    if outcome.kind != "vehicle" or not outcome.calls or not (text or "").strip():
+        return outcome
+    calls: list[VehicleCall] = []
+    changed = False
+    for call in outcome.calls:
+        api = cabin.devices[call.device].apis[call.api]
+        if call.device in _TOPICS and call.device not in ("navigation",) and not api.read_only \
+                and not asked_for(cabin, call.device, api, text):
+            calls.append(VehicleCall(call.device, call.api, dict(call.args),
+                                     {**call.grounding, "asked": "no"}, call.score))
+            changed = True
+        else:
+            calls.append(call)
+    return RouteOutcome("vehicle", calls, outcome.speak, dict(outcome.trace)) if changed else outcome
+
+
+def _device_of(cabin: CabinEnv, api: Api) -> str | None:
+    for name, d in cabin.devices.items():
+        if d.apis.get(api.name) is api:
+            return name
+    return None
 
 
 def ground_args(api: Api, text: str, cabin: CabinEnv, choose: Choose | None = None) -> Grounded:
@@ -181,21 +388,27 @@ def ground_args(api: Api, text: str, cabin: CabinEnv, choose: Choose | None = No
                 continue
             default = spec.get("default")
             focus = cabin.focused_zone(api.name, spec["enum"])
-            past = cabin.zone_from_dialog(spec["enum"]) if s.continues_request(text) else None
+            dev = _device_of(cabin, api)
+            said, about = cabin.dialog_zone(spec["enum"])
+            # A side the driver gave for another control ("the seat, driver side only") is not
+            # this one's: a model that carries it over would change only half the cabin.
+            elsewhere = bool(about) and dev not in about
+            past = said if s.continues_request(text) and not elsewhere else None
+            carried = named is None and picked == said and elsewhere
             if named is not None and picked == named:
                 _set(g, pname, picked, "enum")
             elif named is not None:
                 _set(g, pname, named, "parser")
-            elif picked in spec["enum"] and picked != default:
-                _set(g, pname, picked, "enum")
             elif focus and s.continues_request(text):
                 _set(g, pname, focus, "focus")
             elif past:
                 _set(g, pname, past, "dialog")
-            elif picked in spec["enum"]:
-                _set(g, pname, picked, "enum")
+            # A side the router model guessed with none said, in focus or in the dialogue
+            # ("set the fan speed to one" -> driver) changed half the cabin: the default wins.
             elif default in spec["enum"]:
                 _set(g, pname, default, "default")
+            elif picked in spec["enum"] and not carried:
+                _set(g, pname, picked, "enum")
         elif kind == "enum":
             if picked in spec["enum"]:
                 _set(g, pname, picked, "enum")
@@ -238,6 +451,8 @@ def ground_args(api: Api, text: str, cabin: CabinEnv, choose: Choose | None = No
             val = SPAN_PARSERS[kind[5:]](text)
             if val:
                 _set(g, pname, val, "span")
+        elif kind == "places":
+            _ground_places(g, pname, parse_via(text), cabin)
         elif kind == "place":
             if picked == NONE_OF_THESE:
                 g.missing.append(pname)
@@ -272,7 +487,8 @@ def _as_bool(value: Any) -> bool | None:
 def normalize_cloud_args(api: Api, raw: Mapping[str, Any] | None, cabin: CabinEnv) -> Grounded:
     snap = cabin.store.snapshot()
     g = Grounded()
-    for pname, value in (raw or {}).items():
+    raw = _split_via(api, dict(raw or {}))
+    for pname, value in raw.items():
         spec = api.params.get(pname)
         if spec is None or value is None or value == "":
             continue
@@ -302,6 +518,8 @@ def normalize_cloud_args(api: Api, raw: Mapping[str, Any] | None, cabin: CabinEn
                 g.missing.append(pname)
             else:
                 _set(g, pname, hit, "cloud")
+        elif kind == "places":
+            _ground_places(g, pname, split_places(value), cabin, how="cloud")
         elif kind == "place":
             place = _place_by_name(str(value), cabin)
             if place is None:
@@ -350,8 +568,6 @@ def apply_focus_zone(cabin: CabinEnv, text: str, outcome: RouteOutcome) -> Route
     )
     use_named = how == "parser" and named is not None
     use_past = not use_named and s.continues_request(text)
-    if not use_named and not use_past:
-        return outcome
     calls: list[VehicleCall] = []
     changed = False
     for call in outcome.calls:
@@ -362,7 +578,23 @@ def apply_focus_zone(cabin: CabinEnv, text: str, outcome: RouteOutcome) -> Route
             continue
         current = call.args.get("zone")
         source = call.grounding.get("zone")
-        if source == "parser" or (source in {"cloud", "enum", "focus", "dialog"} and current != spec.get("default")):
+        default = spec.get("default")
+        if source == "cloud" and not use_named and current != default and default in spec["enum"]:
+            # The model carried a side the driver gave for another control ("the seat, driver
+            # side only") onto this one; "set it to one" then changed only half the cabin.
+            said, about = cabin.dialog_zone(spec["enum"])
+            if current == said and about and call.device not in about:
+                args = dict(call.args)
+                args["zone"] = default
+                grounding = dict(call.grounding)
+                grounding["zone"] = "default"
+                calls.append(VehicleCall(call.device, call.api, args, grounding, call.score))
+                changed = True
+                continue
+        if not use_named and not use_past:
+            calls.append(call)
+            continue
+        if source == "parser" or (source in {"cloud", "enum", "focus", "dialog"} and current != default):
             calls.append(call)
             continue
         replacement = None
@@ -370,7 +602,8 @@ def apply_focus_zone(cabin: CabinEnv, text: str, outcome: RouteOutcome) -> Route
         if use_named and named in spec["enum"]:
             replacement, how_set = named, "parser"
         elif use_past:
-            replacement = cabin.focused_zone(call.api, spec["enum"]) or cabin.zone_from_dialog(spec["enum"])
+            replacement = (cabin.focused_zone(call.api, spec["enum"])
+                           or cabin.zone_from_dialog(spec["enum"], call.device))
             how_set = "focus" if cabin.focused_zone(call.api, spec["enum"]) else "dialog"
         if not replacement or replacement == current:
             calls.append(call)
@@ -395,6 +628,8 @@ def clarify_speak(
         # A place was named and search missed. Asking "where?" again sounds like we heard nothing.
         if name == "destination" and heard:
             return f"I couldn't find {heard}."
+        if name == "via" and heard:
+            return f"I couldn't find {heard} to drive through."
         if name in _CLARIFY:
             return _CLARIFY[name]
     return "Could you say that again with the setting you want?"

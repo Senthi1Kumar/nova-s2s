@@ -52,7 +52,7 @@ add_library(cb_core STATIC
   src/screens/gate.c src/screens/dash.c
   src/widgets/sparkline.c src/widgets/ui_kit.c src/widgets/drive.c src/widgets/comfort.c src/widgets/connected.c
   src/map/mapbox_url.c src/map/map_gesture.c src/map/map_view.c src/screens/cockpit.c
-  src/live/json.c src/live/ws.c src/live/live.c src/live/session_ctl.c src/live/nav_state.c src/map/map_puck.c src/map/route_geojson.c src/map/mapbox_logo.c src/widgets/settings_sheet.c
+  src/live/json.c src/live/ws.c src/live/live.c src/live/session_ctl.c src/live/nav_state.c src/map/map_puck.c src/map/map_follow.c src/map/route_geojson.c src/map/mapbox_logo.c src/widgets/settings_sheet.c
   ${CB_FONTS})
 target_include_directories(cb_core PUBLIC src fonts)
 target_link_libraries(cb_core PUBLIC lvgl)
@@ -97,7 +97,7 @@ target_link_libraries(cb_lvgl PRIVATE cb_core)
 target_compile_options(cb_lvgl PRIVATE ${CB_WARN})
 
 enable_testing()
-foreach(t nova_fsm followup model demo ambient mapbox_url map_gesture json ws live avatar nav_state map_puck route_geojson)
+foreach(t nova_fsm followup model demo ambient mapbox_url map_gesture json ws live avatar nav_state map_puck map_follow route_geojson)
   add_executable(test_${t} tests/test_${t}.c)
   target_link_libraries(test_${t} PRIVATE cb_core)
   target_compile_options(test_${t} PRIVATE ${CB_WARN})

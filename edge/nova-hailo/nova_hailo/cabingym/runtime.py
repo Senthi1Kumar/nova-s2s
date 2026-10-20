@@ -6,6 +6,7 @@ Callers: cabingym.executor, .env, .router_*, nova_hailo.tools.oem_tools.
 from __future__ import annotations
 
 import logging
+import re
 from collections import deque
 from typing import Any
 
@@ -187,15 +188,28 @@ class CabinEnv:
         zone = focus.get("zone")
         return zone if zone in allowed else None
 
-    def zone_from_dialog(self, allowed: Any) -> str | None:
-        """Most recent zone the driver actually said, not a default."""
+    def dialog_zone(self, allowed: Any) -> tuple[str | None, frozenset[str]]:
+        """The most recent zone the driver actually said, and the devices that turn was about
+        (empty for a bare answer such as "passenger side please")."""
         from nova_hailo.cabingym.slots import parse_zone
 
         for turn in reversed(self.dialog or []):
-            named, how = parse_zone(str(turn.get("user") or ""), allowed, None)
+            text = str(turn.get("user") or "")
+            named, how = parse_zone(text, allowed, None)
             if how == "parser" and named in allowed:
-                return named
-        return None
+                about = frozenset(name for name, d in self.devices.items()
+                                  if d.keywords and re.search(d.keywords, text, re.I))
+                return named, about
+        return None, frozenset()
+
+    def zone_from_dialog(self, allowed: Any, device: str | None = None) -> str | None:
+        """Most recent zone the driver actually said, not a default. With a device, a zone
+        said about another control does not count: "the seat on the driver side" is not
+        the driver's fan."""
+        zone, about = self.dialog_zone(allowed)
+        if device is not None and about and device not in about:
+            return None
+        return zone
 
     def remember_turn(
         self, utterance: str, device: str | None, api: str | None,
