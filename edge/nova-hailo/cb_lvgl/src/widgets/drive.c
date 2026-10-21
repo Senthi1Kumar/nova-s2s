@@ -1,13 +1,10 @@
 #include "widgets/drive.h"
 #include "cb_model.h"
 #include "cb_theme.h"
-#include "widgets/sparkline.h"
 #include "widgets/ui_kit.h"
 #include <math.h>
 
-#define CARD_INNER_W 552   /* column content 580 - card padding 2 x 14 */
-
-static lv_obj_t *s_speed_lbl, *s_spark, *s_gears[4], *s_soc_lbl, *s_soc_bar, *s_range_lbl;
+static lv_obj_t *s_speed_lbl, *s_gears[4], *s_soc_lbl, *s_soc_bar, *s_range_lbl;
 static lv_obj_t *s_map, *s_dot, *s_eta_lbl;
 static int32_t s_shown_x100;
 
@@ -22,12 +19,6 @@ static void ease_cb(lv_timer_t *t)
     if(LV_ABS(target - s_shown_x100) < 50) s_shown_x100 = target;
     int32_t after = (s_shown_x100 + 50) / 100;
     if(after != before) lv_label_set_text_fmt(s_speed_lbl, "%d", (int)after);
-}
-
-static void speed_obs(lv_observer_t *o, lv_subject_t *subj)
-{
-    LV_UNUSED(o);
-    sparkline_push(s_spark, lv_subject_get_int(subj));
 }
 
 static void gear_obs(lv_observer_t *o, lv_subject_t *subj)
@@ -70,9 +61,6 @@ static void speed_card(lv_obj_t *col)
     }
     lv_subject_add_observer_obj(cb_model()->gear, gear_obs, s_gears[0], NULL);
     lv_timer_create(ease_cb, 33, NULL);
-
-    s_spark = sparkline_create(card, CARD_INNER_W, 34, 40, CB_CYAN, 40, 85);
-    lv_subject_add_observer_obj(cb_model()->speed_kph, speed_obs, s_spark, NULL);
 
     lv_obj_t *soc = ui_row(card, 10);
     s_soc_lbl = ui_label(soc, "68%", CB_F_MONO_L, CB_TEXT_HI);

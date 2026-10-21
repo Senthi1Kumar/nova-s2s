@@ -12,7 +12,7 @@ PORT="${NOVA_HAILO_PORT:-8766}"
 LOG="${NOVA_SERVER_LOG:-/tmp/nova_server.log}"
 URL="http://127.0.0.1:$PORT/v1/session"
 
-[[ -x .venv/bin/python && -x cb_lvgl/build-sw/cb_lvgl ]] || { echo "Run scripts/setup_pi.sh first." >&2; exit 1; }
+[[ -x .venv/bin/python && ( -x cb_lvgl/build-gpu/cb_lvgl || -x cb_lvgl/build-sw/cb_lvgl ) ]] || { echo "Run scripts/setup_pi.sh first." >&2; exit 1; }
 mode="${NOVA_HAILO_WAKE_MODE:-ptt}"
 args=()
 for a in "$@"; do

@@ -178,6 +178,10 @@ static void nav_labels(void)
     s_nav.distance_km = L.nav_dist;
     nav_banner_t b;
     nav_banner(&s_nav, false, (long)time(NULL), &b);
+    char line[sizeof b.turn_dist + sizeof b.instruction + 8];
+    if(b.turn_dist[0] && b.instruction[0]) snprintf(line, sizeof line, "In %s \xC2\xB7 %s", b.turn_dist, b.instruction);
+    else snprintf(line, sizeof line, "%s", b.instruction);
+    cb_app_nova_route_line(line);
     double left = s_nav.has_progress ? s_nav.remaining_m : L.nav_dist * 1000.0;
     int permille = s_nav_total_m > 0 ? (int)lround(1000.0 * (1.0 - left / s_nav_total_m)) : 0;
     cockpit_set_nav(&b, s_via, permille);
@@ -650,6 +654,7 @@ static void on_nav(const cbj_t *f)
     nav_state_from_frame(&s_nav, f);
     if(!L.nav_active) {
         cockpit_set_nav(NULL, NULL, 0);
+        cb_app_nova_route_line(NULL);
         show_pois(c->map, false, NULL);
         if(c->map) {
             map_view_set_route(c->map, NULL, 0, NULL);
@@ -679,13 +684,40 @@ static void on_nav(const cbj_t *f)
 }
 
 static bool llm_from(const cbj_t *llm, live_llm_t *out);
+static bool tts_from(const cbj_t *f, live_tts_t *out);
 static void (*s_llm_cb)(const live_llm_t *);
+static void (*s_tts_cb)(const live_tts_t *);
+static void (*s_guidance_cb)(const char *);
+
+void live_set_guidance_cb(void (*cb)(const char *text)) { s_guidance_cb = cb; }
+
+/* The mood event a frame stands for, or -1. A session start is decided by dispatch (only the first counts). */
+static int mood_event_from(const char *type, const cbj_t *f)
+{
+    if(!strcmp(type, "observe.session")) return cbj_bool(cbj_get(f, "active"), false) ? NM_SESSION_START : -1;
+    if(!strcmp(type, "input_audio_buffer.speech_started")) return NM_SPEECH_STARTED;
+    if(!strcmp(type, "conversation.item.input_audio_transcription.completed")) return NM_TRANSCRIPT_DONE;
+    if(!strcmp(type, "nova.tool_status")) {
+        const char *st = cbj_str(cbj_get(f, "status"), "");
+        return !strcmp(st, "error") || !strcmp(st, "failed") ? NM_TOOL_ERROR : -1;
+    }
+    if(!strcmp(type, "nova.agent_trace")) return *cbj_str(cbj_get(f, "error"), "") ? NM_TOOL_ERROR : -1;
+    if(!strcmp(type, "response.audio_transcript.delta")) return cbj_bool(cbj_get(f, "nav_guidance"), false) ? -1 : NM_REPLY_DELTA;
+    if(!strcmp(type, "output_audio.duck")) return cbj_num(cbj_get(f, "gain"), 1.0) < 1.0 ? NM_DUCK : NM_UNDUCK;
+    if(!strcmp(type, "playback.interrupted")) return NM_INTERRUPTED;
+    if(!strcmp(type, "response.done"))
+        return cbj_bool(cbj_get(cbj_get(cbj_get(f, "response"), "metadata"), "nav_guidance"), false) ? -1 : NM_RESPONSE_DONE;
+    return -1;
+}
 
 /* ---------- dispatch ---------- */
 
 static void dispatch(const cbj_t *f)
 {
     const char *type = cbj_str(cbj_get(f, "type"), "");
+    int mood = strcmp(type, "observe.session") ? mood_event_from(type, f) : -1;
+    if(mood >= 0) cb_app_nova_mood_event((nm_event_t)mood);
+    if(!strcmp(type, "output_audio.duck")) cb_app_nova_duck((float)cbj_num(cbj_get(f, "gain"), 1.0));
     if(!strcmp(type, "nova.vehicle")) on_vehicle(f);
     else if(!strcmp(type, "nova.fsm")) bar_state(cbj_str(cbj_get(cbj_get(f, "fsm"), "state"), "IDLE"));
     else if(!strcmp(type, "nova.mic")) bar_mute(cbj_get(f, "muted"));
@@ -693,6 +725,13 @@ static void dispatch(const cbj_t *f)
         L.user_gen = (int)cbj_num(cbj_get(f, "generation_id"), -1);
         snprintf(L.utter, sizeof L.utter, "%s", cbj_str(cbj_get(f, "transcript"), ""));
         bar_text(L.utter, true, false);
+    }
+    else if(cbj_bool(cbj_get(f, "nav_guidance"), false) && !strncmp(type, "response.audio_transcript.", 26)) {
+        if(!strcmp(type, "response.audio_transcript.done")) {   /* a route prompt: the dock's line, not a reply */
+            const char *line = cbj_str(cbj_get(f, "transcript"), "");
+            cb_app_nova_guidance(line);
+            if(s_guidance_cb) s_guidance_cb(line);
+        }
     }
     else if(!strcmp(type, "response.audio_transcript.delta")) {
         int gen = (int)cbj_num(cbj_get(f, "generation_id"), -1);
@@ -719,12 +758,20 @@ static void dispatch(const cbj_t *f)
     else if(!strcmp(type, "nova.settings")) {
         live_llm_t l;
         if(s_llm_cb && llm_from(cbj_get(f, "llm"), &l)) s_llm_cb(&l);
+        live_tts_t t;
+        if(tts_from(f, &t)) {
+            if(s_tts_cb) s_tts_cb(&t);
+            cb_app_set_avatar(t.avatar[0] ? t.avatar : NULL, t.voice[0] ? t.voice : NULL);
+        }
     }
     else if(!strcmp(type, "observe.hello") || !strcmp(type, "observe.session")) {
         const cbj_t *a = cbj_get(f, !strcmp(type, "observe.hello") ? "session_active" : "active");
         bool was = L.session_active;
         L.session_active = cbj_bool(a, L.session_active);
-        if(L.session_active && !was) cb_app_nova_greet();   /* a voice client joined: Nova says hi */
+        if(L.session_active && !was) {   /* a voice client joined: Nova says hi */
+            cb_app_nova_mood_event(NM_SESSION_START);
+            cb_app_nova_greet();
+        }
         link_t l = L.link;
         L.link = LINK_OFF;   /* force a chip refresh */
         set_link(l == LINK_REPLAY ? LINK_REPLAY : LINK_LIVE);
@@ -738,6 +785,17 @@ void live_feed(const char *json, size_t len)
     const cbj_t *frame = cbj_get(r, "frame");   /* replay lines wrap the frame */
     dispatch(frame && cbj_get(r, "t_ms") ? frame : r);
     cbj_free(r);
+}
+
+int live_mood_event(const char *json, size_t len)
+{
+    cbj_t *r = cbj_parse(json, len);
+    if(!r) return -1;
+    const cbj_t *frame = cbj_get(r, "frame");
+    const cbj_t *f = frame && cbj_get(r, "t_ms") ? frame : r;
+    int ev = mood_event_from(cbj_str(cbj_get(f, "type"), ""), f);
+    cbj_free(r);
+    return ev;
 }
 
 uint32_t live_seq(void) { return L.seq; }
@@ -940,6 +998,142 @@ bool live_llm_apply(const char *provider, const char *model, bool failover, live
         memset(now, 0, sizeof *now);
         if(j) llm_from(cbj_get(cbj_get(j, "settings"), "llm"), now);   /* sent on failure too */
     }
+    if(j && !ok) snprintf(err, err_cap, "%s", cbj_str(cbj_get(j, "error"), "rejected"));
+    cbj_free(j);
+    return ok;
+}
+
+/* ---------- voice and avatar ---------- */
+
+void live_on_tts(void (*cb)(const live_tts_t *tts)) { s_tts_cb = cb; }
+
+/* Reads {"tts":{...},"avatar":".."}; false when the frame has neither (an older pipeline). */
+static bool tts_from(const cbj_t *f, live_tts_t *out)
+{
+    const cbj_t *t = cbj_get(f, "tts"), *a = cbj_get(f, "avatar");
+    bool has_t = t && t->type == CBJ_OBJ, has_a = a && a->type == CBJ_STR;
+    if(!has_t && !has_a) return false;
+    memset(out, 0, sizeof *out);
+    if(has_a) snprintf(out->avatar, sizeof out->avatar, "%s", a->s);
+    if(!has_t) return true;
+    snprintf(out->voice, sizeof out->voice, "%s", cbj_str(cbj_get(t, "voice"), ""));
+    snprintf(out->speed, sizeof out->speed, "%s", cbj_str(cbj_get(t, "speed"), ""));
+    const cbj_t *vs = cbj_get(t, "voices");
+    for(const cbj_t *v = vs ? vs->child : NULL; v && out->n < LIVE_TTS_VOICES; v = v->next) {
+        int i = out->n++;
+        snprintf(out->v[i].id, sizeof out->v[i].id, "%s", cbj_str(cbj_get(v, "id"), ""));
+        snprintf(out->v[i].label, sizeof out->v[i].label, "%s", cbj_str(cbj_get(v, "label"), out->v[i].id));
+    }
+    return true;
+}
+
+bool live_tts_parse_json(const char *json, size_t len, live_tts_t *out)
+{
+    cbj_t *r = cbj_parse(json, len);
+    bool ok = r && tts_from(r, out);
+    cbj_free(r);
+    return ok;
+}
+
+/* Appends s as a JSON string body (quotes, backslashes and control bytes escaped). */
+static size_t json_esc(char *out, size_t cap, const char *s)
+{
+    size_t n = 0;
+    for(; *s && n + 7 < cap; s++) {
+        unsigned char c = (unsigned char)*s;
+        if(c == '"' || c == '\\') n += (size_t)snprintf(out + n, cap - n, "\\%c", c);
+        else if(c < 0x20) n += (size_t)snprintf(out + n, cap - n, "\\u%04x", c);
+        else out[n++] = (char)c;
+    }
+    out[n] = '\0';
+    return n;
+}
+
+static size_t post_json(char *out, size_t cap, const char *path, const char *host, int port, const char *body)
+{
+    int n = snprintf(out, cap,
+                     "POST %s HTTP/1.1\r\nHost: %s:%d\r\nContent-Type: application/json\r\n"
+                     "Content-Length: %d\r\nConnection: close\r\n\r\n%s",
+                     path, host, port, (int)strlen(body), body);
+    return n < 0 || (size_t)n >= cap ? 0 : (size_t)n;
+}
+
+/* "voice":"..","speed":".." for whichever are set; returns the length. */
+static size_t voice_kv(char *out, size_t cap, const char *voice, const char *speed)
+{
+    char e[160];
+    size_t n = 0;
+    if(voice) {
+        json_esc(e, sizeof e, voice);
+        n += (size_t)snprintf(out + n, cap - n, "\"voice\":\"%s\"", e);
+    }
+    if(speed) {
+        json_esc(e, sizeof e, speed);
+        n += (size_t)snprintf(out + n, cap - n, "%s\"speed\":\"%s\"", n ? "," : "", e);
+    }
+    return n;
+}
+
+size_t live_tts_request(char *out, size_t cap, const char *host, int port, const char *voice, const char *speed,
+                        const char *avatar)
+{
+    char body[480], kv[400], av[64];
+    size_t bl = 0;
+    body[0] = '\0';
+    if(voice || speed) {
+        voice_kv(kv, sizeof kv, voice, speed);
+        bl += (size_t)snprintf(body, sizeof body, "{\"tts\":{%s}", kv);
+    }
+    if(avatar) {
+        json_esc(av, sizeof av, avatar);
+        bl += (size_t)snprintf(body + bl, sizeof body - bl, "%s\"avatar\":\"%s\"", bl ? "," : "{", av);
+    }
+    if(!bl) snprintf(body, sizeof body, "{");
+    snprintf(body + strlen(body), sizeof body - strlen(body), "}");
+    return post_json(out, cap, "/v1/settings", host, port, body);
+}
+
+size_t live_preview_request(char *out, size_t cap, const char *host, int port, const char *voice, const char *speed)
+{
+    char body[480], kv[400];
+    voice_kv(kv, sizeof kv, voice, speed);
+    snprintf(body, sizeof body, "{%s}", kv);
+    return post_json(out, cap, "/v1/settings/preview", host, port, body);
+}
+
+bool live_tts_fetch(live_tts_t *out, char *err, size_t err_cap)
+{
+    char req[256];
+    int n = snprintf(req, sizeof req, "GET /v1/settings HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\n\r\n",
+                     L.host, L.port);
+    cbj_t *j = http_json(req, (size_t)n, 900, err, err_cap);
+    bool ok = j && tts_from(j, out);
+    if(j && !ok) snprintf(err, err_cap, "this Nova pipeline is too old for that");
+    cbj_free(j);
+    return ok;
+}
+
+bool live_tts_apply(const char *voice, const char *speed, const char *avatar, live_tts_t *now, char *err, size_t err_cap)
+{
+    char req[1024];
+    size_t n = live_tts_request(req, sizeof req, L.host, L.port, voice, speed, avatar);
+    cbj_t *j = http_json(req, n, 20000, err, err_cap);   /* a new voice loads first */
+    bool ok = j && cbj_bool(cbj_get(j, "ok"), false);
+    if(now) {
+        memset(now, 0, sizeof *now);
+        if(j) tts_from(cbj_get(j, "settings"), now);   /* sent on failure too */
+    }
+    if(j && !ok) snprintf(err, err_cap, "%s", cbj_str(cbj_get(j, "error"), "rejected"));
+    cbj_free(j);
+    return ok;
+}
+
+bool live_tts_preview(const char *voice, const char *speed, char *err, size_t err_cap)
+{
+    char req[1024];
+    size_t n = live_preview_request(req, sizeof req, L.host, L.port, voice, speed);
+    cbj_t *j = http_json(req, n, 20000, err, err_cap);
+    bool ok = j && cbj_bool(cbj_get(j, "ok"), false);
     if(j && !ok) snprintf(err, err_cap, "%s", cbj_str(cbj_get(j, "error"), "rejected"));
     cbj_free(j);
     return ok;

@@ -130,3 +130,28 @@ def test_a_late_observer_also_gets_the_latest_nav_after_the_snapshot():
 
     types = [e["type"] for e in asyncio.run(go()).sent]
     assert types == ["observe.hello", "nova.vehicle", "nova.nav"]
+
+
+def test_duck_is_mirrored():
+    from nova_hailo.web.observe import _mirrored
+
+    assert _mirrored("output_audio.duck")
+
+
+def test_interrupt_is_mirrored():
+    from nova_hailo.web.observe import _mirrored
+
+    assert _mirrored("playback.interrupted")
+
+
+def test_interrupt_handler_publishes(monkeypatch):
+    from nova_hailo.web import realtime_session as rs
+
+    seen = []
+    monkeypatch.setattr(rs.OBSERVERS, "publish_session_event", seen.append)
+    rs.publish_playback_interrupted({"type": "playback.interrupted", "reason": "barge_in"})
+    rs.publish_playback_interrupted({"type": "playback.interrupted"})
+    assert seen == [
+        {"type": "playback.interrupted", "reason": "barge_in"},
+        {"type": "playback.interrupted", "reason": "stop"},
+    ]

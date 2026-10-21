@@ -48,7 +48,7 @@ file(GLOB CB_FONTS ${CMAKE_CURRENT_SOURCE_DIR}/fonts/cb_*.c)
 add_library(cb_core STATIC
   src/cb_theme.c src/cb_snapshot.c src/cb_model.c src/cb_sim.c src/cb_demo.c src/cb_demo_script.c
   src/cb_app.c src/cb_ambient.c
-  src/nova/nova_fsm.c src/nova/orb.c src/nova/nova_bar.c src/nova/avatar_model.c src/nova/avatar.c src/nova/nova_panel.c
+  src/nova/nova_fsm.c src/nova/orb.c src/nova/nova_bar.c src/nova/avatar_model.c src/nova/nova_mood.c src/nova/avatar.c src/nova/nova_panel.c
   src/screens/gate.c src/screens/dash.c
   src/widgets/sparkline.c src/widgets/ui_kit.c src/widgets/drive.c src/widgets/comfort.c src/widgets/connected.c
   src/map/mapbox_url.c src/map/map_gesture.c src/map/map_view.c src/screens/cockpit.c
@@ -97,7 +97,7 @@ target_link_libraries(cb_lvgl PRIVATE cb_core)
 target_compile_options(cb_lvgl PRIVATE ${CB_WARN})
 
 enable_testing()
-foreach(t nova_fsm followup model demo ambient mapbox_url map_gesture json ws live avatar nav_state map_puck map_follow route_geojson)
+foreach(t nova_fsm followup model demo ambient mapbox_url map_gesture json ws live avatar nav_state map_puck map_follow route_geojson nova_mood)
   add_executable(test_${t} tests/test_${t}.c)
   target_link_libraries(test_${t} PRIVATE cb_core)
   target_compile_options(test_${t} PRIVATE ${CB_WARN})
@@ -114,4 +114,8 @@ if(CB_RENDER STREQUAL "sw")
   target_link_libraries(test_smoke_v2 PRIVATE cb_core)
   target_compile_options(test_smoke_v2 PRIVATE ${CB_WARN})
   add_test(NAME smoke_v2 COMMAND test_smoke_v2)
+  add_executable(test_smoke_b tests/test_smoke_b.c)
+  target_link_libraries(test_smoke_b PRIVATE cb_core)
+  target_compile_options(test_smoke_b PRIVATE ${CB_WARN})
+  add_test(NAME smoke_b COMMAND test_smoke_b)
 endif()

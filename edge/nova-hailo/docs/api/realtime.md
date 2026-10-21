@@ -235,6 +235,10 @@ plays), the final user transcript
 `nova.tool_status` and `nova.turn_metrics`. Its `generation_id`s are its own,
 counting from 1 per caller; there are no transcript deltas.
 
+A spoken route prompt is not an answer: its `response.audio_transcript.delta` and
+`.done` carry `"nav_guidance": true` (and so does its `response.done` metadata), so
+a display can show it as the route line instead of a reply.
+
 ## Cards (`nova.card`)
 
 A card is what a display shows next to the spoken reply: short lines a driver
@@ -383,8 +387,56 @@ choice is saved and survives a restart (it wins over `llm.cloud_provider` and
 Observers get `{"type": "nova.settings", "llm": {...}}` on `/v1/observe` at
 start-up and after every change, and the latest is replayed to one that joins
 late, also when the switch came from a nova-connect page over LiveKit. A
-`/v1/realtime` client's `nova.settings` carries the same `llm` object next to
-the older flat fields.
+`/v1/realtime` client's `nova.settings` carries the same `llm`, `tts` and
+`avatar` objects next to the older flat fields.
+
+### TTS voice, speed and avatar
+
+`GET /v1/settings` also answers `tts` and `avatar` next to `llm`:
+
+```json
+{"llm": {"...": "..."},
+ "tts": {"voice": "en_US-amy-low", "speed": "normal",
+         "voices": [{"id": "en_US-amy-low", "label": "Amy · US"},
+                    {"id": "en_GB-alba-medium", "label": "Alba · UK"}]},
+ "avatar": "voice"}
+```
+
+`voices` lists the Piper voices installed on the device (`scripts/fetch_models.sh`
+fetches five); `voice` and `speed` are what was chosen, even while the previous
+choice is still playing. `speed` is one of `slow`, `normal`, `fast`, `faster`.
+With a TTS engine that has no voice choice (Kokoro), `tts` is
+`{"voice": "", "speed": "normal", "voices": []}`. `avatar` is one of `voice`,
+`pebble`, `capsule`, `dome`, `drop`, `cloud`, `gem`, `visor`, `eyes`.
+
+`POST /v1/settings` takes any of `llm`, `tts` (`{"voice"?, "speed"?}`) and
+`avatar` in one body, and each part is checked on its own: a refused part
+leaves the others applied. It always answers 200:
+
+```json
+{"ok": false, "settings": {"llm": {"...": "..."}, "tts": {"...": "..."}, "avatar": "gem"},
+ "errors": {"tts": "unknown_speed"}, "error": "unknown_speed"}
+```
+
+`errors` maps a part to its reason (`error` repeats the first one):
+
+| Part | Reasons |
+|---|---|
+| `llm` | `missing_llm`, `unknown_provider`, or the provider's own message |
+| `tts` | `bad_tts`, `unknown_voice`, `unknown_speed`, `no_voice_choice`, `voice_load_failed` |
+| `avatar` | `unknown_avatar` |
+
+A voice or speed change takes effect at the next turn and is saved. A voice
+file that fails to load answers `voice_load_failed` and keeps the current one.
+Observers get `{"type": "nova.settings", "llm": {...}, "tts": {...}, "avatar": "..."}`
+when anything applied.
+
+`POST /v1/settings/preview` with `{"voice"?, "speed"?}` speaks "Hi, I'm Nova.
+This is how I'll sound." in that voice and speed (the current one for a missing
+field) and saves and changes nothing. It answers 200 with `{"ok": true}` or
+`{"ok": false, "error": ...}`: `speaking` (Nova is talking), `unknown_voice`,
+`unknown_speed`, `no_voice_choice`, `voice_load_failed`, `not_ready` (TTS is off or
+still starting), `starting`.
 
 ## Mic mute, wake and cancel (`/v1/session`)
 

@@ -110,6 +110,13 @@ def apply_playback_interrupted() -> dict[str, float | bool]:
     return {"client_playing": False, "release_speaking": True, "echo_until": 0.0}
 
 
+def publish_playback_interrupted(msg: dict) -> None:
+    """The client's interrupt never echoes back, so tell displays on /v1/observe."""
+    OBSERVERS.publish_session_event(
+        {"type": "playback.interrupted", "reason": str(msg.get("reason") or "stop")}
+    )
+
+
 def _fold_echo_text(s: str) -> str:
     t = (s or "").lower().replace("'", "")
     t = re.sub(r"[^a-z0-9\s]", " ", t)
@@ -588,6 +595,8 @@ class RealtimeSession:
         snap.update(_integrations_snapshot())
         # The provider/model shape displays read (GET /v1/settings), next to the HMI's flat keys.
         snap["llm"] = settings_ops.llm_settings(self.pipeline)
+        snap["tts"] = settings_ops.tts_settings(self.pipeline)
+        snap["avatar"] = str(getattr(self.pipeline, "avatar", "voice"))
         return snap
 
     def _apply_voice_settings(self, payload: dict[str, Any]) -> None:
@@ -611,7 +620,7 @@ class RealtimeSession:
             await self.send(
                 {
                     "type": "nova.settings",
-                    **{**snap, **self._voice_snapshot(), **_integrations_snapshot()},
+                    **{**snap, **self._settings_payload()},
                 }
             )
         await self.send(status)
@@ -860,6 +869,7 @@ class RealtimeSession:
                     "type": "response.audio_transcript.delta",
                     "delta": text,
                     "generation_id": my_gen,
+                    "nav_guidance": True,
                 }
             )
 
@@ -893,6 +903,7 @@ class RealtimeSession:
                     "type": "response.audio_transcript.done",
                     "transcript": line,
                     "generation_id": my_gen,
+                    "nav_guidance": True,
                 }
             )
             out = result.metrics.to_dict()
@@ -1231,6 +1242,7 @@ class RealtimeSession:
             self._client_playing = bool(decision["client_playing"])
             self._echo_until = float(decision["echo_until"])
             print("[play] playback.interrupted", flush=True)
+            publish_playback_interrupted(msg)
             ctx = self.fsm.current
             if ctx is not None and ctx.barge_in_at is not None:
                 stop_ms = (self._playback_stop_ack_at - ctx.barge_in_at) * 1000

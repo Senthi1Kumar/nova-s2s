@@ -130,3 +130,32 @@ def test_missing_or_unexpected_status_shape_is_tolerated(monkeypatch, bad_status
     out = _integrations_snapshot()
 
     assert out["google"] == {"connected": False, "needs_reauth": False}
+
+
+def test_llm_switch_frame_carries_tts_and_avatar(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from nova_hailo.web import settings_ops
+    from nova_hailo.web.realtime_session import RealtimeSession
+
+    async def applied(pipeline, payload):
+        return {"mode": "local"}, {"type": "nova.llm_status", "status": "ready"}
+
+    monkeypatch.setattr(settings_ops, "apply_llm_settings", applied)
+    s = RealtimeSession.__new__(RealtimeSession)
+    s.pipeline = SimpleNamespace()
+    s._voice_snapshot = lambda: {}
+    s._settings_payload = lambda: {
+        "llm": {"provider": "local"}, "tts": {"voice": "v1"}, "avatar": "gem", "mode": "local"}
+    monkeypatch.setattr("nova_hailo.web.realtime_session._integrations_snapshot", lambda: {})
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    s.send = send
+    asyncio.run(s._apply_llm_settings_bg({"mode": "local"}))
+    frame = sent[0]
+    assert frame["type"] == "nova.settings"
+    assert frame["tts"] == {"voice": "v1"} and frame["avatar"] == "gem"

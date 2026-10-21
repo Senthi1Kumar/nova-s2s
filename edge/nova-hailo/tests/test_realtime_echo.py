@@ -281,3 +281,28 @@ def test_a_quiet_utterance_is_rejected_without_a_spoken_line():
     quiet = np.random.default_rng(1).standard_normal(16000).astype(np.float32) * 0.004
     s._run_turn_blocking(quiet)
     assert s.pipeline.spoken_lines == [] and skipped(s) == ["low_energy"]
+
+
+def test_route_prompt_transcripts_are_flagged_as_guidance():
+    s, _ = _route_session()
+    assert s._speak_nav_guidance() is True
+    texts = [m for m in s._sent if str(m.get("type", "")).startswith("response.audio_transcript.")]
+    assert {m["type"] for m in texts} == {"response.audio_transcript.delta",
+                                          "response.audio_transcript.done"}
+    assert all(m.get("nav_guidance") is True for m in texts)
+
+
+def test_a_normal_reply_transcript_is_not_flagged_as_guidance():
+    s = _session()
+    say(s, "set the temperature to 23")
+    texts = [m for m in s._sent if str(m.get("type", "")).startswith("response.audio_transcript.")]
+    assert not any("nav_guidance" in m for m in texts)
+
+
+def test_a_research_announcement_is_not_flagged_as_guidance():
+    s = _session()
+    assert s._speak_research_result({"announce": "The research on Mars is ready."}) is True
+    texts = [m for m in s._sent if str(m.get("type", "")).startswith("response.audio_transcript.")]
+    assert {m["type"] for m in texts} == {"response.audio_transcript.delta",
+                                          "response.audio_transcript.done"}
+    assert not any("nav_guidance" in m for m in texts)

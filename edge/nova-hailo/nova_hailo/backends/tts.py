@@ -27,7 +27,10 @@ except Exception:
 
     logger = logging.getLogger(__name__)
 
-DEFAULT_PIPER = ROOT / "models" / "piper" / "en_US-amy-low.onnx"
+PIPER_DIR = ROOT / "models" / "piper"
+DEFAULT_PIPER = PIPER_DIR / "en_US-amy-low.onnx"
+# Piper length_scale: above 1.0 is slower, below is faster.
+PIPER_SPEEDS: dict[str, float] = {"slow": 1.25, "normal": 1.0, "fast": 0.83, "faster": 0.71}
 HAILO_APPS_PIPER = Path("/home/cariad/code/hailo-apps/local_resources/piper_models/en_US-amy-low.onnx")
 DEFAULT_KOKORO_ONNX = ROOT / "models" / "kokoro" / "kokoro-v1.0.onnx"
 DEFAULT_KOKORO_VOICES = ROOT / "models" / "kokoro" / "voices-v1.0.bin"
@@ -89,6 +92,27 @@ def _find_piper_model(onnx_path: str | None = None) -> Path:
     )
 
 
+def _voice_label(voice_id: str) -> str:
+    region, _, rest = voice_id.partition("-")
+    name = rest.rsplit("-", 1)[0] if "-" in rest else rest
+    label = name.replace("_", " ")
+    label = "HFC female" if label.lower() == "hfc female" else label.title()
+    cc = region.split("_")[-1].upper() if "_" in region else region.upper()
+    return f"{label} · {'UK' if cc == 'GB' else cc}"
+
+
+def list_piper_voices(models_dir: Path | None = None) -> list[dict[str, str]]:
+    """Installed Piper voices: every .onnx that has its .onnx.json beside it."""
+    d = Path(models_dir) if models_dir else PIPER_DIR
+    if not d.is_dir():
+        return []
+    return [
+        {"id": p.stem, "label": _voice_label(p.stem)}
+        for p in sorted(d.glob("*.onnx"))
+        if p.with_name(p.name + ".json").exists()
+    ]
+
+
 def ensure_kokoro_models(
     onnx_path: Path | None = None,
     voices_path: Path | None = None,
@@ -111,6 +135,7 @@ class QueuedOnnxTTS:
     """Non-blocking sentence queue + barge-in; subclasses implement synthesize()."""
 
     device = "cpu_onnx"
+    supports_voice_choice = False
 
     def __init__(
         self,
@@ -151,6 +176,10 @@ class QueuedOnnxTTS:
         self._last_chunk_hit_sentence_end = False
         self._ready = False
         self._pcm_cache = None
+        self._synth_gen = 0
+
+    def _release_preview(self, gen_id: int) -> None:
+        """Only PiperTTS has a throwaway preview voice."""
 
     def _start_worker(self):
         self._ready = True
@@ -159,7 +188,7 @@ class QueuedOnnxTTS:
         self._thread.start()
         self._warm_pcm_cache()
 
-    def _warm_pcm_cache(self) -> None:
+    def _warm_pcm_cache(self, voice: str | None = None) -> None:
         """Pre-render the fixed ack phrases in the background.
 
         Off the startup path on purpose: synthesising the bank costs a few
@@ -172,12 +201,17 @@ class QueuedOnnxTTS:
             from nova_hailo.backends.tts_cache import PcmCache
             from nova_hailo.edge_harness.tool_ack import all_ack_lines
 
-            voice = Path(self.model_path).stem if self.model_path else type(self).__name__
+            if voice is None:
+                voice = Path(self.model_path).stem if self.model_path else type(self).__name__
             self._pcm_cache = PcmCache(voice=voice)
-            self._pcm_cache.warm_async(self, all_ack_lines())
+            self._pcm_cache.warm_async(self._warm_target(), all_ack_lines())
         except Exception as exc:  # noqa: BLE001
             logger.warning("pcm cache unavailable: %s", exc)
             self._pcm_cache = None
+
+    def _warm_target(self):
+        """What the cache warm synthesises with (the live backend by default)."""
+        return self
 
     def _prewarm_playback(self) -> None:
         """Resolve the output device at startup, not mid-conversation.
@@ -211,6 +245,11 @@ class QueuedOnnxTTS:
         audio, sample_rate = self.synthesize(text)
         if audio is not None and len(audio) > 0:
             yield audio, sample_rate
+
+    @property
+    def ready(self) -> bool:
+        """Enabled and its worker is up: a preview can start."""
+        return bool(self.enabled and self._ready)
 
     @property
     def is_speaking(self) -> bool:
@@ -481,6 +520,7 @@ class QueuedOnnxTTS:
                 # takes 137ms to produce spends a quarter of the budget it
                 # saves. A miss returns None and falls through to live synthesis.
                 cached = self._pcm_cache.get(text) if self._pcm_cache else None
+                self._synth_gen = gen_id
                 stream = iter((cached,)) if cached else self.synthesize_stream(text)
                 for audio, sample_rate in stream:
                     if self._interrupt.is_set() or gen_id != self._active_gen:
@@ -515,6 +555,7 @@ class QueuedOnnxTTS:
                 print(f"[tts] error: {e}")
             finally:
                 self._speaking = False
+                self._release_preview(gen_id)
                 if done_ev:
                     done_ev.set()
                 with self._pending_lock:
@@ -523,8 +564,28 @@ class QueuedOnnxTTS:
                         self._idle.set()
 
 
+class _PiperSnapshot:
+    """Synthesises with the voice and speed captured when a cache was created.
+
+    A background warm can outlive a voice swap; going through the live backend
+    would store the new voice's audio under the old cache key.
+    """
+
+    def __init__(self, tts: PiperTTS, voice, speed: str):
+        self._tts = tts
+        self._voice = voice
+        self._scale = PIPER_SPEEDS[speed]
+        self.superseded = threading.Event()
+
+    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+        if self.superseded.is_set():
+            return np.zeros(0, dtype=np.float32), 22050
+        return self._tts._synthesize_with(self._voice, self._scale, text)
+
+
 class PiperTTS(QueuedOnnxTTS):
     device = "cpu_onnx_piper"
+    supports_voice_choice = True
 
     def __init__(
         self,
@@ -543,6 +604,13 @@ class PiperTTS(QueuedOnnxTTS):
             pcm_callback=pcm_callback,
         )
         self._voice = None
+        self._voice_id = ""
+        self._speed = "normal"
+        self._settings_lock = threading.Lock()
+        self._pending_voice: tuple[str, object] | None = None
+        self._pending_speed: str | None = None
+        self._snapshot: _PiperSnapshot | None = None
+        self._preview: tuple[int, object, float] | None = None
         if not enabled:
             return
         try:
@@ -553,11 +621,107 @@ class PiperTTS(QueuedOnnxTTS):
             logger.info("Loading Piper TTS: %s", onnx)
             print(f"Loading Piper TTS: {onnx}")
             self._voice = PiperVoice.load(str(onnx))
+            self._voice_id = onnx.stem
             self._start_worker()
         except Exception as e:
             logger.warning("TTS disabled: %s", e)
             print(f"TTS disabled: {e}")
             self.enabled = False
+
+    @property
+    def voice_id(self) -> str:
+        return self._voice_id
+
+    @property
+    def speed(self) -> str:
+        return self._speed
+
+    def set_voice(self, voice_id: str, models_dir: Path | None = None) -> None:
+        """Load a voice now (blocking); it becomes active at the next begin_turn()."""
+        if models_dir is None:
+            models_dir = Path(self.model_path).parent if self.model_path else PIPER_DIR
+        models_dir = Path(models_dir)
+        if voice_id not in {v["id"] for v in list_piper_voices(models_dir)}:
+            raise ValueError("unknown_voice")
+        if voice_id == self._voice_id:
+            with self._settings_lock:
+                self._pending_voice = None
+            return
+        from piper import PiperVoice
+
+        voice = PiperVoice.load(str(models_dir / f"{voice_id}.onnx"))
+        with self._settings_lock:
+            self._pending_voice = (voice_id, voice)
+
+    def set_speed(self, name: str) -> None:
+        if name not in PIPER_SPEEDS:
+            raise ValueError("unknown_speed")
+        with self._settings_lock:
+            self._pending_speed = name
+
+    @staticmethod
+    def _load_voice(path: str):
+        from piper import PiperVoice
+
+        return PiperVoice.load(path)
+
+    def preview(self, text: str, voice_id: str, speed: str) -> bool:
+        """Speak ``text`` in another voice/speed; False when a turn has taken the speaker.
+
+        The active and pending voice stay. A preview is not a turn: it leaves the
+        interrupt flag and the turn timings of a real turn alone.
+        """
+        if speed not in PIPER_SPEEDS:
+            raise ValueError("unknown_speed")
+        if not self.enabled or not self._ready:
+            return False
+        with self._gen_lock:
+            seen = self._gen_id
+        with self._settings_lock:
+            voice = self._voice if voice_id == self._voice_id else None
+        if voice is None:
+            models_dir = Path(self.model_path).parent if self.model_path else PIPER_DIR
+            voice = self._load_voice(str(models_dir / f"{voice_id}.onnx"))
+        with self._gen_lock:
+            # A turn that began while the voice loaded, or one still playing, wins.
+            if self._gen_id != seen or self.is_speaking:
+                return False
+            self._gen_id += 1
+            self._active_gen = gid = self._gen_id
+            self._interrupt.clear()          # nothing is playing, so a stale stop must not mute us
+            self._preview = (gid, voice, PIPER_SPEEDS[speed])
+            self.enqueue(text, gid)
+        return True
+
+    def _release_preview(self, gen_id: int) -> None:
+        pv = self._preview
+        if pv is not None and pv[0] == gen_id:
+            self._preview = None
+
+    def begin_turn(self) -> int:
+        gid = super().begin_turn()
+        self._preview = None
+        changed = False
+        with self._settings_lock:
+            pv, ps = self._pending_voice, self._pending_speed
+            self._pending_voice = self._pending_speed = None
+            if pv is not None and pv[0] != self._voice_id:
+                self._voice_id, self._voice = pv
+                changed = True
+            if ps is not None and ps != self._speed:
+                self._speed = ps
+                changed = True
+            key = self._voice_id if self._speed == "normal" else f"{self._voice_id}@{self._speed}"
+        if changed:
+            if self._snapshot is not None:
+                self._snapshot.superseded.set()
+            self._warm_pcm_cache(voice=key)
+        return gid
+
+    def _warm_target(self):
+        with self._settings_lock:
+            self._snapshot = _PiperSnapshot(self, self._voice, self._speed)
+        return self._snapshot
 
     @staticmethod
     def _chunk_to_float32(audio_chunk, sample_rate: int):
@@ -577,13 +741,34 @@ class PiperTTS(QueuedOnnxTTS):
         return arr, sample_rate
 
     def synthesize_stream(self, text: str):
+        pv = self._preview
+        if pv is not None and pv[0] == self._synth_gen:
+            yield from self._stream_with(pv[1], pv[2], text)
+            return
+        with self._settings_lock:
+            voice, scale = self._voice, PIPER_SPEEDS[self._speed]
+        yield from self._stream_with(voice, scale, text)
+
+    def _stream_with(self, voice, length_scale: float, text: str):
+        from piper import SynthesisConfig
+
         sample_rate = 22050
-        for audio_chunk in self._voice.synthesize(text):
+        syn_config = SynthesisConfig(length_scale=length_scale)
+        for audio_chunk in voice.synthesize(text, syn_config=syn_config):
             if self._interrupt.is_set():
                 break
             arr, sample_rate = self._chunk_to_float32(audio_chunk, sample_rate)
             if arr.size:
                 yield arr, sample_rate
+
+    def _synthesize_with(self, voice, length_scale: float, text: str) -> tuple[np.ndarray, int]:
+        chunks = []
+        sample_rate = 22050
+        for arr, sample_rate in self._stream_with(voice, length_scale, text):
+            chunks.append(arr)
+        if not chunks:
+            return np.zeros(0, dtype=np.float32), sample_rate
+        return np.concatenate(chunks), sample_rate
 
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
         chunks = []
