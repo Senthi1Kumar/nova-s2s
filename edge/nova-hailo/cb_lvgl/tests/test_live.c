@@ -267,6 +267,95 @@ static void llm_settings(void)
     CHECK(!strcmp(body_of(req, n), "{\"llm\":{\"provider\":\"openrouter\",\"failover\":true}}"));
 }
 
+static void tts_parse(void)
+{
+    const char *t = "{\"tts\":{\"voice\":\"en_US-amy-low\",\"speed\":\"normal\",\"voices\":["
+                    "{\"id\":\"en_US-amy-low\",\"label\":\"Amy · US\"},{\"id\":\"en_GB-alan-low\",\"label\":\"Alan · UK\"}]},"
+                    "\"avatar\":\"voice\"}";
+    live_tts_t v;
+    CHECK(live_tts_parse_json(t, strlen(t), &v));
+    CHECK(!strcmp(v.voice, "en_US-amy-low") && !strcmp(v.speed, "normal") && !strcmp(v.avatar, "voice"));
+    CHECK(v.n == 2 && !strcmp(v.v[1].id, "en_GB-alan-low") && !strcmp(v.v[1].label, "Alan · UK"));
+    CHECK(!live_tts_parse_json("{\"llm\":{}}", 10, &v));   /* an older pipeline */
+    char big[1024] = "{\"tts\":{\"voice\":\"a\",\"speed\":\"fast\",\"voices\":[";
+    for(int i = 0; i < 10; i++) {
+        char one[64];
+        snprintf(one, sizeof one, "%s{\"id\":\"v%d\",\"label\":\"V%d\"}", i ? "," : "", i, i);
+        strcat(big, one);
+    }
+    strcat(big, "]}}");
+    CHECK(live_tts_parse_json(big, strlen(big), &v) && v.n == LIVE_TTS_VOICES && !strcmp(v.v[7].id, "v7"));
+    CHECK(v.avatar[0] == '\0');
+}
+
+static void tts_request_bodies(void)
+{
+    char req[512];
+    size_t n = live_tts_request(req, sizeof req, "127.0.0.1", 8766, "en_US-amy-low", NULL, NULL);
+    CHECK(n > 0 && !strncmp(req, "POST /v1/settings HTTP/1.1\r\n", strlen("POST /v1/settings HTTP/1.1\r\n")));
+    CHECK(!strcmp(body_of(req, n), "{\"tts\":{\"voice\":\"en_US-amy-low\"}}"));
+    CHECK(strstr(req, "avatar") == NULL);
+    n = live_tts_request(req, sizeof req, "127.0.0.1", 8766, NULL, NULL, "gem");
+    CHECK(!strcmp(body_of(req, n), "{\"avatar\":\"gem\"}"));
+    n = live_tts_request(req, sizeof req, "127.0.0.1", 8766, "v", "fast", "voice");
+    CHECK(!strcmp(body_of(req, n), "{\"tts\":{\"voice\":\"v\",\"speed\":\"fast\"},\"avatar\":\"voice\"}"));
+    n = live_preview_request(req, sizeof req, "127.0.0.1", 8766, "v", "slow");
+    CHECK(!strncmp(req, "POST /v1/settings/preview HTTP/1.1\r\n", strlen("POST /v1/settings/preview HTTP/1.1\r\n")));
+    CHECK(!strcmp(body_of(req, n), "{\"voice\":\"v\",\"speed\":\"slow\"}"));
+}
+
+static int mood(const char *s) { return live_mood_event(s, strlen(s)); }
+
+static void mood_events_map(void)
+{
+    CHECK(mood("{\"type\":\"observe.session\",\"active\":true}") == NM_SESSION_START);
+    CHECK(mood("{\"type\":\"observe.session\",\"active\":false}") == -1);
+    CHECK(mood("{\"type\":\"input_audio_buffer.speech_started\"}") == NM_SPEECH_STARTED);
+    CHECK(mood("{\"type\":\"conversation.item.input_audio_transcription.completed\",\"transcript\":\"hi\"}") ==
+          NM_TRANSCRIPT_DONE);
+    CHECK(mood("{\"type\":\"nova.tool_status\",\"name\":\"x\",\"status\":\"error\"}") == NM_TOOL_ERROR);
+    CHECK(mood("{\"type\":\"nova.tool_status\",\"name\":\"x\",\"status\":\"failed\"}") == NM_TOOL_ERROR);
+    CHECK(mood("{\"type\":\"nova.tool_status\",\"name\":\"x\",\"status\":\"completed\"}") == -1);
+    CHECK(mood("{\"type\":\"nova.agent_trace\",\"error\":\"boom\"}") == NM_TOOL_ERROR);
+    CHECK(mood("{\"type\":\"nova.agent_trace\",\"error\":\"\"}") == -1);
+    CHECK(mood("{\"type\":\"response.audio_transcript.delta\",\"delta\":\"a\"}") == NM_REPLY_DELTA);
+    CHECK(mood("{\"type\":\"output_audio.duck\",\"gain\":0.3}") == NM_DUCK);
+    CHECK(mood("{\"type\":\"output_audio.duck\",\"gain\":1.0}") == NM_UNDUCK);
+    CHECK(mood("{\"type\":\"playback.interrupted\",\"reason\":\"barge_in\"}") == NM_INTERRUPTED);
+    CHECK(mood("{\"type\":\"response.done\"}") == NM_RESPONSE_DONE);
+    CHECK(mood("{\"type\":\"nova.mic\",\"muted\":true}") == -1);
+    CHECK(mood("not json") == -1);
+    CHECK(mood("{\"t_ms\":5,\"frame\":{\"type\":\"response.done\"}}") == NM_RESPONSE_DONE);   /* replay line */
+}
+
+static char s_guided[160];
+static int s_guided_n;
+static void on_guided(const char *text)
+{
+    snprintf(s_guided, sizeof s_guided, "%s", text);
+    s_guided_n++;
+}
+
+static void guidance_frames(void)
+{
+    const char *delta = "{\"type\":\"response.audio_transcript.delta\",\"delta\":\"Continue for 1 kilometer.\","
+                        "\"generation_id\":5,\"nav_guidance\":true}";
+    const char *done = "{\"type\":\"response.audio_transcript.done\",\"transcript\":\"Continue for 1 kilometer.\","
+                       "\"generation_id\":5,\"nav_guidance\":true}";
+    CHECK(mood(delta) == -1);   /* a route prompt is not Nova answering */
+    CHECK(mood("{\"type\":\"response.audio_transcript.delta\",\"delta\":\"a\",\"nav_guidance\":false}") == NM_REPLY_DELTA);
+    live_set_guidance_cb(on_guided);
+    feed(delta);
+    CHECK(s_guided_n == 0);   /* the finished line is what the dock shows */
+    feed(done);
+    CHECK(s_guided_n == 1 && strcmp(s_guided, "Continue for 1 kilometer.") == 0);
+    feed("{\"type\":\"response.audio_transcript.done\",\"transcript\":\"It is sunny.\",\"generation_id\":6}");
+    CHECK(s_guided_n == 1);   /* an answer is not guidance */
+    CHECK(mood("{\"type\":\"response.done\",\"response\":{\"metadata\":{\"nav_guidance\":true}}}") == -1);
+    CHECK(mood("{\"type\":\"response.done\",\"response\":{\"metadata\":{\"nav_guidance\":false}}}") == NM_RESPONSE_DONE);
+    live_set_guidance_cb(NULL);
+}
+
 int main(void)
 {
     lv_init();
@@ -283,6 +372,10 @@ int main(void)
     position_label();
     timezone_follows_car();
     llm_settings();
+    tts_parse();
+    tts_request_bodies();
+    mood_events_map();
+    guidance_frames();
     if(fails) return 1;
     printf("ok\n");
     return 0;

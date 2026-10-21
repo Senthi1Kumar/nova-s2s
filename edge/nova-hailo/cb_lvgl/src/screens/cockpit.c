@@ -65,12 +65,6 @@ static void socline_obs(lv_observer_t *o, lv_subject_t *s)
                           (int)lv_subject_get_int(m->range_km));
 }
 
-static void llm_click(lv_event_t *e)
-{
-    LV_UNUSED(e);
-    settings_sheet_open();
-}
-
 static void status_strip(lv_obj_t *panel, int32_t w, int32_t h)
 {
     lv_obj_t *row = ui_row(panel, 22);
@@ -82,11 +76,6 @@ static void status_strip(lv_obj_t *panel, int32_t w, int32_t h)
     s_ck.place = ui_label(row, "Palo Alto", CB_F_BODY, CB_TEXT_MID);
     ui_spacer(row);
     s_ck.link_chip = ui_chip(row, "Simulated cabin", CB_YELLOW, true);
-    lv_obj_t *llm = ui_chip(row, "Model \xC2\xB7 tap to choose", CB_VIOLET, false);
-    lv_obj_set_clickable(llm, true);
-    lv_obj_set_ext_click_area(llm, 8);
-    lv_obj_add_event_cb(llm, llm_click, LV_EVENT_CLICKED, NULL);
-    settings_sheet_init(llm);
     ui_label(row, "Nova on-device \xC2\xB7 Pi 5 + Hailo", CB_F_LABEL, CB_TEXT_LO);
     ui_spacer(row);
     ui_label(row, "5G", CB_F_LABEL, CB_TEXT_MID);
@@ -561,7 +550,7 @@ static void right_side(lv_obj_t *panel, int32_t x, int32_t y, int32_t w, int32_t
     lv_obj_t *nova = page_col(t2, 34);
     lv_obj_set_flex_flow(nova, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(nova, 26, 0);
-    lv_obj_t *c0 = ui_col(nova, 16), *c1 = ui_col(nova, 16);
+    lv_obj_t *c0 = ui_col(nova, 16), *c1 = ui_col(nova, 12);
     lv_obj_set_width(c0, 0);
     lv_obj_set_width(c1, 0);
     lv_obj_set_flex_grow(c0, 3);
@@ -569,7 +558,7 @@ static void right_side(lv_obj_t *panel, int32_t x, int32_t y, int32_t w, int32_t
     section(c0, "NOVA \xC2\xB7 ANSWERS");
     s_ck.cards = ui_col(c0, 12);
     nova_cols[0] = c0;
-    nova_cols[1] = c1;
+    settings_sheet_build(c1);
 
     lv_obj_t *pager = glass(frame, LV_RADIUS_CIRCLE);
     lv_obj_set_size(pager, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -654,6 +643,8 @@ static void play_click(lv_event_t *e)
     cb_model_set_int(p, !lv_subject_get_int(p));
 }
 
+static int32_t s_media_x1;   /* the dock's media widget, left edge */
+
 static void dock(lv_obj_t *panel, int32_t w, int32_t h, int32_t dock_h)
 {
     int32_t y = h - dock_h;
@@ -694,6 +685,10 @@ static void dock(lv_obj_t *panel, int32_t w, int32_t h, int32_t dock_h)
     lv_subject_add_observer_obj(cb_model()->media_playing, play_obs, pb, NULL);
     lv_obj_add_event_cb(pb, play_click, LV_EVENT_CLICKED, NULL);
     temp_control(right, false);
+    lv_obj_update_layout(panel);
+    lv_area_t ma;
+    lv_obj_get_coords(mini, &ma);
+    s_media_x1 = ma.x1;
 }
 
 /* ---------- screen ---------- */
@@ -710,6 +705,7 @@ cockpit_t *cockpit_create(lv_obj_t *panel, const cockpit_hooks_t *hooks)
     status_strip(panel, w, strip_h);
 
     lv_obj_t *left = glass(panel, 26);
+    s_ck.car_col = left;
     lv_obj_set_size(left, LEFT_W, body_h);
     lv_obj_set_pos(left, SIDE, top);
     lv_obj_set_style_pad_all(left, tall ? 24 : 16, 0);
@@ -723,13 +719,21 @@ cockpit_t *cockpit_create(lv_obj_t *panel, const cockpit_hooks_t *hooks)
     lv_obj_t *climate = ui_col(left, 0), *tiles = ui_col(left, 0);
     lv_obj_set_height(tiles, tall ? 420 : 340);   /* 3 x 4 tiles */
 
-    lv_obj_t *media_parent, *nova_cols[2];
+    lv_obj_t *media_parent, *nova_cols[1];
     int32_t rx = SIDE + LEFT_W + GAP;
     right_side(panel, rx, top, w - rx - SIDE, body_h, &media_parent, nova_cols);
     comfort_build_parts(climate, tiles, media_parent);
-    connected_build_parts(nova_cols[0], nova_cols[1], nova_cols[1]);
+    connected_build_parts(nova_cols[0], nova_cols[0], nova_cols[0]);
 
     dock(panel, w, h, dock_h);
+    s_ck.nova_max_h = h - top - 16;   /* the open dock bar stops at the map's top edge */
+    lv_area_t mapa = { rx, 0, rx, 0 };
+    if(s_ck.map) lv_obj_get_coords(s_ck.map, &mapa);
+    s_ck.nova_x1 = mapa.x1 + 12;
+    s_ck.nova_x2 = s_media_x1 - 12;
+    s_ck.nova_dock = ui_plain(panel);   /* after everything else: above the map, never in the way of a tap */
+    lv_obj_set_size(s_ck.nova_dock, s_ck.nova_x2 - s_ck.nova_x1, h - top);
+    lv_obj_set_pos(s_ck.nova_dock, s_ck.nova_x1, top);
     pager_sync(0);
     return &s_ck;
 }
@@ -749,6 +753,7 @@ cockpit_t *cockpit_create_v2(lv_obj_t *panel, const cockpit_hooks_t *hooks)
        column, never off it, so a tile's glow stays in view while Nova talks. */
     int32_t gap = tall ? 16 : 10;
     lv_obj_t *left = ui_col(panel, gap);
+    s_ck.car_col = left;
     lv_obj_set_size(left, LEFT_W, body_h);
     lv_obj_set_pos(left, SIDE, top);
     lv_obj_set_overflow_visible(left, true);
@@ -765,12 +770,12 @@ cockpit_t *cockpit_create_v2(lv_obj_t *panel, const cockpit_hooks_t *hooks)
     lv_obj_t *climate = ui_col(panel, 0);         /* the climate card: the dock's -/+ already say it all */
     lv_obj_set_hidden(climate, true);
 
-    lv_obj_t *media_parent, *nova_cols[2];
+    lv_obj_t *media_parent, *nova_cols[1];
     int32_t rx = SIDE + LEFT_W + GAP;
     right_side(panel, rx, top, w - rx - SIDE, body_h, &media_parent, nova_cols);
     comfort_set_flash_style(COMFORT_FLASH_GRADIENT);
     comfort_build_parts(climate, tiles, media_parent);
-    connected_build_parts(nova_cols[0], nova_cols[1], nova_cols[1]);
+    connected_build_parts(nova_cols[0], nova_cols[0], nova_cols[0]);
 
     lv_obj_update_layout(left);
     s_ck.nova_max_h = body_h - lv_obj_get_height(tools) - gap;

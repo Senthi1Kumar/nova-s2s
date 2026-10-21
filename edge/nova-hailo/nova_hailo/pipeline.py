@@ -431,6 +431,8 @@ class NovaPipeline:
             local_play=local_play,
             pcm_callback=self._pcm_sink,
         )
+        self.avatar = str(self._hmi_settings.get("avatar") or "voice")
+        self._apply_saved_tts()
 
         enabled = cfg.get("tools", "enabled", default=None)
         self.tools = build_default_tools(enabled if self.tools_enabled else [])
@@ -721,6 +723,34 @@ class NovaPipeline:
 
         gc.collect()
 
+    def _apply_saved_tts(self) -> None:
+        """Re-apply the voice and speed a display chose; a voice no longer installed keeps the config one."""
+        if not getattr(self.tts, "supports_voice_choice", False) or not self.tts.enabled:
+            return
+        voice = str(self._hmi_settings.get("tts_voice") or "")
+        speed = str(self._hmi_settings.get("tts_speed") or "normal")
+        try:
+            if voice and voice != self.tts.voice_id:
+                self.tts.set_voice(voice)
+            self.tts.set_speed(speed)
+        except Exception as exc:  # noqa: BLE001 -- unknown name, or a voice that fails to load
+            logger.warning("saved TTS setting not applied (%s: voice=%r speed=%r)", exc, voice, speed)
+
+    def apply_tts_settings(self, voice: str | None = None, speed: str | None = None) -> None:
+        """Change the TTS voice and/or speed (live at the next turn) and remember it."""
+        if voice is not None:
+            self.tts.set_voice(voice)
+        if speed is not None:
+            self.tts.set_speed(speed)
+        changed = {k: v for k, v in (("tts_voice", voice), ("tts_speed", speed)) if v is not None}
+        self._hmi_settings.update(changed)
+        save_settings(self._hmi_settings)
+
+    def set_avatar(self, value: str) -> None:
+        self.avatar = value
+        self._hmi_settings["avatar"] = value
+        save_settings(self._hmi_settings)
+
     def llm_settings_snapshot(self) -> dict:
         cat = llm_catalog(self.cloud_provider)
         # Any cloud provider reports as "openrouter" here: the HMI toggle only
@@ -825,6 +855,7 @@ class NovaPipeline:
                     self.cfg.get("pipeline", "native_context", default=False)
                 )
             self._hmi_settings = {
+                **getattr(self, "_hmi_settings", {}),
                 "mode": want_mode,
                 "local_hef": self._local_hef_alias,
                 "or_model": self._or_model,

@@ -21,7 +21,10 @@ typedef struct {
     lv_obj_t *place;       /* status strip: where the car is (reverse-geocoded place, else coordinates) */
     lv_obj_t *toast;       /* transient answer card over the map */
     lv_obj_t *nova_slot;   /* v2: the Nova panel's place, top of the left column */
-    int32_t nova_max_h;    /* v2: room for the open panel above the tiles */
+    lv_obj_t *car_col;     /* the left column (Car / tiles) */
+    lv_obj_t *nova_dock;   /* B: transparent, click-through room the dock bar grows in, over the map's lower edge */
+    int32_t nova_x1, nova_x2;   /* B: the dock bar's horizontal range: the map's left + 12 to the media widget's left - 12 */
+    int32_t nova_max_h;    /* room for the open Nova panel: above the tiles (v2), up to the map top (B) */
 } cockpit_t;
 
 cockpit_t *cockpit_create(lv_obj_t *panel, const cockpit_hooks_t *hooks);

@@ -50,6 +50,29 @@ bool live_llm_apply(const char *provider, const char *model, bool failover, live
 void live_on_llm(void (*cb)(const live_llm_t *llm));              /* nova.settings frames */
 bool live_linked(void);                                           /* a pipeline is reachable over --live */
 
+/* Nova's voice and avatar, as GET/POST /v1/settings and the nova.settings frame carry them. */
+#define LIVE_TTS_VOICES 8
+typedef struct {
+    char voice[48], speed[8], avatar[12];
+    int n;
+    struct { char id[48], label[32]; } v[LIVE_TTS_VOICES];
+} live_tts_t;
+bool live_tts_parse_json(const char *json, size_t len, live_tts_t *out);   /* {"tts":{...},"avatar":".."} */
+/* NULL = leave that field out of the body */
+size_t live_tts_request(char *out, size_t cap, const char *host, int port, const char *voice, const char *speed,
+                        const char *avatar);
+size_t live_preview_request(char *out, size_t cap, const char *host, int port, const char *voice, const char *speed);
+/* These block (the pipeline may load a voice first): call them off the UI thread. *now gets the settings the
+   pipeline holds after the call; err the first refusal. */
+bool live_tts_apply(const char *voice, const char *speed, const char *avatar, live_tts_t *now, char *err, size_t err_cap);
+bool live_tts_preview(const char *voice, const char *speed, char *err, size_t err_cap);
+bool live_tts_fetch(live_tts_t *out, char *err, size_t err_cap);
+void live_on_tts(void (*cb)(const live_tts_t *tts));                 /* nova.settings frames */
+/* The avatar mood event (an nm_event_t) a frame stands for, or -1. */
+int live_mood_event(const char *json, size_t len);
+/* Called with the finished text of each spoken route prompt (nav_guidance frames), besides the dock. */
+void live_set_guidance_cb(void (*cb)(const char *text));
+
 /* Mic and turn control (POST /v1/session/{mute,arm,cancel}): the pipeline owns the mic, the cockpit only asks, and
    the nova.mic / nova.fsm frames that follow change the picture. */
 typedef enum { LIVE_SESSION_MUTE, LIVE_SESSION_ARM, LIVE_SESSION_CANCEL } live_session_op_t;

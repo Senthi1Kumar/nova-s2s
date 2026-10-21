@@ -32,6 +32,8 @@ _SESSION_TYPES = frozenset({
     "response.audio_transcript.delta",
     "response.audio_transcript.done",
     "response.done",
+    "output_audio.duck",
+    "playback.interrupted",
 })
 
 

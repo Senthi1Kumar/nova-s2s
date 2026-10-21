@@ -242,6 +242,13 @@ def _start_gps(pipeline: NovaPipeline):
     return gps
 
 
+def startup_settings_event(pipeline) -> dict:
+    """The nova.settings frame a display joining late is replayed: llm, tts and avatar."""
+    from nova_hailo.web.settings_ops import all_settings
+
+    return {"type": "nova.settings", **all_settings(pipeline)}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pipeline
@@ -277,9 +284,7 @@ async def lifespan(app: FastAPI):
     _power.start()
     # Before either door: an online caller's job mirrors to /v1/observe from its own loop.
     OBSERVERS.bind(asyncio.get_running_loop())
-    from nova_hailo.web.settings_ops import llm_settings
-
-    OBSERVERS.publish_session_event({"type": "nova.settings", "llm": llm_settings(_pipeline)})
+    OBSERVERS.publish_session_event(startup_settings_event(_pipeline))
     await _start_livekit_door(_pipeline)
     unsub_vehicle = _start_vehicle_feed(_pipeline)
     drive_task = _start_sim_drive(_pipeline)
@@ -587,21 +592,22 @@ async def session_cancel():
 
 @app.get("/v1/settings")
 async def settings_get():
-    """The LLM choice for displays: provider, model, the providers to pick from, failover."""
-    from nova_hailo.web.settings_ops import llm_settings
+    """What displays show and change: the LLM, the TTS voice and speed, the avatar."""
+    from nova_hailo.web.settings_ops import all_settings
 
     if _pipeline is None:
         return {"ok": False, "error": "starting"}
-    return {"llm": llm_settings(_pipeline)}
+    return all_settings(_pipeline)
 
 
 @app.post("/v1/settings")
 async def settings_set(request: Request):
-    """``{"llm": {"provider", "model"?}}`` → ``{ok, settings}``; observers get ``nova.settings``.
+    """Any of ``{"llm": {...}, "tts": {"voice"?, "speed"?}, "avatar": str}`` → ``{ok, settings, errors}``.
 
-    Always 200, like /v1/vehicle/set; a refused choice says why and leaves the LLM as it was.
+    Each part is validated on its own, so a refused one leaves the others applied.
+    Always 200, like /v1/vehicle/set; observers get ``nova.settings`` when anything applied.
     """
-    from nova_hailo.web.settings_ops import apply_llm_choice, llm_settings
+    from nova_hailo.web.settings_ops import all_settings, apply_settings
 
     if _pipeline is None:
         return {"ok": False, "error": "starting"}
@@ -609,12 +615,30 @@ async def settings_set(request: Request):
         body = await request.json()
     except Exception:  # noqa: BLE001
         return {"ok": False, "error": "bad_json"}
-    ok, out = await apply_llm_choice(_pipeline, body)
-    if not ok:
-        return {"ok": False, "error": out, "settings": {"llm": llm_settings(_pipeline)}}
-    settings = {"llm": out}
-    OBSERVERS.publish_session_event({"type": "nova.settings", **settings})
-    return {"ok": True, "settings": settings}
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "bad_json"}
+    applied, errors = await apply_settings(_pipeline, body)
+    settings = all_settings(_pipeline)
+    if applied:
+        OBSERVERS.publish_session_event({"type": "nova.settings", **settings})
+    out = {"ok": not errors, "settings": settings, "errors": errors}
+    if errors:
+        out["error"] = next(iter(errors.values()))
+    return out
+
+
+@app.post("/v1/settings/preview")
+async def settings_preview(request: Request):
+    """``{"voice"?, "speed"?}`` → speak a sample line that way; nothing is saved or changed."""
+    from nova_hailo.web.settings_ops import preview_tts
+
+    if _pipeline is None:
+        return {"ok": False, "error": "starting"}
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "error": "bad_json"}
+    return await preview_tts(_pipeline, body)
 
 
 @app.websocket("/v1/observe")

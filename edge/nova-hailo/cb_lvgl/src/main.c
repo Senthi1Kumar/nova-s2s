@@ -4,9 +4,10 @@
 #include "cb_snapshot.h"
 #include "cb_theme.h"
 #include "map/map_view.h"
+#include "nova/avatar.h"
+#include "nova/nova_panel.h"
 #include "screens/cockpit.h"
 #include "screens/gate.h"
-#include "widgets/settings_sheet.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,18 +22,20 @@ typedef struct {
     const char *live_url, *replay;
     double replay_speed;
     int page;
-    bool map_day, settings;
+    bool map_day, settings, avatar_cycle;
+    int dock_blur;   /* --dock-blur [radius]: GPU builds blur the dock by default; this changes it, 0 = off. -1 = not given */
+    const char *avatar;   /* head[:state[:mood]] */
 } cb_args_t;
 
 static void usage(const char *argv0)
 {
     fprintf(stderr, "usage: %s [--fullscreen] [--size WxH] [--quit-after SEC] [--perf] [--gate] "
-                    "[--no-demo] [--reduce-motion] [--layout b|d|v2] [--live [ws://host:port/v1/observe]] [--replay file.jsonl [--replay-speed X]] [--page 0|1|2] [--map-day] [--settings] [--snapshot out.ppm [--snapshot-after MS]]\n", argv0);
+                    "[--no-demo] [--reduce-motion] [--layout b|d|v2] [--live [ws://host:port/v1/observe]] [--replay file.jsonl [--replay-speed X]] [--page 0|1|2] [--map-day] [--dock-blur [radius]|0=off] [--settings] [--avatar head[:state[:mood]]] [--avatar-cycle] [--snapshot out.ppm [--snapshot-after MS]]\n", argv0);
 }
 
 static bool parse_args(int argc, char **argv, cb_args_t *a)
 {
-    *a = (cb_args_t){ .disp = { 0, 0, false }, .demo = true, .snapshot_after_ms = 1500, .layout = CB_LAYOUT_B };
+    *a = (cb_args_t){ .disp = { 0, 0, false }, .demo = true, .snapshot_after_ms = 1500, .layout = CB_LAYOUT_B, .dock_blur = -1 };
     for(int i = 1; i < argc; i++) {
         const char *s = argv[i];
         if(!strcmp(s, "--fullscreen")) a->disp.fullscreen = true;
@@ -48,7 +51,13 @@ static bool parse_args(int argc, char **argv, cb_args_t *a)
         else if(!strcmp(s, "--replay") && i + 1 < argc) a->replay = argv[++i];
         else if(!strcmp(s, "--page") && i + 1 < argc) a->page = atoi(argv[++i]);
         else if(!strcmp(s, "--map-day")) a->map_day = true;
+        else if(!strcmp(s, "--dock-blur")) {
+            a->dock_blur = i + 1 < argc && argv[i + 1][0] != '-' ? atoi(argv[++i]) : 22;
+            if(a->dock_blur < 0) a->dock_blur = 0;
+        }
         else if(!strcmp(s, "--settings")) a->settings = true;
+        else if(!strcmp(s, "--avatar") && i + 1 < argc) a->avatar = argv[++i];
+        else if(!strcmp(s, "--avatar-cycle")) a->avatar_cycle = true;
         else if(!strcmp(s, "--replay-speed") && i + 1 < argc) a->replay_speed = strtod(argv[++i], NULL);
         else if(!strcmp(s, "--layout") && i + 1 < argc) {
             const char *l = argv[++i];
@@ -75,13 +84,75 @@ static bool s_quit;
 static void settings_cb(lv_timer_t *t)
 {
     LV_UNUSED(t);
-    settings_sheet_open();
+    cockpit_show_page(2);
 }
 
 static void map_day_cb(lv_timer_t *t)
 {
     LV_UNUSED(t);
     if(cockpit()->map) map_view_set_night(cockpit()->map, false);
+}
+
+/* --avatar holds one pose on every avatar (re-asserted, so a greeting does not run out); --avatar-cycle steps
+   every state x mood every 1.5 s. */
+static const char *const k_state_name[AV_STATE_COUNT] = { "idle", "greeting", "listening", "thinking", "speaking", "muted" };
+static const char *const k_mood_name[AV_MOOD_COUNT] = { "calm", "happy", "curious", "concerned", "surprised", "sleepy" };
+static struct { av_state_t state; av_mood_t mood; } s_pose;
+static int s_cycle;
+
+static int name_index(const char *s, size_t n, const char *const *names, int count)
+{
+    for(int i = 0; i < count; i++)
+        if(strlen(names[i]) == n && !strncmp(s, names[i], n)) return i;
+    return -1;
+}
+
+static bool parse_avatar(const char *spec)
+{
+    const char *colon = strchr(spec, ':');
+    char head[16];
+    size_t n = colon ? (size_t)(colon - spec) : strlen(spec);
+    if(n >= sizeof head) return false;
+    memcpy(head, spec, n);
+    head[n] = 0;
+    av_head_t h = av_head_parse(head);
+    if(h >= AV_HEAD_COUNT) return false;
+    cb_app_set_avatar(head, NULL);
+    s_pose.state = AV_ST_IDLE;
+    s_pose.mood = AV_CALM;
+    if(!colon) return true;
+    const char *st = colon + 1, *colon2 = strchr(st, ':');
+    int si = name_index(st, colon2 ? (size_t)(colon2 - st) : strlen(st), k_state_name, AV_STATE_COUNT);
+    if(si < 0) return false;
+    s_pose.state = (av_state_t)si;
+    if(colon2) {
+        int mi = name_index(colon2 + 1, strlen(colon2 + 1), k_mood_name, AV_MOOD_COUNT);
+        if(mi < 0) return false;
+        s_pose.mood = (av_mood_t)mi;
+    }
+    return true;
+}
+
+static void pose_one(lv_obj_t *av, void *ud)
+{
+    LV_UNUSED(ud);
+    avatar_set_mood(av, s_pose.mood);
+    avatar_set_av_state(av, s_pose.state);
+}
+
+static void pose_cb(lv_timer_t *t)
+{
+    LV_UNUSED(t);
+    avatar_for_each(pose_one, NULL);
+}
+
+static void cycle_cb(lv_timer_t *t)
+{
+    LV_UNUSED(t);
+    s_pose.state = (av_state_t)((s_cycle / AV_MOOD_COUNT) % AV_STATE_COUNT);
+    s_pose.mood = (av_mood_t)(s_cycle % AV_MOOD_COUNT);
+    s_cycle = (s_cycle + 1) % (AV_STATE_COUNT * AV_MOOD_COUNT);
+    avatar_for_each(pose_one, NULL);
 }
 
 /* Keyboard: Space wake · M mute · T tuck · O orb tap · E end · P pause demo · 1/2/3 pages · Esc quit. */
@@ -143,10 +214,23 @@ int main(int argc, char **argv)
         gate_screen_create(cb_display_panel());
     }
     else {
+        if(args.dock_blur >= 0) nova_panel_set_dock_blur(args.dock_blur);
         cb_app_build(cb_display_panel(), &(cb_app_cfg_t){ .demo = args.demo, .reduce_motion = args.reduce_motion, .layout = args.layout,
                                                               .live_url = args.live_url, .replay = args.replay,
                                                               .replay_speed = args.replay_speed });
         add_key_sink(cb_display_panel());
+        if(args.avatar) {
+            if(!parse_avatar(args.avatar)) {
+                usage(argv[0]);
+                return 2;
+            }
+            pose_cb(NULL);
+            lv_timer_create(pose_cb, 400, NULL);
+        }
+        if(args.avatar_cycle) {
+            cycle_cb(NULL);
+            lv_timer_create(cycle_cb, 1500, NULL);
+        }
         if(args.page > 0 && cockpit()->dock_mid) cockpit_show_page(args.page > 2 ? 2 : args.page);
         if(args.map_day) lv_timer_set_repeat_count(lv_timer_create(map_day_cb, 3000, NULL), 1);
         if(args.settings) lv_timer_set_repeat_count(lv_timer_create(settings_cb, 2500, NULL), 1);

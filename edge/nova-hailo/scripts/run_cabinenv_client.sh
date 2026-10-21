@@ -18,15 +18,18 @@ fi
 
 UI_PID=""
 if [[ "${NOVA_CABINENV_UI:-1}" != "0" ]]; then
-  UI_CMD="${NOVA_CABINENV_UI_CMD:-$ROOT/cb_lvgl/scripts/run_on_pi.sh sw --fullscreen --live}"
-  if [[ -n "${NOVA_CABINENV_UI_CMD:-}" || -x "$ROOT/cb_lvgl/build-sw/cb_lvgl" ]]; then
+  # setup_pi.sh builds the sw renderer only; a gpu build is preferred when present.
+  UI_R=sw
+  [[ -x "$ROOT/cb_lvgl/build-gpu/cb_lvgl" ]] && UI_R=gpu
+  UI_CMD="${NOVA_CABINENV_UI_CMD:-$ROOT/cb_lvgl/scripts/run_on_pi.sh $UI_R --fullscreen --live}"
+  if [[ -n "${NOVA_CABINENV_UI_CMD:-}" || -x "$ROOT/cb_lvgl/build-$UI_R/cb_lvgl" ]]; then
     echo "CabinEnv display: $UI_CMD (log /tmp/cb_lvgl.log)"
     # The display has no audio and only observes, so it runs beside the voice client.
     $UI_CMD >/tmp/cb_lvgl.log 2>&1 &
     UI_PID=$!
     trap '[[ -n "$UI_PID" ]] && kill "$UI_PID" 2>/dev/null || true' EXIT
   else
-    echo "CabinEnv display: cb_lvgl/build-sw/cb_lvgl not built; voice only"
+    echo "CabinEnv display: cb_lvgl is not built (build-gpu or build-sw); voice only"
   fi
 fi
 

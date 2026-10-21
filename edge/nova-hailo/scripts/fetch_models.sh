@@ -58,16 +58,23 @@ snapshot_download(
     local_dir=str(root / "models" / "Inflect-Nano-v2-ONNX"),
 )
 
-print("TTS  rhasspy/piper-voices amy-low → models/piper/")
-for name in ("en_US-amy-low.onnx", "en_US-amy-low.onnx.json"):
-    hf_hub_download(
-        "rhasspy/piper-voices",
-        f"en/en_US/amy/low/{name}",
-        local_dir=str(root / "models" / "piper"),
-    )
-    src = root / "models" / "piper" / "en" / "en_US" / "amy" / "low" / name
-    if src.is_file():
-        (root / "models" / "piper" / name).write_bytes(src.read_bytes())
+print("TTS  rhasspy/piper-voices → models/piper/")
+for voice_dir, stem in (
+    ("en/en_US/amy/low", "en_US-amy-low"),
+    ("en/en_US/lessac/medium", "en_US-lessac-medium"),
+    ("en/en_US/ryan/high", "en_US-ryan-high"),
+    ("en/en_GB/alba/medium", "en_GB-alba-medium"),
+    ("en/en_US/hfc_female/medium", "en_US-hfc_female-medium"),
+):
+    for name in (f"{stem}.onnx", f"{stem}.onnx.json"):
+        hf_hub_download(
+            "rhasspy/piper-voices",
+            f"{voice_dir}/{name}",
+            local_dir=str(root / "models" / "piper"),
+        )
+        src = root / "models" / "piper" / voice_dir / name
+        if src.is_file():
+            (root / "models" / "piper" / name).write_bytes(src.read_bytes())
 
 print("weights ok")
 PY

@@ -166,6 +166,10 @@ def load_settings(path: Path | None = None) -> dict[str, Any]:
         "cloud_provider": "",
         # None = llm.failover from config; a bool once a display switches it.
         "failover": None,
+        # "" = the voice from config; "normal" speed; the on-screen avatar style.
+        "tts_voice": "",
+        "tts_speed": "normal",
+        "avatar": "voice",
     }
     try:
         if p.is_file():
@@ -182,6 +186,9 @@ def load_settings(path: Path | None = None) -> dict[str, Any]:
     data["cloud_provider"] = str(data.get("cloud_provider") or "").strip().lower()
     if not isinstance(data.get("failover"), bool):
         data["failover"] = None
+    data["tts_voice"] = str(data.get("tts_voice") or "").strip()
+    data["tts_speed"] = str(data.get("tts_speed") or "normal").strip().lower()
+    data["avatar"] = str(data.get("avatar") or "voice").strip().lower()
     return data
 
 
@@ -191,7 +198,7 @@ def save_settings(data: dict[str, Any], path: Path | None = None) -> Path:
     cur = load_settings(p)
     cur.update(
         {k: data[k] for k in ("mode", "local_hef", "or_model", "connectors", "cloud_provider",
-                              "failover") if k in data}
+                              "failover", "tts_voice", "tts_speed", "avatar") if k in data}
     )
     mode = str(cur.get("mode") or "local").strip().lower()
     cur["mode"] = "openrouter" if mode in {"openrouter", "or", "cloud"} else "local"
