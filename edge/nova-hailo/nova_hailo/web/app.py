@@ -200,9 +200,6 @@ def _start_vehicle_feed(pipeline: NovaPipeline):
     return cabin.store.subscribe(on_changes)
 
 
-_sim_feed: list = [None]
-
-
 def _start_sim_drive(pipeline: NovaPipeline):
     """Simulated drive + nova.nav (config cabingym.sim_drive); None when off."""
     from nova_hailo.cabingym.drive import build_nav_feed, drive_loop
@@ -214,7 +211,6 @@ def _start_sim_drive(pipeline: NovaPipeline):
     pipeline.nav_feed = feed
     if feed is None:
         return None
-    _sim_feed[0] = feed
     cabin.store.subscribe(feed.on_changes)
     feed.start()
     feed.dirty = True  # publish the first nova.nav even when nothing is navigating
@@ -225,16 +221,15 @@ def _start_sim_drive(pipeline: NovaPipeline):
 
 
 def _start_gps(pipeline: NovaPipeline):
-    """Real GPS over NMEA serial (config cabingym.gps); None when off."""
+    """Real GPS through gpsd or a USB serial receiver, found without config; None when absent."""
     from nova_hailo.cabingym.adapters.gps_nmea import build_gps_feeder
 
     cabin = _gateway_cabin(pipeline)
     if cabin is None:
         return None
-    feed = _sim_feed[0]
-    gps = build_gps_feeder(pipeline.cfg.get, cabin,
-                           simulating=(lambda: feed.drive.moving) if feed else (lambda: False))
+    gps = build_gps_feeder(pipeline.cfg.get, cabin)
     if gps is None:
+        print("CabinEnv GPS: no receiver found; the simulated drive sets the position", flush=True)
         return None
     gps.start()
     print(f"CabinEnv GPS: {gps.device} at {gps.baud} baud, place lookup "

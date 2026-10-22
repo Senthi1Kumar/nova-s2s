@@ -94,6 +94,7 @@ static const char *human_err(const char *code)
         { "unknown_speed", "Unknown speed" }, { "speaking", "Nova is speaking \xE2\x80\x94 try again" },
         { "bad_tts", "Couldn't read that choice" }, { "unknown_avatar", "Unknown avatar" },
         { "bad_json", "Couldn't read that choice" }, { "not_ready", "Voice isn't ready yet" },
+        { "voice_too_slow", "Too slow on this Pi at that speed" },
     };
     for(size_t i = 0; i < sizeof k / sizeof k[0]; i++)
         if(!strcmp(code, k[i].code)) return k[i].text;

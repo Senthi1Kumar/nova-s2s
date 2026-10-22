@@ -729,17 +729,19 @@ class NovaPipeline:
             return
         voice = str(self._hmi_settings.get("tts_voice") or "")
         speed = str(self._hmi_settings.get("tts_speed") or "normal")
-        try:
-            if voice and voice != self.tts.voice_id:
-                self.tts.set_voice(voice)
-            self.tts.set_speed(speed)
-        except Exception as exc:  # noqa: BLE001 -- unknown name, or a voice that fails to load
-            logger.warning("saved TTS setting not applied (%s: voice=%r speed=%r)", exc, voice, speed)
+        # Each on its own: a saved voice too slow for this device must not cost the saved speed.
+        for name, apply in (("speed", lambda: self.tts.set_speed(speed)),
+                            ("voice", lambda: voice and voice != self.tts.voice_id
+                             and self.tts.set_voice(voice, speed=speed))):
+            try:
+                apply()
+            except Exception as exc:  # noqa: BLE001 -- unknown name, too slow, or fails to load
+                logger.warning("saved TTS %s not applied (%s: voice=%r speed=%r)", name, exc, voice, speed)
 
     def apply_tts_settings(self, voice: str | None = None, speed: str | None = None) -> None:
         """Change the TTS voice and/or speed (live at the next turn) and remember it."""
         if voice is not None:
-            self.tts.set_voice(voice)
+            self.tts.set_voice(voice, speed=speed)   # judged at the speed it will play at
         if speed is not None:
             self.tts.set_speed(speed)
         changed = {k: v for k, v in (("tts_voice", voice), ("tts_speed", speed)) if v is not None}
@@ -1746,7 +1748,7 @@ class NovaPipeline:
         return routed.intent.value if routed is not None else None
 
     def _cloud_location_sentence(self) -> str:
-        """Where the simulated car is, so a misheard place can be read in that context."""
+        """Where the car is (real or simulated), so a misheard place can be read in that context."""
         cabin = getattr(self.oem_gateway, "cabin", None) if self.oem_gateway is not None else None
         if cabin is None:
             return ""
@@ -1755,7 +1757,8 @@ class NovaPipeline:
 
         snap = cabin.store.snapshot()
         return cloud_location_sentence(
-            str(snap.get(cc.PLACE) or ""), float(snap[cc.LAT]), float(snap[cc.LON])
+            str(snap.get(cc.PLACE) or ""), float(snap[cc.LAT]), float(snap[cc.LON]),
+            gps_fix=bool(snap.get(cc.GPS_FIX)),
         )
 
     def _correct_heard_place(self, query: str, near) -> str | None:

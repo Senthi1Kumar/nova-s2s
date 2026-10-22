@@ -175,7 +175,7 @@ class FakePiper:
         self.voice_id, self.speed = voice, "normal"
         self.pending_voice = self.pending_speed = None
 
-    def set_voice(self, voice_id, models_dir=None):
+    def set_voice(self, voice_id, models_dir=None, speed=None):
         if voice_id not in VOICES:
             raise ValueError("unknown_voice")
         self.pending_voice = voice_id
@@ -348,7 +348,7 @@ def test_startup_leaves_a_non_piper_engine_alone(tmp_path, store):
 
 
 class BrokenPiper(FakePiper):
-    def set_voice(self, voice_id, models_dir=None):
+    def set_voice(self, voice_id, models_dir=None, speed=None):
         raise RuntimeError("onnx: truncated model")
 
 
@@ -368,7 +368,7 @@ def test_startup_survives_a_voice_that_fails_to_load(tmp_path, store, caplog):
         pipe._apply_saved_tts()
     assert "en_GB-alba-medium" in caplog.text
     pipe.tts.begin_turn()
-    assert pipe.tts.voice_id == "en_US-amy-low" and pipe.tts.speed == "normal"
+    assert pipe.tts.voice_id == "en_US-amy-low" and pipe.tts.speed == "fast"   # the speed still applies
 
 
 # -- preview ---------------------------------------------------------------

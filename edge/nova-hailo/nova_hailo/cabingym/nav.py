@@ -408,11 +408,14 @@ def hear_place_prompt(
     )
 
 
-def cloud_location_sentence(area: str, lat: float, lon: float) -> str:
+def cloud_location_sentence(area: str, lat: float, lon: float, *, gps_fix: bool) -> str:
     """One line for the cloud prompt: where the car is, and that place names may be misheard."""
     name = (area or "").strip() or "the current area"
+    where = f"near {name} ({float(lat):.4f}, {float(lon):.4f})"
+    lead = (f"The car is {where}. " if gps_fix else
+            f"There is no GPS fix: the car's position is simulated, {where}; say so if asked where it is. ")
     return (
-        f"The car is near {name} ({float(lat):.4f}, {float(lon):.4f}). "
+        lead +
         "Speech often mishears place names. When the driver asks for a place or directions, "
         "call vehicle_navigation with the place a driver there most likely means. "
         "Do not ask them to spell it before searching. "

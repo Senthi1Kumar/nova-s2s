@@ -63,22 +63,41 @@ def reverse_place_name(lat: float, lon: float) -> str | None:
         return None
 
 
+def reverse_street(lat: float, lon: float) -> str | None:
+    """'on <street> in <town>' from one Mapbox lookup. None without a token or on failure."""
+    token = mapbox_token()
+    if not token:
+        return None
+    try:
+        from nova_hailo.cabingym.adapters.gps_nmea import mapbox_street_lookup
+
+        return mapbox_street_lookup(token)(lat, lon)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("drive:street_lookup_failed %s", type(exc).__name__)
+        return None
+
+
 def _location(ctx: ApiContext, args: dict[str, Any]) -> ApiResult:
     here = Place("here", ctx.snapshot[c.LAT], ctx.snapshot[c.LON])
     for place in ctx.snapshot[c.NAV_SAVED]:
         if haversine_km(here, Place.from_dict(place)) <= 0.3:
             return done(f"You're at {place['name']}.")
     heading = _CARDINAL[int(((ctx.snapshot[c.HEADING] % 360) + 22.5) // 45) % 8]
-    # The sim drive has an area name with no GPS fix. Speak that name. A fix is
-    # not required; the cockpit chip stays "no fix" until a receiver says otherwise.
+    fixed = bool(ctx.snapshot.get(c.GPS_FIX))
+    if fixed:
+        street = reverse_street(here.lat, here.lon)
+        if street:
+            return done(f"You're {street}, heading {heading}.")
+    # Without a fix the position is the simulated drive's: say so, never present it as real.
+    lead = "You're" if fixed else "No GPS fix right now. The simulated car is"
     area = str(ctx.snapshot.get(c.PLACE) or "").strip()
     if not area:
         area = (reverse_place_name(here.lat, here.lon) or "").strip()
         if area:
-            return done(f"You're in {area}, heading {heading}.", {c.PLACE: area})
+            return done(f"{lead} in {area}, heading {heading}.", {c.PLACE: area})
     if area:
-        return done(f"You're in {area}, heading {heading}.")
-    return done(f"You're at {here.lat:.4f}, {here.lon:.4f}, heading {heading}.")
+        return done(f"{lead} in {area}, heading {heading}.")
+    return done(f"{lead} at {here.lat:.4f}, {here.lon:.4f}, heading {heading}.")
 
 
 DEVICE = device(

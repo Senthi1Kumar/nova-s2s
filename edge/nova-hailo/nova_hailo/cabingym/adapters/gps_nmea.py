@@ -2,23 +2,21 @@
 
 Callers: nova_hailo.web.app (reader thread next to the simulated drive), tests.
 
-With a fix, position, heading and speed are written as source ``gps``. The
-store refuses ``sim`` writes over a real source, so every tool, the planner and
-the displays see the real position. While the simulated drive plays a route it
-owns position and speed instead (the map puck and the speedometer stay in step);
-when it parks, the next sentence brings the real position back. Without a
-fix (indoors, unplugged) those paths go back to ``sim`` and keep their last
-values, and the simulated drive takes over from there. ``Location.Place`` is
-reverse-geocoded from the fix (Mapbox, throttled) and keeps its last value when
-a lookup fails.
-
-The feeder is the only owner of the serial port.
+With a fix, position, heading and speed are written as source ``gps``, also while
+a route is navigated: the store refuses ``sim`` writes over a real source, and the
+simulated drive follows the real position instead of moving the car. Without a
+fix (indoors, unplugged) those paths go back to ``sim`` and keep their last values,
+and the simulated drive takes over from there. ``Location.Place`` is
+reverse-geocoded from the fix (Mapbox, throttled) and keeps its last value when a
+lookup fails. With gpsd running it owns the port; ``cabingym.adapters.gpsd`` reads it.
 """
 from __future__ import annotations
 
+import glob
 import logging
 import math
 import os
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -30,11 +28,15 @@ from nova_hailo.cabingym.drive import safe_error
 logger = logging.getLogger(__name__)
 
 KNOT_KPH = 1.852
+# A parked receiver wanders a few metres and reports a random course. Below STILL_KPH it is
+# standing still: its position holds until it reports a move larger than HOLD_M (a relocation,
+# or a fix regained elsewhere), and its course is trusted only from COURSE_MIN_KPH.
+STILL_KPH = 1.5
+COURSE_MIN_KPH = 5.0
+HOLD_M = 25.0
 PlaceLookup = Callable[[float, float], "str | None"]
-# Paths a fix owns; the simulation gets them back when the fix is lost (all of
-# them) or while it plays a route (the motion ones).
-_MOTION = (c.LAT, c.LON, c.HEADING, c.SPEED)
-_OWNED = (*_MOTION, c.PLACE)
+# Paths a fix owns; the simulation gets them back when the fix is lost.
+_OWNED = (c.LAT, c.LON, c.HEADING, c.SPEED, c.PLACE)
 
 
 def nmea_checksum_ok(line: str) -> bool:
@@ -118,18 +120,37 @@ def place_name(payload: dict[str, Any]) -> str | None:
     return ", ".join(parts) or props.get("place_formatted") or props.get("name") or None
 
 
-def mapbox_place_lookup(token: str, timeout_s: float = 3.0) -> PlaceLookup:
-    """Mapbox reverse geocoding as a place lookup."""
+def street_place(payload: dict[str, Any]) -> str | None:
+    """'on Castro Street in Mountain View' from a Mapbox v6 reverse answer for an address or street."""
+    features = payload.get("features") or []
+    if not features:
+        return None
+    props = features[0].get("properties") or {}
+    ctx = props.get("context") or {}
+    street = ((ctx.get("street") or {}).get("name") or (ctx.get("address") or {}).get("street_name")
+              or (props.get("name") if props.get("feature_type") == "street" else "") or "").strip()
+    town = ((ctx.get("place") or {}).get("name") or (ctx.get("locality") or {}).get("name") or "").strip()
+    return f"on {street} in {town}" if street and town else None
+
+
+def _reverse(token: str, lat: float, lon: float, timeout_s: float, **params: Any) -> dict[str, Any]:
     import httpx
 
-    def lookup(lat: float, lon: float) -> str | None:
-        r = httpx.get("https://api.mapbox.com/search/geocode/v6/reverse",
-                      params={"longitude": lon, "latitude": lat, "limit": 1,
-                              "access_token": token}, timeout=timeout_s)
-        r.raise_for_status()
-        return place_name(r.json())
+    r = httpx.get("https://api.mapbox.com/search/geocode/v6/reverse",
+                  params={"longitude": lon, "latitude": lat, "limit": 1, "access_token": token, **params},
+                  timeout=timeout_s)
+    r.raise_for_status()
+    return r.json()
 
-    return lookup
+
+def mapbox_place_lookup(token: str, timeout_s: float = 3.0) -> PlaceLookup:
+    """Mapbox reverse geocoding as a place lookup."""
+    return lambda lat, lon: place_name(_reverse(token, lat, lon, timeout_s))
+
+
+def mapbox_street_lookup(token: str, timeout_s: float = 3.0) -> PlaceLookup:
+    """Mapbox reverse geocoding for the street the car is on."""
+    return lambda lat, lon: street_place(_reverse(token, lat, lon, timeout_s, types="address,street"))
 
 
 def _open_serial(device: str, baud: int) -> Any:
@@ -152,7 +173,6 @@ class GpsFeeder:
         retry_s: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
         opener: Callable[[str, int], Any] = _open_serial,
-        simulating: Callable[[], bool] = lambda: False,
     ) -> None:
         self.cabin = cabin
         self.store = cabin.store
@@ -165,9 +185,10 @@ class GpsFeeder:
         self.retry_s = float(retry_s)
         self._clock = clock
         self._opener = opener
-        self._simulating = simulating
         self.fixed = False
         self._last_fix_t = 0.0
+        self._moving = False
+        self._at: tuple[float, float] | None = None   # the position last written
         self._place_at: tuple[float, float] | None = None  # where the last lookup succeeded
         self._place_t: float | None = None                 # when the last lookup was tried
         self._stop = threading.Event()
@@ -177,10 +198,10 @@ class GpsFeeder:
         msg = parse_nmea(line)
         if msg is None:
             return
-        values: dict[str, Any] = {}
         has_pos = msg.get("lat") is not None and msg.get("lon") is not None
+        extra: dict[str, Any] = {}
         if msg["type"] == "GGA":
-            values[c.GPS_SATS] = msg["sats"]
+            extra[c.GPS_SATS] = msg["sats"]
             fixed = msg["quality"] >= 1 and has_pos
         elif msg["type"] == "RMC":
             fixed = msg["valid"] and has_pos
@@ -188,18 +209,25 @@ class GpsFeeder:
             if not self.fixed:
                 return
             fixed = True
+        self._report(fixed, msg.get("lat"), msg.get("lon"), msg.get("speed_kph"), msg.get("course"), extra)
+
+    def _report(self, fixed: bool, lat: float | None, lon: float | None, speed_kph: float | None,
+                course: float | None, extra: dict[str, Any] | None = None) -> None:
+        """One receiver report: the fix, or its loss. Shared by the NMEA and gpsd readers."""
+        values = dict(extra or {})
         if not fixed:
             self._lose(values)
             return
-        if self._simulating():
-            self.store.release(_MOTION)
-        else:
-            if has_pos:
-                values[c.LAT], values[c.LON] = msg["lat"], msg["lon"]
-            if msg.get("speed_kph") is not None:
-                values[c.SPEED] = min(300.0, max(0.0, float(msg["speed_kph"])))
-            if msg.get("course") is not None:  # empty while standing still
-                values[c.HEADING] = float(msg["course"]) % 360.0
+        kph = None if speed_kph is None else min(300.0, max(0.0, float(speed_kph)))
+        if kph is not None:
+            self._moving = kph >= STILL_KPH
+            values[c.SPEED] = kph if self._moving else 0.0
+        if lat is not None and lon is not None:
+            if self._moving or self._at is None or _distance_m(self._at, (lat, lon)) > HOLD_M:
+                values[c.LAT], values[c.LON] = lat, lon
+                self._at = (lat, lon)
+        if course is not None and kph is not None and kph >= COURSE_MIN_KPH:
+            values[c.HEADING] = float(course) % 360.0
         values[c.GPS_FIX] = True
         self.store.update(values, source="gps")
         self.fixed = True
@@ -215,6 +243,7 @@ class GpsFeeder:
         if self.fixed:
             self.store.release(_OWNED)
             self.fixed = False
+        self._at = None   # a regained fix always writes its position
         values[c.GPS_FIX] = False
         self.store.update(values, source="gps")
 
@@ -273,19 +302,38 @@ class GpsFeeder:
             self._stop.wait(self.retry_s)
 
 
+GPSD_HOST, GPSD_PORT = "127.0.0.1", 2947
+
+
+def gpsd_listening(host: str = GPSD_HOST, port: int = GPSD_PORT, timeout_s: float = 0.3) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+def usb_serial_ports() -> list[str]:
+    return sorted(glob.glob("/dev/serial/by-id/*"))
+
+
 def build_gps_feeder(
     cfg_get: Callable[..., Any],
     cabin: Any,
     *,
-    simulating: Callable[[], bool] = lambda: False,
+    gpsd_up: Callable[[], bool] = gpsd_listening,
+    serial_ports: Callable[[], list[str]] = usb_serial_ports,
 ) -> GpsFeeder | None:
-    """The feeder from config ``cabingym.gps``; None when it is off.
+    """The receiver reader, found without config: gpsd when it answers (it owns the port and
+    shares it with cgps and the cockpit), else the first USB serial port, else None (the
+    simulated drive only).
 
-    ``gps``: ``enabled`` (bool), ``device`` (default /dev/ttyUSB0), ``baud`` (9600),
-    ``place_lookup`` (default on; needs MAPBOX_API_KEY or MAPBOX_ACCESS_TOKEN).
+    ``cabingym.gps``: ``source`` (auto | gpsd | serial | off), ``enabled: false`` (off),
+    ``device``, ``baud`` (9600), ``place_lookup`` (default on; needs a Mapbox token).
     """
     conf = cfg_get("cabingym", "gps", default=None) or {}
-    if not conf.get("enabled"):
+    source = str(conf.get("source") or "auto").strip().lower()
+    if conf.get("enabled") is False or source == "off":
         return None
     lookup = None
     if conf.get("place_lookup", True):
@@ -293,6 +341,13 @@ def build_gps_feeder(
                  or "").strip()
         if token:
             lookup = mapbox_place_lookup(token)
-    return GpsFeeder(cabin, device=str(conf.get("device") or "/dev/ttyUSB0"),
-                     baud=int(conf.get("baud") or 9600), place_lookup=lookup,
-                     simulating=simulating)
+    if source == "gpsd" or (source == "auto" and gpsd_up()):
+        from nova_hailo.cabingym.adapters.gpsd import GpsdFeeder
+
+        return GpsdFeeder(cabin, place_lookup=lookup)
+    device = conf.get("device") or next(iter(serial_ports()), None)
+    if device is None and conf.get("enabled"):
+        device = "/dev/ttyUSB0"
+    if device is None:
+        return None
+    return GpsFeeder(cabin, device=str(device), baud=int(conf.get("baud") or 9600), place_lookup=lookup)

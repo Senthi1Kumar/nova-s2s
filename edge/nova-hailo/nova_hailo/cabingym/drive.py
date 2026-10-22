@@ -29,6 +29,7 @@ from typing import Any
 
 from nova_hailo.cabingym import catalog as c
 from nova_hailo.cabingym.runtime import CabinEnv
+from nova_hailo.cabingym.vss import REAL_SOURCES
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ LatLon = tuple[float, float]
 _EARTH_KM = 6371.0
 # Within this of a stop (or past its point on the route), the stop is done.
 _STOP_REACHED_KM = 0.03
+# With a real fix: further than this from the route is off it, and this long off it re-plans
+# from where the car is (a GPS wobble or a parallel street is not a detour).
+OFF_ROUTE_M = 60.0
+OFF_ROUTE_REPLAN_S = 8.0
 _NAV_TRIGGERS = frozenset({c.NAV_ACTIVE, c.NAV_DEST_LAT, c.NAV_DEST_LON, c.NAV_STOPS, c.NAV_RESULTS})
 
 
@@ -94,6 +99,33 @@ def bearing_deg(a: LatLon, b: LatLon) -> float:
     x = math.sin(dl) * math.cos(p2)
     y = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
     return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+
+
+def project_on_route(pts: list[LatLon], cum: list[float], here: LatLon,
+                     near_km: float) -> tuple[float, float]:
+    """(km along the route, metres off it) for the closest point to ``here``. Segments near the
+    last known progress are tried first, so a route that doubles back is not mistaken."""
+    lat0 = math.radians(here[0])
+
+    def xy(p: LatLon) -> tuple[float, float]:
+        return ((p[1] - here[1]) * 111.320 * math.cos(lat0), (p[0] - here[0]) * 110.574)
+
+    def best(indices: range) -> tuple[float, float]:
+        found = (near_km, float("inf"))
+        for i in indices:
+            (ax, ay), (bx, by) = xy(pts[i]), xy(pts[i + 1])
+            dx, dy = bx - ax, by - ay
+            seg2 = dx * dx + dy * dy
+            t = 0.0 if seg2 <= 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / seg2))
+            off_km = math.hypot(ax + t * dx, ay + t * dy)
+            if off_km * 1000.0 < found[1]:
+                found = (cum[i] + t * (cum[i + 1] - cum[i]), off_km * 1000.0)
+        return found
+
+    window = range(len(pts) - 1)
+    near = [i for i in window if cum[i + 1] >= near_km - 0.3 and cum[i] <= near_km + 3.0]
+    km, off_m = best(range(near[0], near[-1] + 1)) if near else (near_km, float("inf"))
+    return best(window) if off_m > OFF_ROUTE_M else (km, off_m)
 
 
 def path_length_km(points: list[LatLon]) -> float:
@@ -237,6 +269,7 @@ class SimDrive:
         self._v = 0.0
         self._stopping = False
         self._nav_clock = 0.0
+        self.off_route_s = 0.0
         self.on_arrive: Callable[[], None] | None = None
         # When set, remaining time comes from the route (seconds, km) instead of cruise speed.
         self.remaining_fn: Callable[[float], tuple[float, float]] | None = None
@@ -260,6 +293,7 @@ class SimDrive:
         with self._lock:
             self._pts, self._cum, self._pos_km = list(points), cum, 0.0
             self._stopping = False
+            self.off_route_s = 0.0
 
     def stop(self) -> None:
         with self._lock:
@@ -276,62 +310,100 @@ class SimDrive:
         here = (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
         return here, bearing_deg(a, b)
 
+    def _real_fix(self) -> tuple[LatLon, float] | None:
+        """(position, km/h) when a real receiver has a fix; then it moves the car, not the sim."""
+        snap = self.store.snapshot(with_source=True)
+        if not snap[c.GPS_FIX][0] or snap[c.LAT][1] not in REAL_SOURCES:
+            return None
+        return (float(snap[c.LAT][0]), float(snap[c.LON][0])), float(snap[c.SPEED][0] or 0.0)
+
+    def _nav_writes(self, writes: dict[str, Any], dt_s: float, arrived: bool, total: float) -> None:
+        self._nav_clock += dt_s
+        if self.store.get(c.NAV_ACTIVE) and (self._nav_clock >= 1.0 or arrived):
+            self._nav_clock = 0.0
+            fn = self.remaining_fn
+            if fn is not None:
+                secs, km = fn(self._pos_km)
+                writes[c.NAV_DIST] = round(max(0.0, km), 2)
+                writes[c.NAV_ETA] = round(max(0.0, secs) / 60.0, 1)
+            else:
+                left_km = max(0.0, total - self._pos_km)
+                writes[c.NAV_DIST] = round(left_km, 2)
+                writes[c.NAV_ETA] = round(left_km / max(self.cruise_kph, 1.0) * 60.0, 1)
+
+    def _energy_writes(self, writes: dict[str, Any], d_km: float) -> None:
+        snap = self.store.snapshot()
+        writes[c.ODOMETER] = round(snap[c.ODOMETER] + d_km, 3)
+        if self._has_soc:
+            soc = max(0.0, snap[c.SOC] - d_km * self._pct_per_km)
+            writes[c.SOC] = round(soc, 3)
+            writes[c.RANGE] = round(soc * self._km_per_pct, 1)
+
+    def _step_real(self, dt_s: float, here: LatLon, kph: float) -> tuple[dict[str, Any], bool]:
+        """Progress is where the real car is on the route; position, speed and heading stay the receiver's."""
+        total = self._cum[-1]
+        pos, off_m = project_on_route(self._pts, self._cum, here, self._pos_km)
+        d_km = max(0.0, pos - self._pos_km)
+        self._pos_km, self._v = pos, kph / 3.6
+        self.off_route_s = self.off_route_s + dt_s if off_m > OFF_ROUTE_M else 0.0
+        arrived = not self._stopping and total - pos <= _STOP_REACHED_KM
+        writes: dict[str, Any] = {}
+        self._energy_writes(writes, d_km)
+        self._nav_writes(writes, dt_s, arrived, total)
+        if arrived or self._stopping:
+            self._pts, self._cum, self._pos_km, self._stopping = None, [], 0.0, False
+            self.off_route_s = 0.0
+        return writes, arrived
+
     def step(self, dt_s: float) -> list[Any]:
         arrived = False
+        real = self._real_fix()
         with self._lock:
             if self._pts is None:
                 return []
-            total = self._cum[-1]
-            remaining_m = max(0.0, (total - self._pos_km) * 1000.0)
-            cruise = self.cruise_kph / 3.6
-            if self._stopping or remaining_m <= self._v * self._v / (2 * self.brake) + self._v * dt_s:
-                target = 0.0
+            if real is not None:
+                writes, arrived = self._step_real(dt_s, *real)
             else:
-                target = cruise
-            if self._v < target:
-                self._v = min(target, self._v + self.accel * dt_s)
-            else:
-                self._v = max(target, self._v - self.brake * dt_s)
-            if not self._stopping and remaining_m > 0.5 and self._v < 1.0:
-                self._v = 1.0  # crawl the last metres instead of stopping short
-            d_km = self._v * dt_s / 1000.0
-            self._pos_km = min(total, self._pos_km + d_km)
-            here, heading = self._where()
-            if not self._stopping and self._pos_km >= total - 1e-6:
-                self._v, arrived = 0.0, True
-            parked = (self._stopping and self._v == 0.0) or arrived
-            writes: dict[str, Any] = {
-                c.SPEED: round(self._v * 3.6, 1),
-                c.GEAR: "P" if parked else "D",
-                c.LAT: round(here[0], 6), c.LON: round(here[1], 6),
-                c.HEADING: float(round(heading)),
-            }
-            snap = self.store.snapshot()
-            writes[c.ODOMETER] = round(snap[c.ODOMETER] + d_km, 3)
-            if self._has_soc:
-                soc = max(0.0, snap[c.SOC] - d_km * self._pct_per_km)
-                writes[c.SOC] = round(soc, 3)
-                writes[c.RANGE] = round(soc * self._km_per_pct, 1)
-            if self._has_rpm:
-                writes[self._rpm_path] = 0.0 if parked else float(round(800 + self._v * 60))
-            self._nav_clock += dt_s
-            if snap[c.NAV_ACTIVE] and (self._nav_clock >= 1.0 or arrived):
-                self._nav_clock = 0.0
-                fn = self.remaining_fn
-                if fn is not None:
-                    secs, km = fn(self._pos_km)
-                    writes[c.NAV_DIST] = round(max(0.0, km), 2)
-                    writes[c.NAV_ETA] = round(max(0.0, secs) / 60.0, 1)
-                else:
-                    left_km = max(0.0, total - self._pos_km)
-                    writes[c.NAV_DIST] = round(left_km, 2)
-                    writes[c.NAV_ETA] = round(left_km / max(self.cruise_kph, 1.0) * 60.0, 1)
-            if parked:
-                self._pts, self._cum, self._pos_km, self._stopping = None, [], 0.0, False
+                writes, arrived = self._step_sim(dt_s)
         changes = self.store.update(writes, source="sim")
         if arrived and self.on_arrive is not None:
             self.on_arrive()
         return changes
+
+    def _step_sim(self, dt_s: float) -> tuple[dict[str, Any], bool]:
+        arrived = False
+        total = self._cum[-1]
+        remaining_m = max(0.0, (total - self._pos_km) * 1000.0)
+        cruise = self.cruise_kph / 3.6
+        if self._stopping or remaining_m <= self._v * self._v / (2 * self.brake) + self._v * dt_s:
+            target = 0.0
+        else:
+            target = cruise
+        if self._v < target:
+            self._v = min(target, self._v + self.accel * dt_s)
+        else:
+            self._v = max(target, self._v - self.brake * dt_s)
+        if not self._stopping and remaining_m > 0.5 and self._v < 1.0:
+            self._v = 1.0  # crawl the last metres instead of stopping short
+        d_km = self._v * dt_s / 1000.0
+        self._pos_km = min(total, self._pos_km + d_km)
+        here, heading = self._where()
+        if not self._stopping and self._pos_km >= total - 1e-6:
+            self._v, arrived = 0.0, True
+        parked = (self._stopping and self._v == 0.0) or arrived
+        writes: dict[str, Any] = {
+            c.SPEED: round(self._v * 3.6, 1),
+            c.GEAR: "P" if parked else "D",
+            c.LAT: round(here[0], 6), c.LON: round(here[1], 6),
+            c.HEADING: float(round(heading)),
+        }
+        self._energy_writes(writes, d_km)
+        if self._has_rpm:
+            writes[self._rpm_path] = 0.0 if parked else float(round(800 + self._v * 60))
+        self._nav_writes(writes, dt_s, arrived, total)
+        if parked:
+            self._pts, self._cum, self._pos_km, self._stopping = None, [], 0.0, False
+        return writes, arrived
 
 
 class NavFeed:
@@ -501,6 +573,10 @@ class NavFeed:
 
     def tick(self, dt_s: float) -> None:
         self.drive.step(dt_s)
+        if self.drive.off_route_s >= OFF_ROUTE_REPLAN_S and self._key is not None:
+            self.drive.off_route_s = 0.0
+            self._key = None   # the next sync re-plans from the real position
+            self.dirty = True
         self._drop_reached_stops()
         self._note_progress(dt_s)
         self._note_guidance()

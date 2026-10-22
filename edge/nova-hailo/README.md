@@ -44,11 +44,12 @@ flowchart LR
 | HailoRT | **5.3.0** (AI HAT+ 2). HEF + C++ GenAI API follow `hailortcli fw-control identify` |
 | Default profile | **tools enabled** (`config.oem_v002_test.yaml`) |
 | LLM | **Local** Hailo Qwen2 HEF, or **Cloud** via `llm.cloud_provider` — Groq (default, `GROQ_API_KEY`) or OpenRouter |
-| TTS | **Piper** (`en_US-amy-low`), ~311 ms to first audio chunk |
+| TTS | **Piper**: `en_US-amy-low` by default (~311 ms to first audio chunk); the medium voices from `fetch_models.sh` are picked in the cockpit's Nova sheet. A voice too slow for the Pi at the chosen speed is refused (measured when it loads) |
 | Search | **Exa only** (`EXA_API_KEY`). No Brave/Serper fallback |
 | Python env | **`uv`** with system Python + `--system-site-packages` (see below) |
 | Audio | **reSpeaker XVF3800** (CabinEnv: USB, echo cancelled on the board). **WM8960 HAT** is the older Qt HMI path |
 | HMI | CabinEnv cockpit (`cb_lvgl`) on `main`. Qt HMI: PySide6 + QML (`hmi_qt/run.sh`) on the share branch |
+| GPS | Optional USB receiver, read through **gpsd** (set up by `setup_pi.sh`; found without config, or `cabingym.gps.source: serial` to read the port directly). With a fix the real position drives navigation; without one the simulated car does, and Nova says so |
 
 This device is **self-contained** for Local mode. Cloud LLM is optional and
 needs a network + the cloud provider's key. No Tailscale / tunnel to another Pi.

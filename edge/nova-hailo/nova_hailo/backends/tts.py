@@ -31,6 +31,12 @@ PIPER_DIR = ROOT / "models" / "piper"
 DEFAULT_PIPER = PIPER_DIR / "en_US-amy-low.onnx"
 # Piper length_scale: above 1.0 is slower, below is faster.
 PIPER_SPEEDS: dict[str, float] = {"slow": 1.25, "normal": 1.0, "fast": 0.83, "faster": 0.71}
+# A voice must synthesize in at most half the time its speech lasts, at the chosen speed, or
+# playback outruns it and pauses open mid-sentence (ryan-high measures 0.79 on the Pi 5,
+# the medium voices 0.12). Measured once per voice, on this device, when it loads.
+MAX_RTF = 0.5
+_PACE_PROBE = "Turn left in two hundred metres, then keep right."
+_clock = time.perf_counter
 HAILO_APPS_PIPER = Path("/home/cariad/code/hailo-apps/local_resources/piper_models/en_US-amy-low.onnx")
 DEFAULT_KOKORO_ONNX = ROOT / "models" / "kokoro" / "kokoro-v1.0.onnx"
 DEFAULT_KOKORO_VOICES = ROOT / "models" / "kokoro" / "voices-v1.0.bin"
@@ -611,6 +617,7 @@ class PiperTTS(QueuedOnnxTTS):
         self._pending_speed: str | None = None
         self._snapshot: _PiperSnapshot | None = None
         self._preview: tuple[int, object, float] | None = None
+        self._rtf: dict[str, float] = {}
         if not enabled:
             return
         try:
@@ -622,6 +629,7 @@ class PiperTTS(QueuedOnnxTTS):
             print(f"Loading Piper TTS: {onnx}")
             self._voice = PiperVoice.load(str(onnx))
             self._voice_id = onnx.stem
+            self._measure(self._voice_id, self._voice)
             self._start_worker()
         except Exception as e:
             logger.warning("TTS disabled: %s", e)
@@ -636,26 +644,53 @@ class PiperTTS(QueuedOnnxTTS):
     def speed(self) -> str:
         return self._speed
 
-    def set_voice(self, voice_id: str, models_dir: Path | None = None) -> None:
-        """Load a voice now (blocking); it becomes active at the next begin_turn()."""
+    def _measure(self, voice_id: str, voice) -> float:
+        """Seconds of synthesis per second of speech for ``voice`` on this device, at normal speed."""
+        from piper import SynthesisConfig
+
+        sample_rate, samples = 22050, 0
+        t0 = _clock()
+        for chunk in voice.synthesize(_PACE_PROBE, syn_config=SynthesisConfig(length_scale=1.0)):
+            arr, sample_rate = self._chunk_to_float32(chunk, sample_rate)
+            samples += arr.size
+        rtf = (_clock() - t0) / (samples / sample_rate) if samples else float("inf")
+        self._rtf[voice_id] = rtf
+        print(f"[tts] {voice_id}: real-time factor {rtf:.2f}", flush=True)
+        return rtf
+
+    def _check_pace(self, voice_id: str, speed: str) -> None:
+        rtf = self._rtf.get(voice_id)
+        if rtf is not None and rtf / PIPER_SPEEDS[speed] > MAX_RTF:
+            print(f"[tts] refused {voice_id} at {speed}: {rtf / PIPER_SPEEDS[speed]:.2f} of real time", flush=True)
+            raise ValueError("voice_too_slow")
+
+    def set_voice(self, voice_id: str, models_dir: Path | None = None, speed: str | None = None) -> None:
+        """Load a voice now (blocking); it becomes active at the next begin_turn(). ``speed`` is the
+        one it will play at (default: the pending or current one); a voice too slow for it is refused."""
         if models_dir is None:
             models_dir = Path(self.model_path).parent if self.model_path else PIPER_DIR
         models_dir = Path(models_dir)
         if voice_id not in {v["id"] for v in list_piper_voices(models_dir)}:
             raise ValueError("unknown_voice")
         if voice_id == self._voice_id:
+            self._check_pace(voice_id, speed or self._pending_speed or self._speed)
             with self._settings_lock:
                 self._pending_voice = None
             return
         from piper import PiperVoice
 
         voice = PiperVoice.load(str(models_dir / f"{voice_id}.onnx"))
+        self._measure(voice_id, voice)
+        self._check_pace(voice_id, speed or self._pending_speed or self._speed)
         with self._settings_lock:
             self._pending_voice = (voice_id, voice)
 
     def set_speed(self, name: str) -> None:
         if name not in PIPER_SPEEDS:
             raise ValueError("unknown_speed")
+        with self._settings_lock:
+            voice_id = self._pending_voice[0] if self._pending_voice is not None else self._voice_id
+        self._check_pace(voice_id, name)
         with self._settings_lock:
             self._pending_speed = name
 

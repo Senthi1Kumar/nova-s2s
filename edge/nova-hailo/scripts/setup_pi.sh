@@ -100,6 +100,21 @@ if [[ ! -f "$XVF_RULE" ]]; then
   id -nG | grep -qw plugdev || sudo usermod -aG plugdev "$USER"
 fi
 
+# A USB GPS goes through gpsd: it owns the port and shares the fix with Nova, cgps and xgps
+# (Nova finds gpsd by itself). Only with a receiver plugged in; an existing DEVICES line is kept.
+gps_port="$(ls /dev/serial/by-id/* 2>/dev/null | head -1)"
+if [[ -n "$gps_port" ]]; then
+  if ! dpkg -s gpsd >/dev/null 2>&1; then
+    echo "installing gpsd for the GPS on $gps_port (asks for your password)"
+    sudo apt-get install -y gpsd gpsd-clients
+  fi
+  if ! grep -q '^DEVICES="/dev' /etc/default/gpsd 2>/dev/null; then
+    printf 'START_DAEMON="true"\nUSBAUTO="true"\nDEVICES="%s"\nGPSD_OPTIONS="-n"\n' "$gps_port" \
+      | sudo tee /etc/default/gpsd >/dev/null
+  fi
+  sudo systemctl enable --now gpsd.socket gpsd >/dev/null 2>&1 || true
+fi
+
 step "4/8 Python environment (.venv)"
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 # System Python with system site-packages: hailo_platform is a system package, not on PyPI.

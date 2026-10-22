@@ -69,25 +69,21 @@ def test_a_fix_takes_over_position_and_the_sim_cannot_overwrite_it():
     assert cabin.store.get(c.LAT) == pytest.approx(12.974333, abs=1e-6)
 
 
-def test_the_simulated_drive_owns_position_and_speed_while_it_moves():
-    cabin = CabinEnv()
-    moving = [False]
-    gps = GpsFeeder(cabin, simulating=lambda: moving[0])
-    gps.feed_line(FIX_RMC)
-    snap = cabin.store.snapshot(with_source=True)
-    assert snap[c.SPEED][1] == "gps" and snap[c.LAT][1] == "gps"
-    moving[0] = True                            # a route starts playing
+def test_a_fix_keeps_position_and_speed_while_a_route_is_navigated():
+    cabin, gps = feeder()
+    cabin.store.set_targets({c.NAV_ACTIVE: True, c.NAV_DEST: "work"})
     gps.feed_line(FIX_GGA)
     gps.feed_line(FIX_RMC)
-    snap = cabin.store.snapshot(with_source=True)
-    assert {snap[p][1] for p in (c.LAT, c.LON, c.HEADING, c.SPEED)} == {"sim"}
-    assert cabin.store.get(c.GPS_FIX) is True and cabin.store.get(c.GPS_SATS) == 7
     cabin.store.update({c.SPEED: 50.0, c.LAT: 12.99}, source="sim")
-    assert cabin.store.get(c.SPEED) == 50.0 and cabin.store.get(c.LAT) == 12.99
-    moving[0] = False                           # arrived: the real position comes back
-    gps.feed_line(FIX_RMC)
     snap = cabin.store.snapshot(with_source=True)
-    assert snap[c.LAT] == (pytest.approx(12.974333, abs=1e-6), "gps")
+    assert {snap[p][1] for p in (c.LAT, c.LON, c.HEADING, c.SPEED)} == {"gps"}
+    assert snap[c.LAT][0] == pytest.approx(12.974333, abs=1e-6)
+
+
+def test_a_parked_receiver_reads_zero_speed():
+    cabin, gps = feeder()
+    gps.feed_line(sentence("GPRMC,123520,A,1258.4600,N,07738.4900,E,0.60,213.0,111026,,,A"))
+    assert cabin.store.get(c.SPEED) == 0.0
 
 
 def test_losing_the_fix_hands_position_back_to_the_simulation():
@@ -151,14 +147,37 @@ def _cfg(values):
     return lambda section, key, default=None: values.get((section, key), default)
 
 
-def test_build_from_config():
+def _build(conf, *, gpsd=False, ports=()):
     from nova_hailo.cabingym.adapters.gps_nmea import build_gps_feeder
 
-    cabin = CabinEnv()
-    assert build_gps_feeder(_cfg({}), cabin) is None
-    gps = build_gps_feeder(_cfg({("cabingym", "gps"): {"enabled": True, "device": "/dev/ttyUSB9",
-                                                        "baud": 4800, "place_lookup": False}}), cabin)
+    values = {} if conf is None else {("cabingym", "gps"): conf}
+    return build_gps_feeder(_cfg(values), CabinEnv(), gpsd_up=lambda: gpsd, serial_ports=lambda: list(ports))
+
+
+def test_build_from_config():
+    assert _build(None) is None                 # nothing configured, no gpsd, no receiver
+    gps = _build({"enabled": True, "device": "/dev/ttyUSB9", "baud": 4800, "place_lookup": False})
     assert gps.device == "/dev/ttyUSB9" and gps.baud == 4800 and gps.place_lookup is None
+
+
+def test_build_finds_a_receiver_without_config():
+    from nova_hailo.cabingym.adapters.gpsd import GpsdFeeder
+
+    assert isinstance(_build(None, gpsd=True), GpsdFeeder)
+    by_id = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
+    gps = _build(None, ports=[by_id])
+    assert not isinstance(gps, GpsdFeeder) and gps.device == by_id and gps.baud == 9600
+
+
+def test_gpsd_wins_over_a_configured_port_it_already_owns():
+    from nova_hailo.cabingym.adapters.gpsd import GpsdFeeder
+
+    assert isinstance(_build({"enabled": True, "device": "/dev/ttyUSB0"}, gpsd=True), GpsdFeeder)
+    forced = _build({"source": "serial", "device": "/dev/ttyUSB0"}, gpsd=True)
+    assert not isinstance(forced, GpsdFeeder) and forced.device == "/dev/ttyUSB0"
+    assert isinstance(_build({"source": "gpsd"}), GpsdFeeder)          # waits for gpsd to start
+    assert _build({"enabled": False}, gpsd=True) is None
+    assert _build({"source": "off"}, gpsd=True, ports=["/dev/x"]) is None
 
 
 def test_a_receiver_that_goes_quiet_loses_its_fix():
@@ -236,17 +255,20 @@ def test_build_uses_the_mapbox_key_for_place_lookups(monkeypatch):
 
     monkeypatch.delenv("MAPBOX_ACCESS_TOKEN", raising=False)
     monkeypatch.setenv("MAPBOX_API_KEY", "pk.test")
-    gps = build_gps_feeder(_cfg({("cabingym", "gps"): {"enabled": True}}), CabinEnv())
+    probes = {"gpsd_up": lambda: False, "serial_ports": lambda: []}
+    gps = build_gps_feeder(_cfg({("cabingym", "gps"): {"enabled": True}}), CabinEnv(), **probes)
     assert gps.device == "/dev/ttyUSB0" and gps.baud == 9600 and callable(gps.place_lookup)
     monkeypatch.delenv("MAPBOX_API_KEY")
-    gps = build_gps_feeder(_cfg({("cabingym", "gps"): {"enabled": True}}), CabinEnv())
+    gps = build_gps_feeder(_cfg({("cabingym", "gps"): {"enabled": True}}), CabinEnv(), **probes)
     assert gps.place_lookup is None
 
 
-def test_where_am_i_names_the_area_under_a_fix():
+def test_where_am_i_names_the_area_under_a_fix(monkeypatch):
+    import nova_hailo.cabingym.devices.drive as drive
     from nova_hailo.cabingym.executor import VehicleExecutor
     from nova_hailo.cabingym.router_regex import route_vehicle_regex
 
+    monkeypatch.setattr(drive, "reverse_street", lambda lat, lon: None)
     cabin, gps = feeder(place_lookup=lambda la, lo: "Indiranagar, Bengaluru")
     gps.feed_line(FIX_RMC)
     out = VehicleExecutor(cabin).run(route_vehicle_regex("where am I", cabin))
@@ -261,3 +283,96 @@ def test_speed_from_a_receiver_without_a_fix_is_ignored():
     snap = cabin.store.snapshot(with_source=True)
     assert snap[c.SPEED] == (0.0, "sim") and snap[c.HEADING] == (0.0, "sim")
     assert cabin.store.get(c.GPS_FIX) is False
+
+
+# ---- gpsd: the receiver shared with cgps, xgps and the cockpit ----
+
+TPV = ('{"class":"TPV","device":"/dev/ttyUSB0","mode":3,"lat":12.974333,"lon":77.6415,'
+       '"alt":920.0,"track":45.0,"speed":5.556}')
+TPV_NO_FIX = '{"class":"TPV","device":"/dev/ttyUSB0","mode":1}'
+SKY = ('{"class":"SKY","satellites":[{"PRN":1,"used":true},{"PRN":3,"used":true},'
+       '{"PRN":7,"used":false}]}')
+
+
+def gpsd_feeder(**kw):
+    from nova_hailo.cabingym.adapters.gpsd import GpsdFeeder
+
+    cabin = CabinEnv()
+    return cabin, GpsdFeeder(cabin, **kw)
+
+
+def test_gpsd_reports_feed_the_same_signals():
+    cabin, gps = gpsd_feeder()
+    gps.feed_json(SKY)
+    gps.feed_json(TPV)
+    snap = cabin.store.snapshot(with_source=True)
+    assert snap[c.LAT] == (pytest.approx(12.974333, abs=1e-6), "gps")
+    assert snap[c.SPEED] == (pytest.approx(20.0, abs=0.1), "gps")   # m/s from gpsd
+    assert snap[c.HEADING] == (45.0, "gps")
+    assert cabin.store.get(c.GPS_FIX) is True and cabin.store.get(c.GPS_SATS) == 2
+    gps.feed_json(TPV_NO_FIX)
+    assert cabin.store.get(c.GPS_FIX) is False
+    assert cabin.store.snapshot(with_source=True)[c.LAT][1] == "sim"
+
+
+def test_gpsd_noise_is_ignored():
+    cabin, gps = gpsd_feeder()
+    for line in ('{"class":"VERSION","release":"3.25"}', "not json", '{"class":"TPV","mode":3}', ""):
+        gps.feed_json(line)
+    assert cabin.store.get(c.GPS_FIX) is False and cabin.store.get(c.LAT) == 37.4419
+
+
+class FakeSock:
+    def __init__(self, lines, gps):
+        self.lines, self.gps, self.sent = list(lines), gps, []
+
+    def sendall(self, data):
+        self.sent.append(data)
+
+    def makefile(self, *a, **kw):
+        return self
+
+    def readline(self):
+        if not self.lines:
+            self.gps._stop.set()
+            return ""
+        return self.lines.pop(0) + "\n"
+
+    def close(self):
+        pass
+
+
+def test_the_gpsd_reader_asks_for_json_and_reads_reports():
+    holder = {}
+    cabin, gps = gpsd_feeder(connect=lambda host, port: holder.setdefault(
+        "sock", FakeSock(['{"class":"VERSION"}', SKY, TPV], holder["gps"])))
+    holder["gps"] = gps
+    gps.run()
+    assert b'?WATCH={"enable":true,"json":true}' in holder["sock"].sent[0]
+    assert cabin.store.get(c.GPS_FIX) is True and cabin.store.get(c.GPS_SATS) == 2
+
+
+# ---- a parked receiver: course and position noise do not move the car ----
+
+def _rmc(lat_min: str, knots: str, course: str) -> str:
+    return sentence(f"GPRMC,123520,A,{lat_min},N,07738.4900,E,{knots},{course},111026,,,A")
+
+
+def test_a_parked_receiver_keeps_the_last_heading():
+    cabin, gps = feeder()
+    gps.feed_line(_rmc("1258.4600", "10.80", "045.0"))          # driving north-east at 20 km/h
+    for course in ("212.0", "018.0", "274.0"):                   # parked: course is noise
+        gps.feed_line(_rmc("1258.4600", "0.40", course))
+    assert cabin.store.get(c.HEADING) == 45.0
+
+
+def test_a_parked_receiver_holds_its_position_until_it_really_moves():
+    cabin, gps = feeder()
+    gps.feed_line(_rmc("1258.4600", "0.00", "000.0"))
+    held = cabin.store.get(c.LAT)
+    gps.feed_line(_rmc("1258.4650", "0.20", "000.0"))           # ~9 m of wander while parked
+    assert cabin.store.get(c.LAT) == held
+    gps.feed_line(_rmc("1258.4900", "0.20", "000.0"))           # ~55 m: a real move, accepted
+    assert cabin.store.get(c.LAT) != held
+    gps.feed_line(_rmc("1258.5000", "10.80", "000.0"))          # driving: every fix moves the car
+    assert cabin.store.get(c.LAT) == pytest.approx(12.975, abs=1e-6)

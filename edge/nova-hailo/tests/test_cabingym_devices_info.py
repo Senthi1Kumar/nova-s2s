@@ -88,9 +88,9 @@ def test_drive_reads_follow_powertrain():
     assert run("drive", "get_vehicle_status", {"signal": "speed"}, speed=62.0).speak == (
         "You're doing 62 kilometres an hour.")
     assert run("drive", "get_location", {}, lat=37.4275, lon=-122.1697).speak == "You're at home."
-    # Sim drive has an area name and no GPS fix. Speak the name, not the coordinates.
+    # No GPS fix: say the position is the simulation's, by its area name, not coordinates.
     named = run("drive", "get_location", {}, **{"gps.fix": False, "place": "Palo Alto", "heading": 0})
-    assert named.speak == "You're in Palo Alto, heading north."
+    assert named.speak == "No GPS fix right now. The simulated car is in Palo Alto, heading north."
     assert "37." not in named.speak
     assert run("drive", "get_range", {}).targets == {}
 
@@ -106,12 +106,48 @@ def test_location_reverse_geocodes_only_when_the_area_is_unknown(monkeypatch):
     snap[c.HEADING] = 0
     res = build_devices()["drive"].apis["get_location"].handler(
         ApiContext(snap, FixtureNav(), "ev"), {})
-    assert res.speak == "You're in Old Palo Alto, heading north."
+    assert res.speak == "No GPS fix right now. The simulated car is in Old Palo Alto, heading north."
     assert res.targets[c.PLACE] == "Old Palo Alto"
     monkeypatch.setattr(drive, "reverse_place_name", lambda lat, lon: None)
     bare = build_devices()["drive"].apis["get_location"].handler(
         ApiContext(snap, FixtureNav(), "ev"), {})
-    assert bare.speak.startswith("You're at 37.4419")
+    assert bare.speak.startswith("No GPS fix right now. The simulated car is at 37.4419")
+
+
+def test_with_a_fix_where_am_i_names_the_street(monkeypatch):
+    import nova_hailo.cabingym.devices.drive as drive
+
+    monkeypatch.setattr(drive, "reverse_street", lambda lat, lon: "on El Camino Real in Mountain View")
+    store = c.build_store("ev_demo")
+    snap = dict(store.snapshot())
+    snap.update({c.GPS_FIX: True, c.LAT: 37.39, c.LON: -122.08, c.HEADING: 0, c.PLACE: "Mountain View"})
+    res = build_devices()["drive"].apis["get_location"].handler(ApiContext(snap, FixtureNav(), "ev"), {})
+    assert res.speak == "You're on El Camino Real in Mountain View, heading north."
+    monkeypatch.setattr(drive, "reverse_street", lambda lat, lon: None)   # offline: the area
+    res = build_devices()["drive"].apis["get_location"].handler(ApiContext(snap, FixtureNav(), "ev"), {})
+    assert res.speak == "You're in Mountain View, heading north."
+
+
+def test_street_from_a_mapbox_reverse_answer():
+    from nova_hailo.cabingym.adapters.gps_nmea import street_place
+
+    address = {"features": [{"properties": {"feature_type": "address", "name": "1900 El Camino Real",
+                                            "context": {"street": {"name": "El Camino Real"},
+                                                        "place": {"name": "Mountain View"}}}}]}
+    assert street_place(address) == "on El Camino Real in Mountain View"
+    street = {"features": [{"properties": {"feature_type": "street", "name": "Castro Street",
+                                           "context": {"place": {"name": "Mountain View"}}}}]}
+    assert street_place(street) == "on Castro Street in Mountain View"
+    assert street_place({"features": []}) is None
+
+
+def test_the_cloud_prompt_says_when_the_position_is_simulated():
+    from nova_hailo.cabingym.nav import cloud_location_sentence
+
+    real = cloud_location_sentence("Mountain View", 37.39, -122.08, gps_fix=True)
+    assert real.startswith("The car is near Mountain View (37.3900, -122.0800).")
+    sim = cloud_location_sentence("Palo Alto", 37.44, -122.16, gps_fix=False)
+    assert sim.startswith("There is no GPS fix: the car's position is simulated, near Palo Alto")
 
 
 def test_cabin_and_system():

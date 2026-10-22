@@ -68,6 +68,8 @@ is a request. `Ctrl+C` in the terminal stops everything. To say **"Hey Nova"** f
 - "Find a charger within 10 minutes."
 - "Set the temperature to 21", "open the sunroof", "turn the ambient light purple", "switch to sport mode".
 - "What time is it?" (the clock follows the car's location).
+- With a USB GPS plugged in: "Where am I?" and "How fast am I going?" answer from the real fix, and a
+  route follows the real car. `setup_pi.sh` sets up gpsd for it; Nova finds it on its own.
 
 ## If something is off
 
@@ -77,6 +79,7 @@ is a request. `Ctrl+C` in the terminal stops everything. To say **"Hey Nova"** f
 | The map is a grey placeholder | `MAPBOX_API_KEY` is missing in `.env` |
 | No sound, or Nova does not react | In the desktop sound settings, input and output are the XVF3800 (it appears as a USB card). The launcher sets its volume. Unplug and replug, then start again. |
 | You talk while Nova is speaking and nothing happens | With the XVF3800 the mic stays open: the board cancels its own echo. A short "mm-hm" is only acted on when you start with `NOVA_HAILO_XVF_TURNS=on`; otherwise it is logged. |
+| Nova says there's no GPS fix | The receiver needs open sky: a windowsill at least. `cgps` shows how many satellites it sees. Without a fix the simulated car drives, and Nova says so. |
 | Nova says it can't reach a service | That key is missing in `.env` (web search needs `EXA_API_KEY`) |
 | Anything else | Send Senthil `/tmp/nova_server.log` and `/tmp/cb_lvgl.log` |
 

@@ -369,3 +369,45 @@ def test_a_mapbox_plan_sets_the_eta_and_publishes_progress():
             break
     assert drive.progress_km() >= 0.75
     assert feed.take_guidance() is None
+
+
+# ---- a real GPS fix drives the route instead of the simulation ----
+
+def _fix(cabin, here, kph=30.0):
+    cabin.store.update({c.LAT: here[0], c.LON: here[1], c.SPEED: kph, c.GPS_FIX: True}, source="gps")
+
+
+def test_with_a_fix_route_progress_follows_the_real_car():
+    cabin, drive = _drive(cruise_kph=50.0)
+    arrived = []
+    drive.on_arrive = lambda: arrived.append(True)
+    pts = RouteBook().between(START, WORK)
+    i = next(k for k in range(1, len(pts)) if path_length_km(pts[:k + 1]) >= 1.0)
+    cabin.store.set_targets({c.NAV_ACTIVE: True, c.NAV_DEST: "work"})
+    drive.follow(pts)
+    _fix(cabin, pts[i])
+    for _ in range(6):
+        drive.step(0.2)
+    assert drive.progress_km() == pytest.approx(path_length_km(pts[:i + 1]), abs=0.02)
+    assert cabin.store.get(c.LAT) == pts[i][0]                          # the sim never moved it
+    assert cabin.store.get(c.NAV_DIST) == pytest.approx(path_length_km(pts) - drive.progress_km(), abs=0.05)
+    _fix(cabin, pts[-1], kph=0.0)
+    drive.step(0.2)
+    assert arrived == [True]
+
+
+def test_off_route_for_a_while_replans_from_the_real_car():
+    cabin, drive, feed, events = _feed()
+    _navigate(cabin, "work", *WORK)
+    feed.sync()
+    away = (START[0], START[1] + 0.004)                                  # ~350 m east of the route
+    _fix(cabin, away)
+    feed.dirty = False
+    for _ in range(5):
+        feed.tick(1.0)
+    assert not feed.dirty                                                # a GPS wobble is not a detour
+    for _ in range(5):
+        feed.tick(1.0)
+    assert feed.dirty
+    feed.sync()
+    assert feed._route[0] == pytest.approx(away, abs=1e-6)
