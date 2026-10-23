@@ -1,13 +1,13 @@
 # Nova-Hailo conversation profile (tools gated off; parakeet STT).
 # Use: NOVA_HAILO_PROFILE=conversation ./scripts/run_demo_oem.sh
 #
-# Primary tools demo: config.oem_v002_test.yaml (default ./scripts/run_demo_oem.sh).
+# Primary tools demo: config.oem_v1.1.yaml (default ./scripts/run_demo_oem.sh).
 # Panic rollback: config.oem_rollback.yaml (NOVA_HAILO_PROFILE=oem_rollback).
 # HailoRT 5.3.0 on target device (HEF from fetch_models.sh via hailortcli identify).
 #
 model:
   llm_hef: qwen2
-  # Conversation profile STT: parakeet. Tools demo uses Nemo (config.oem_v002_test.yaml).
+  # Conversation profile STT: parakeet. Tools demo uses Nemo (config.oem_v1.1.yaml).
   stt_engine: parakeet
   parakeet_decoder: tdt
   parakeet_model: models/parakeet/tdt_ctc-110m-f16.gguf

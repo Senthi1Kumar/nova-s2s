@@ -1,6 +1,6 @@
 """STT/VAD config acceptance (offline, no Hailo / no sidecar process).
 
-Covers: v002 freeze config, gate defaults, wait-budget boundaries, endpointing
+Covers: OEM config (config.oem_v1.1.yaml), gate defaults, wait-budget boundaries, endpointing
 source guard. Complements tests/test_audio_gate.py and tests/test_nemo_wait_budget.py.
 """
 from __future__ import annotations
@@ -26,29 +26,29 @@ from nova_hailo.web.nemo_wait_budget import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-V002 = ROOT / "config.oem_v002_test.yaml"
+OEM = ROOT / "config.oem_v1.1.yaml"
 SIDECAR = ROOT / "nova_hailo" / "backends" / "nemo_speech_sidecar.py"
 FREEZE_DOC = ROOT / "docs" / "STACK.md"
 
 EN_NEMO_MODEL = "models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf"
 
 
-def _load_v002() -> dict:
-    data = yaml.safe_load(V002.read_text())
+def _load_oem() -> dict:
+    data = yaml.safe_load(OEM.read_text())
     assert isinstance(data, dict)
     return data
 
 
-def test_v002_stt_is_parakeet_tdt():
-    cfg = _load_v002()
+def test_oem_stt_is_parakeet_tdt():
+    cfg = _load_oem()
     model = cfg["model"]
     assert model["stt_engine"] == "parakeet"
     assert model.get("parakeet_decoder") == "tdt"
     assert "tdt_ctc-110m" in str(model.get("parakeet_model") or "")
 
 
-def test_v002_gate_and_wait_knobs_match_defaults():
-    voice = _load_v002()["voice"]
+def test_oem_gate_and_wait_knobs_match_defaults():
+    voice = _load_oem()["voice"]
     assert float(voice["gate_min_rms"]) == DEFAULT_MIN_RMS
     assert float(voice["gate_min_peak"]) == DEFAULT_MIN_PEAK
     assert float(voice["gate_min_sec"]) == DEFAULT_MIN_SEC

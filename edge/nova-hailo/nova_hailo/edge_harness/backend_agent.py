@@ -204,11 +204,13 @@ def build_backend_agent(cfg_get: Any, gateway: Any, *, llm_factory: Any = None) 
     """
     import os
 
+    from nova_hailo.backends.failover_llm import usable_provider
     from nova_hailo.backends.openrouter_llm import PROVIDERS
 
     provider = str(cfg_get("harness", "backend", default="") or "").strip().lower()
     if provider not in PROVIDERS:
         return None
+    provider = usable_provider(provider)
     if getattr(gateway, "tasks", None) is None or getattr(gateway, "cabin", None) is None:
         return None
     key_vars = PROVIDERS[provider][1]

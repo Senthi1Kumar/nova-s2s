@@ -42,7 +42,7 @@ flowchart LR
 | Repo | https://github.com/Senthi1Kumar/nova-s2s.git |
 | App dir after clone | `nova-s2s/edge/nova-hailo` |
 | HailoRT | **5.3.0** (AI HAT+ 2). HEF + C++ GenAI API follow `hailortcli fw-control identify` |
-| Default profile | **tools enabled** (`config.oem_v002_test.yaml`) |
+| Default profile | **tools enabled** (`config.oem_v1.1.yaml`) |
 | LLM | **Local** Hailo Qwen2 HEF, or **Cloud** via `llm.cloud_provider` — Groq (default, `GROQ_API_KEY`) or OpenRouter |
 | TTS | **Piper**: `en_US-amy-low` by default (~311 ms to first audio chunk); the medium voices from `fetch_models.sh` are picked in the cockpit's Nova sheet. A voice too slow for the Pi at the chosen speed is refused (measured when it loads) |
 | Search | **Exa only** (`EXA_API_KEY`). No Brave/Serper fallback |
@@ -257,8 +257,8 @@ HMI: PySide6 + QML is in the same `pyproject.toml` as the backend.
 `source scripts/setup_env.sh` installs everything; `hmi_qt/run.sh` uses that
 venv. No C++ Qt / PyQt build. On Python 3.12+, openWakeWord is installed with
 `--no-deps` (`tflite-runtime` has no wheels; the ONNX path never uses it).
-Wake-word gating (`wake.mode: kws` in `config.oem_v002_test.yaml`) keeps the
-session IDLE until **Nova**; PTT remains the fallback.
+Open mic is the default (`wake.mode: ptt` in `config.oem_v1.1.yaml`): every utterance is a
+request. `wake.mode: kws` keeps the session IDLE until **Nova** instead.
 
 ## Models (`models/`)
 

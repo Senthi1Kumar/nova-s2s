@@ -25,7 +25,7 @@ except ImportError:
     streaming_utils = None
 
 from nova_hailo.auth import AuthDecision, DriveAuthPrecheck, looks_like_payment_tool
-from nova_hailo.backends.failover_llm import build_failover
+from nova_hailo.backends.failover_llm import build_failover, usable_provider
 from nova_hailo.backends.llm import HailoLLM, HailoLLMCpp
 from nova_hailo.backends.openrouter_llm import DEFAULT_MODEL as OR_DEFAULT_MODEL
 from nova_hailo.backends.openrouter_llm import PROVIDERS as LLM_PROVIDERS
@@ -368,6 +368,10 @@ class NovaPipeline:
             llm_backend = yaml_backend
         if llm_backend in {"or", "cloud"}:
             llm_backend = self.cloud_provider
+        usable = usable_provider(llm_backend)
+        if usable != llm_backend:
+            print(f"LLM: {llm_backend} has no API key in .env; using {usable}", flush=True)
+            llm_backend = usable
         self.llm_backend = llm_backend
         self._hailo_llm_cls = HailoLLMCpp if yaml_backend == "cpp" or llm_backend == "cpp" else HailoLLM
         self.llm = self._make_llm(llm_backend, self._local_hef_alias, self._or_model)

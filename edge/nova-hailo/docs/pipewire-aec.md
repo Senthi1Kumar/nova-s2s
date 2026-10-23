@@ -30,7 +30,7 @@ device (`pulse`) and Pulse routes to the AEC nodes via `PULSE_SOURCE` /
 `PULSE_SINK`.
 
 YAML `voice.barge_in_while_speaking` stays **false**; the launcher env is the
-soak switch. After soak, you can bake `true` into `config.oem_v002_test.yaml`.
+soak switch. After soak, you can bake `true` into `config.oem_v1.1.yaml`.
 
 One-off / debug (not required for a normal demo):
 

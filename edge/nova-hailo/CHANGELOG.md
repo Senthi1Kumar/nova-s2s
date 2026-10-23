@@ -10,6 +10,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/1.1.0/).
 
 ## [Unreleased] — v0.0.2 (in progress)
 
+### Changed — One demo config for every Pi: `config.oem_v1.1.yaml`
+
+- Renamed from `config.oem_v002_test.yaml` and made the shared default. It now carries what the
+  test Pi had tuned locally and never committed: cloud gpt-oss-120b (Groq first, OpenRouter on
+  failover; the planner on OpenRouter), open mic (`wake.mode: ptt`), the LiveKit door, and `auto`
+  audio devices (the XVF3800 or the WM8960, whichever is plugged in). A second Pi on the
+  committed file had been running the local Qwen2-1.5B and a wake word instead.
+- A cloud provider with no API key gives way to its failover partner (main model and planner):
+  a missing key answers 401, which never triggered a failover.
+
 ### Added — Realtime device API v1 (LAN)
 
 - **`/v1/realtime` as a device API** (`nova-realtime/1`): binary PCM uplink

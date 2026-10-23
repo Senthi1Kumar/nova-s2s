@@ -115,6 +115,18 @@ class FailoverLLM:
         return getattr(self.active, name)
 
 
+def usable_provider(name: str, env: Mapping[str, str] = os.environ) -> str:
+    """``name``, or its failover partner when only the partner has a key: a provider with no
+    key answers 401, which is not a reason to fail over, so it must never be the primary."""
+    def has_key(provider: str) -> bool:
+        return any(str(env.get(k) or "").strip() for k in PROVIDERS[provider][1])
+
+    other = PAIRS.get(name)
+    if name in PROVIDERS and other is not None and not has_key(name) and has_key(other):
+        return other
+    return name
+
+
 def build_failover(
     backend: str,
     primary: Any,

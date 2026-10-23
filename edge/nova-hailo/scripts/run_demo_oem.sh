@@ -2,7 +2,7 @@
 # One-command launcher. Stack / profiles: docs/STACK.md
 #
 # Profiles (NOVA_HAILO_PROFILE):
-#   oem            (default) → config.oem_v002_test.yaml  tools ON (search, research, Workspace)
+#   oem            (default) → config.oem_v1.1.yaml  tools ON (search, research, Workspace)
 #   conversation               → config.oem.yaml            tools gated, parakeet STT
 #   oem_rollback               → config.oem_rollback.yaml   panic: no tools, Piper
 #
@@ -41,7 +41,7 @@ if [[ -z "${NOVA_HAILO_CONFIG:-}" ]]; then
       ;;
     oem|oem_demo|oem_v002|*)
       # Default: tools-enabled demo profile
-      export NOVA_HAILO_CONFIG="$ROOT/config.oem_v002_test.yaml"
+      export NOVA_HAILO_CONFIG="$ROOT/config.oem_v1.1.yaml"
       ;;
   esac
 fi

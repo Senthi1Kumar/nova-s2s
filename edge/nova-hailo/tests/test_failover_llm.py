@@ -127,3 +127,34 @@ def test_build_pairs_groq_and_openrouter_when_the_other_key_is_set():
     assert build_failover("groq", primary, make, env=env, enabled=False) is primary
     assert build_failover("openrouter", primary, make, env={"GROQ_API_KEY": "g"}).secondary.provider == "groq"
     assert build_failover("python", primary, make, env=env) is primary      # local Hailo: no pair
+
+
+def test_a_provider_without_a_key_gives_way_to_its_partner():
+    from nova_hailo.backends.failover_llm import usable_provider
+
+    assert usable_provider("openrouter", env={"GROQ_API_KEY": "g"}) == "groq"
+    assert usable_provider("groq", env={"OPENROUTER_API_KEY": "k"}) == "openrouter"
+    assert usable_provider("groq", env={"GROQ_API_KEY": "g", "OPENROUTER_API_KEY": "k"}) == "groq"
+    assert usable_provider("groq", env={}) == "groq"            # neither: the turn says so itself
+    assert usable_provider("cpp", env={}) == "cpp"              # local Hailo is not a cloud provider
+
+
+def test_the_planner_uses_the_partner_when_its_provider_has_no_key(monkeypatch):
+    from types import SimpleNamespace
+
+    from nova_hailo.edge_harness.backend_agent import build_backend_agent
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OR_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    made = {}
+
+    def factory(**kw):
+        made.update(kw)
+        return SimpleNamespace(**kw)
+
+    cfg = {("harness", "backend"): "openrouter"}
+    gateway = SimpleNamespace(tasks=object(), cabin=object(), vehicle=object())
+    agent = build_backend_agent(lambda s, k, default=None: cfg.get((s, k), default), gateway,
+                                llm_factory=factory)
+    assert agent is not None and made["provider"] == "groq"

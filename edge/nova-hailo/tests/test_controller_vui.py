@@ -206,7 +206,7 @@ def test_sanitize_strips_json_keeps_fillers():
 
 
 def test_enable_in_prompt_stays_false():
-    for name in ("config.oem_v002_test.yaml", "config.oem.yaml", "config.yaml"):
+    for name in ("config.oem_v1.1.yaml", "config.oem.yaml", "config.yaml"):
         raw = yaml.safe_load((ROOT / name).read_text())
         assert raw["tools"]["enable_in_prompt"] is False, name
 

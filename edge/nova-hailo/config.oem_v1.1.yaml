@@ -1,18 +1,19 @@
-# Nova-Hailo primary demo profile (tools + search + Workspace read-only).
-# Default for: ./scripts/run_demo_oem.sh  (NOVA_HAILO_PROFILE=oem)
+# Nova OEM v1.1: the demo profile every Pi runs (CabinEnv cockpit, car tools, search, Workspace).
+# Default for: ./scripts/run_demo_oem.sh and run_cabinenv.sh  (NOVA_HAILO_PROFILE=oem)
 #
-# Search: Exa only (HTTP). Deep research: Tavily.
-# Workspace tools need Google OAuth tokens under runtime/google_oauth/.
-# STT: Parakeet TDT 110m (CPU). LLM: Hailo HEF. TTS: Piper/Inflect.
+# LLM: cloud gpt-oss-120b (Groq, OpenRouter on failover); the local Hailo Qwen2 is picked in the
+# cockpit's Nova sheet. STT: Parakeet TDT 110m (CPU). TTS: Piper. Open mic (no wake word).
+# Search: Exa only (HTTP). Deep research: Tavily. Workspace tools need Google OAuth tokens under
+# runtime/google_oauth/. GPS is found without config (gpsd, else a USB serial receiver).
 
 model:
   llm_hef: qwen2
   # Hailo 5.3 FC HEF (fetch_models downloads it): llm_hef: qwen2-fc
   # Host router still picks tools; FC is optional 1st-pass experiment, not ToolBroker.
-  llm_backend: cpp
-  # Cloud alternative (HMI ⚙ toggle, or llm_backend: groq): which provider the
-  # cloud side means is llm.cloud_provider below, and each reads its own key --
-  # GROQ_API_KEY / OPENROUTER_API_KEY / CEREBRAS_API_KEY.
+  # Cloud first: the local 1.5B model misses tool calls and answers trip questions from memory.
+  # groq here, with OpenRouter taking over on 429/5xx when OPENROUTER_API_KEY is set; a provider
+  # with no key gives way to the one that has one. Local Hailo: llm_backend: cpp.
+  llm_backend: groq
   # Live-delta A/B: stt_engine: nemo_speech
   # nemo_speech_model: models/nemo_speech/nemotron-speech-streaming-en-0.6b.q8_0.gguf
   # nemo_rnnt_right_context: 1
@@ -34,9 +35,10 @@ model:
 
 llm:
   no_think: true
-  # Which provider the HMI's cloud toggle selects. gpt-oss-120b measured 3/3
-  # tool calls with 0/3 false fires under the production soul prompt.
-  cloud_provider: groq
+  # The provider the cockpit's "Cloud" choice uses. gpt-oss-120b measured 3/3 tool calls with
+  # 0/3 false fires under the production soul prompt. OpenRouter has no per-minute cap; Groq's
+  # free tier answers 429 (rate limit) after a few quick turns.
+  cloud_provider: openrouter
   groq_model: openai/gpt-oss-120b
 
 pipeline:
@@ -98,8 +100,10 @@ voice:
   nemo_wait_cap_s: 1.8
   nemo_wait_base_s: 0.25
   nemo_wait_scale: 0.40
-  input_device: wm8960
-  output_device: wm8960
+  # The client scripts pick the mic and speaker (the XVF3800 when plugged in, else the WM8960);
+  # auto here prefers a WM8960 and otherwise takes the default device.
+  input_device: auto
+  output_device: auto
   playback: browser
 
 web:
@@ -107,7 +111,7 @@ web:
   port: 8766
 
 wake:
-  mode: kws                 # kws = "Nova" gates turns; ptt = today (rollback)
+  mode: ptt                 # open mic: every utterance is a request; kws = say "Nova" first
   kws_enabled: true
   kws_engine: openwakeword
   kws_model: models/wakeword/nova_pro_v3.onnx
@@ -144,6 +148,12 @@ tools:
   brave_primary: false
   serper_fallback: false
 
+# The online door (LiveKit room). Stays shut, with the reason in the log, until LIVEKIT_URL,
+# LIVEKIT_API_KEY and LIVEKIT_API_SECRET are in .env.
+livekit:
+  wake: session
+  enabled: true
+
 cabingym:
   # Vehicle profile: ev_demo (desk) | audi_q7_ice
   profile: ev_demo
@@ -164,7 +174,8 @@ harness:
   # mixed = parsed turns run on the Pi, plans/vague goals go to the backend agent;
   # delegated = every vehicle turn goes to the backend (benchmark baseline).
   execution: mixed
-  backend: groq
+  # OpenRouter: no per-minute token cap (Groq's free tier starved the planner)
+  backend: openrouter
   backend_model: openai/gpt-oss-120b
   max_steps: 6
   budget_s: 20

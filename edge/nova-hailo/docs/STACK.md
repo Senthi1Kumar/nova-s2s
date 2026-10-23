@@ -11,12 +11,12 @@ cd nova-s2s/edge/nova-hailo
 # Web UI:     http://localhost:8766/
 ```
 
-Default config: `config.oem_v002_test.yaml`  
+Default config: `config.oem_v1.1.yaml`  
 Env template: `.env.example` → `.env` (never commit secrets)
 
 | `NOVA_HAILO_PROFILE` | Config file | Tools |
 | --- | --- | --- |
-| `oem` (default) | `config.oem_v002_test.yaml` | web_search, deep_research, check_calendar, check_email, list_drive_files |
+| `oem` (default) | `config.oem_v1.1.yaml` | web_search, deep_research, check_calendar, check_email, list_drive_files |
 | `conversation` | `config.oem.yaml` | off |
 | `oem_rollback` | `config.oem_rollback.yaml` | off (short chat only) |
 
@@ -68,7 +68,7 @@ Under `voice:` in the active YAML:
 - Echo: `echo_tail_ms`, `barge_in_while_speaking` (YAML stays false; soak launcher sets `NOVA_HAILO_BARGE_IN_WHILE_SPEAKING=true` and keeps HMI uplink open during TTS — see `docs/pipewire-aec.md`)
 - STT reopen pause: `reopen_ms` (commit delay after `speech_stopped`; 0 = immediate)
 
-Under `wake:` in `config.oem_v002_test.yaml`:
+Under `wake:` in `config.oem_v1.1.yaml`:
 
 - `mode: kws` — session stays IDLE until the word **Nova** (or explicit PTT). Follow-ups inside `pipeline.session_idle_sec` (8 s) do not need the wake word. Rollback: `NOVA_HAILO_WAKE_MODE=ptt`.
 - `kws_engine: openwakeword`, `kws_model`, `kws_threshold` (0.15), `kws_barge_threshold` (0.10 while TTS is audible), `kws_consecutive_hits`, `kws_cooldown_s`
