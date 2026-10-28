@@ -105,7 +105,7 @@ Clone the repository on the Pi (or `git pull` an existing clone), then run the s
 directory:
 
 ```bash
-git clone git@github.com:Senthi1Kumar/nova-s2s.git ~/nova-s2s   # first time only
+git clone https://github.com/Senthi1Kumar/nova-s2s.git ~/nova-s2s   # first time only
 cd ~/nova-s2s/edge/hailo-ai-box
 scripts/pi_setup.sh
 ```
