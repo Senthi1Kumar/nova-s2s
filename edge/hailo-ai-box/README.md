@@ -101,10 +101,12 @@ Optional: Adafruit GPS with `gpsd` (a satellite fix usually requires a windowsil
 
 ## One-stop Pi setup
 
-Copy this directory to the Pi, then run:
+Clone the repository on the Pi (or `git pull` an existing clone), then run the setup from this
+directory:
 
 ```bash
-cd /path/to/hailo-ai-box
+git clone git@github.com:Senthi1Kumar/nova-s2s.git ~/nova-s2s   # first time only
+cd ~/nova-s2s/edge/hailo-ai-box
 scripts/pi_setup.sh
 ```
 
@@ -219,8 +221,9 @@ scheduling and can remain resident beside the active GenAI model when device RAM
 
 ## Preset and uploaded videos
 
-Computer Vision supports cameras, four road presets, and browser uploads. The actual preset MP4s
-(about 27 MB total) are bundled in the repository:
+Computer Vision supports cameras, road-video presets, and browser uploads. The preset MP4s are
+licensed stock clips, so they are **not in the repository** (`data/videos/` is git-ignored). Place
+your own road clips on the Pi as:
 
 ```text
 data/videos/road_1.mp4
@@ -229,11 +232,10 @@ data/videos/road_3.mp4
 data/videos/road_4.mp4
 ```
 
-Setup preserves bundled presets and can link missing ones from `~/Downloads/gettyimages*.mp4`.
+Setup preserves existing presets and can link missing ones from `~/Downloads/gettyimages*.mp4`.
 Videos and uploads are not model inputs at their original resolution: the server decodes and
 resizes frames for each model. Lane Detection selects the first road preset when available.
 Browser uploads are limited to 200 MB and expire after 24 hours. YouTube downloading is not required.
-Confirm the stock clips' redistribution terms before publishing the repository.
 
 ## Main APIs
 
