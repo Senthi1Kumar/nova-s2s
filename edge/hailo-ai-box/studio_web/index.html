@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>AI BOX Studio</title>
+<link rel="icon" type="image/svg+xml" href="/img/logo-brain-chip.svg">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <img src="/img/logo-brain-chip.svg" width="28" height="28" alt="">
+      </div>
+      <div><div class="brand-name">AI BOX <span>Studio</span></div><div class="brand-sub">EDGE INFERENCE SERVER</div></div>
+    </div>
+    <nav class="nav" id="nav">
+      <div class="nav-label">WORKSPACE</div>
+      <a href="#overview" data-page="overview"><i>▦</i><span>Overview</span></a>
+      <a href="#voice" data-page="voice"><i>◎</i><span>Voice AI</span></a>
+      <a href="#vision" data-page="vision"><i>▧</i><span>Computer Vision</span></a>
+      <a href="#chat" data-page="chat"><i>▤</i><span>Chat & VLM</span></a>
+      <a href="#face" data-page="face"><i>◉</i><span>Face ID</span></a>
+      <div class="nav-label">SYSTEM</div>
+      <a href="#device" data-page="device"><i>⚙</i><span>Device Status</span></a>
+      <a href="#inspector" data-page="inspector"><i>⌕</i><span>Inspector</span></a>
+    </nav>
+    <div class="side-foot"><span class="dot" id="foot-dot"></span><span id="foot-text">connecting…</span></div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="eyebrow" id="eyebrow">EDGE AI / INFERENCE SERVER</div>
+      <div class="topbar-right">
+        <button class="btn ghost small" id="key-btn" title="API key">Key</button>
+        <div class="pill off" id="pill"><span class="dot"></span><span id="pill-text">Connecting</span></div>
+      </div>
+    </header>
+    <div class="banner swap" id="swap-banner" hidden>The GenAI slot is swapping models. Requests are queued and will retry automatically.</div>
+    <div class="banner warn" id="https-banner" hidden></div>
+
+    <section class="page" id="page-overview" hidden>
+      <h1>AI Services</h1>
+      <p class="lede">Manage models, APIs and client connections on this edge inference server.</p>
+      <div class="counters">
+        <div class="counter"><b id="cnt-services">—</b><span>AI Services</span></div>
+        <div class="counter"><b id="cnt-endpoints">—</b><span>API Endpoints</span></div>
+        <div class="counter"><b id="cnt-clients">—</b><span>Clients</span></div>
+        <div class="counter"><b id="cnt-rps">—</b><span>Requests / Sec</span></div>
+      </div>
+      <h2>AI Service Registry</h2>
+      <div class="registry" id="registry"></div>
+      <div class="card connect">
+        <div class="card-head"><h3>Server Connectivity</h3><span class="tag green">LAN</span></div>
+        <div class="muted">Base URL</div>
+        <div class="baseurl"><code id="base-url"></code><button class="btn small" id="copy-url">Copy</button></div>
+        <div class="muted small" id="auth-note"></div>
+      </div>
+      <h2>Live telemetry</h2>
+      <div class="tiles" id="tiles"></div>
+      <h2>Inspector <a class="more" href="#inspector">open full view</a></h2>
+      <div class="card strip" id="strip"></div>
+    </section>
+
+    <section class="page" id="page-voice" hidden></section>
+    <section class="page" id="page-vision" hidden></section>
+    <section class="page" id="page-chat" hidden></section>
+    <section class="page" id="page-face" hidden></section>
+
+    <section class="page" id="page-device" hidden>
+      <h1>Device Status</h1>
+      <p class="lede">Host and NPU health, model residency and governor events. Updated once per second.</p>
+      <div class="two">
+        <div class="card"><h3>Raspberry Pi 5</h3><div class="gauges" id="host-gauges"></div><div class="cores" id="cores"></div></div>
+        <div class="card"><h3>Hailo-10H NPU</h3><div class="gauges" id="npu-gauges"></div></div>
+      </div>
+      <div class="sparks" id="sparks"></div>
+      <h2>Model residency</h2>
+      <div class="card scroll"><table class="tbl" id="residency"><thead><tr>
+        <th>Model</th><th>Modality</th><th>Runtime</th><th>State</th><th>Load</th><th>FPS</th><th>p50 ms</th><th>p95 ms</th><th>Requests</th></tr></thead><tbody></tbody></table></div>
+      <h2>Governor events</h2>
+      <div class="card log" id="event-log"></div>
+    </section>
+
+    <section class="page" id="page-inspector" hidden>
+      <h1>Request Inspector</h1>
+      <p class="lede">Every request served by this box, as it happens.</p>
+      <div class="filters">
+        <input id="f-endpoint" placeholder="Filter endpoint (e.g. /v1/chat)" aria-label="Filter endpoint">
+        <input id="f-client" placeholder="Filter client / model" aria-label="Filter client">
+        <button class="btn small" id="f-pause">Pause</button>
+        <button class="btn small ghost" id="f-clear">Clear</button>
+      </div>
+      <div class="card scroll"><table class="tbl" id="insp-table"><thead><tr>
+        <th>Time</th><th>Endpoint</th><th>Client</th><th>Model</th><th>Device</th><th>Queue ms</th><th>Infer ms</th><th>In</th><th>Out</th><th>Status</th></tr></thead><tbody></tbody></table></div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="key-modal" hidden>
+  <form class="modal-card" id="key-form">
+    <h3>API key</h3>
+    <p class="muted">This server requires an API key. It is stored only in this browser.</p>
+    <input type="password" id="key-input" placeholder="AIBOX_API_KEY" autocomplete="off">
+    <div class="row"><button class="btn" type="submit">Save</button><button class="btn ghost" type="button" id="key-cancel">Cancel</button></div>
+  </form>
+</div>
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

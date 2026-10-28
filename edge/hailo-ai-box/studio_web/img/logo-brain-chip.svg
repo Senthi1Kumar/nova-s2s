@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <!-- pins -->
+  <g stroke="#c9d1d9" stroke-width="1.8">
+    <path d="M19 12V15M22 12V15M25 12V15M28 12V15M31 12V15"/>
+    <path d="M19 33V36M22 33V36M25 33V36M28 33V36M31 33V36"/>
+    <path d="M12 19H15M12 22H15M12 25H15M12 28H15M12 31H15"/>
+    <path d="M33 19H36M33 22H36M33 25H36M33 28H36M33 31H36"/>
+  </g>
+  <!-- circuit traces to hollow nodes -->
+  <g stroke="#58a6ff" stroke-width="1.2">
+    <path d="M19 12V8H9"/><circle cx="7" cy="8" r="1.6"/>
+    <path d="M31 12V6H40"/><circle cx="42" cy="6" r="1.6"/>
+    <path d="M36 22H40V32"/><circle cx="40" cy="34" r="1.6"/>
+    <path d="M12 31H8V40"/><circle cx="8" cy="42" r="1.6"/>
+    <path d="M25 36V42H34"/><circle cx="36" cy="42" r="1.6"/>
+    <path d="M12 22H5V16"/><circle cx="5" cy="14" r="1.6"/>
+  </g>
+  <!-- package -->
+  <rect x="15" y="15" width="18" height="18" rx="3" fill="#2f81f7"/>
+  <path d="M18 15.6H30A2.4 2.4 0 0 1 32.4 18" stroke="#58a6ff" stroke-width="1.6"/>
+  <!-- die -->
+  <path d="M19.5 18H28.5L30 19.5V28.5L28.5 30H19.5L18 28.5V19.5Z" fill="#a5d6ff"/>
+  <rect x="21.5" y="21.5" width="5" height="5" rx="1" fill="#1f4f99"/>
+</svg>

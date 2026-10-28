@@ -1,0 +1,14 @@
+/runtime/
+.venv/
+/.docs/
+*.hef
+.env
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+/data/*
+/data/videos/*
+/models/
+studio_lvgl/build*/
+studio_lvgl/*.log
