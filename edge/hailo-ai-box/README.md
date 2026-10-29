@@ -90,7 +90,8 @@ Optional: Adafruit GPS with `gpsd` (a satellite fix usually requires a windowsil
 ## Software and model versions
 
 - Python 3.13 and a venv with system HailoRT packages.
-- **HailoRT CLI, Python package, and Hailo firmware: 5.3.0**, all matching.
+- **HailoRT CLI, PCIe driver, Python package, Hailo firmware, and `hailo-ollama`: 5.3.0**, all
+  matching.
 - `hailo-ollama` with `qwen3:1.7b`, `qwen2.5:1.5b`, `llama3.2:1b`, and `qwen2:1.5b`.
 - Qwen3-VL-2B-Instruct HEF; Qwen2-VL is optional.
 - Whisper-Base, YOLOv8m, YOLOv8m pose, YOLOv5m segmentation, UFLD v2 lanes,
@@ -111,9 +112,55 @@ scripts/pi_setup.sh
 ```
 
 The interactive checklist covers system packages, uv/venv, HailoRT and firmware compatibility,
-models, RealSense SDK/firmware, USB power, cameras, XVF3800, gpsd, preset videos, LVGL, and tests.
-It asks before system changes and initializes sudo once instead of repeatedly interrupting downloads.
-Large downloads use resume support. Existing installations and enrollments are preserved.
+models, RealSense SDK/firmware, USB power, cameras, XVF3800, gpsd, preset videos, LVGL, tests, and an
+on-device model check. It asks before system changes and asks for the sudo password once.
+A bar on the bottom line shows the current stage, elapsed time, and an upper-bound ETA
+(`--no-progress` turns it off). Large downloads resume. Existing installations and Face ID
+enrollments are preserved. Each run is logged to `runtime/logs/setup-*.log` (owner-only).
+
+### Install HailoRT 5.3.0 first
+
+Setup verifies, but does not install, the HailoRT runtime. Hailo distributes it only through the
+[Developer Zone](https://hailo.ai/developer-zone/) (login required), and the Raspberry Pi apt
+repository stops at 5.1.x (`hailo-h10-all`). Install these 5.3.0 packages, then reboot:
+
+- `hailort` (CLI and library), `hailort-pcie-driver` (driver and Hailo-10H firmware), and the
+  `hailort` Python wheel for Python 3.13.
+
+Setup requires every component to report 5.3.0: CLI, firmware, the loaded `hailo1x_pci` driver,
+and the Python binding. It then installs the rest:
+
+| Component | When missing or not 5.3.0 |
+|---|---|
+| `hailo-ollama` | Builds Hailo's public `v5.3.0` source into `/usr/local`, about 4 minutes; replaces an older `hailo-gen-ai-model-zoo` package after asking |
+| YOLOv8m, pose, YOLOv5m-seg, SCRFD | Downloads Hailo Model Zoo `v5.3.0` Hailo-10H builds |
+| UFLD v2 lanes, Paddle OCR det/rec | Downloads Hailo's Hailo-10H resource builds (the same files hailo-apps uses) |
+| Whisper-Base, Qwen2-VL, Qwen3-VL | Downloads the GenAI Model Zoo `v5.3.0` builds |
+| Ollama chat models | Pulls them through a temporary `hailo-ollama` on port 8001 |
+
+Setup identifies each HEF build by its exact byte size, which differs in every Model Zoo release,
+so no network access is needed. A missing file is downloaded. A different build, such as a 5.1 file
+from hailo-apps, is replaced after confirmation. The old file is moved to `.aibox-replaced/` in
+the same folder. `scripts/pi_setup.sh --check` reports both cases without changing anything.
+
+Before finishing, setup offers to load and run every model on the Hailo-10H by running the hardware
+tests (`pytest -m pi`). Stop `run_aibox.sh` first, because the server owns the NPU.
+
+On a Pi with HailoRT 5.3.0, Model Zoo 5.1 builds also run. An A/B test of the two HEF sets against
+the same images and prompts produced the following results:
+
+| | 5.1 builds | 5.3.0 builds |
+|---|---|---|
+| Detection, pose, and segmentation | Same objects (box IoU 0.91–1.00, keypoints within 3–5 px) | Same; only detections near the 0.35 threshold differ |
+| `HAILO_RESOURCE_EXHAUSTED` during the live benchmark | 11 | 0 |
+| Lanes, first request | 9.2 s | 1.3 s |
+| Qwen3-VL question right after lanes | 25 s | 1.9 s |
+| Qwen2-VL: shirt text and "glasses?" | "Cavuquet", "?" | "Racquet", "No…" |
+| Whisper-Base WER, 50 XVF3800 cabin clips | **47%** | 55% |
+
+Do not mix the two sets. Whisper-Base v5.1.1 together with the v5.3.0 vision HEFs leaves no room for
+Qwen3-VL, and it fails to load with `HAILO_RESOURCE_EXHAUSTED`. Whisper-Base is weak on far-field
+cabin audio in both builds.
 
 Useful options:
 
@@ -154,6 +201,10 @@ studio_lvgl/scripts/run_on_pi.sh gpu --fullscreen --url http://127.0.0.1:8442
 ```
 
 ## LAN API-key authentication
+
+The AI Box serves its APIs to the whole LAN, so the key keeps other devices on the same network
+from using the NPU, cameras, and microphone. Setup prints a short note about the key at the end of
+each run.
 
 `pi_setup.sh` preserves an existing `edge/hailo-ai-box/.env` or generates a random
 `AIBOX_API_KEY` there with owner-only permissions. A newly generated key is displayed once so the
