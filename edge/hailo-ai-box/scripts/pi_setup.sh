@@ -121,18 +121,27 @@ progress_start() {
   printf '\n\033[A\0337\033[1;%dr\0338' $((rows - 1)) >&"$TTY_FD"
   (
     trap 'exit 0' TERM
-    start=$(date +%s) last_rows=$rows
+    start=$(date +%s) last_size=$size tick=0
     while :; do
       size=$(stty size </dev/tty 2>/dev/null || echo "24 80")
       rows=${size%% *}
-      if ((rows != last_rows)); then
+      # Terminals drop the scroll region on resize (an on-screen keyboard counts); restore it fast
+      # and erase the old bar so it does not end up in the scrolled output.
+      if [[ "$size" != "$last_size" ]]; then
+        old_rows=${last_size%% *}
+        if ((old_rows < rows)); then
+          printf '\0337\033[%d;1H\033[2K\0338' "$old_rows" >&"$TTY_FD"
+        fi
         printf '\0337\033[1;%dr\0338' $((rows - 1)) >&"$TTY_FD"
-        last_rows=$rows
+        last_size=$size
+        tick=0
       fi
-      if read -r index stage_start title <"$PROGRESS_STATE" 2>/dev/null && [[ -n "${index:-}" ]]; then
+      if ((tick % 4 == 0)) && read -r index stage_start title <"$PROGRESS_STATE" 2>/dev/null \
+        && [[ -n "${index:-}" ]]; then
         draw_progress "$start" "$index" "$stage_start" "$title" "$rows" "${size##* }" "$stage_weights" >&"$TTY_FD"
       fi
-      sleep 1
+      tick=$((tick + 1))
+      sleep 0.25
     done
   ) &
   PROGRESS_PID=$!
@@ -550,7 +559,7 @@ if ((SKIP_REALSENSE == 0)); then
     if [[ -d "$RSID_LIB" ]]; then
       RSID_VERSION=$(PYTHONPATH="$RSID_LIB" LD_LIBRARY_PATH="$RSID_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         python3 -c 'import rsid_py; print(rsid_py.__version__)' 2>/dev/null || true)
-      [[ "$RSID_VERSION" == "$EXPECTED_RSID_SDK" ]] || fail "RealSense SDK $RSID_VERSION does not match $EXPECTED_RSID_SDK."
+      if [[ "$RSID_VERSION" == "$EXPECTED_RSID_SDK" ]]; then ok "RealSense ID SDK $RSID_VERSION"; else fail "RealSense SDK ${RSID_VERSION:-not found} does not match $EXPECTED_RSID_SDK."; fi
     fi
   fi
   stop_if_failed
@@ -637,7 +646,7 @@ stop_if_failed
 if ((SKIP_TESTS == 0)); then
   step tests "Non-hardware regression tests"
   if ((CHECK_ONLY == 0)); then
-    .venv/bin/pytest -q -m 'not pi'
+    .venv/bin/pytest -q --disable-warnings -m 'not pi'
   else
     ok "Tests are run during setup, not in --check mode."
   fi
@@ -657,7 +666,7 @@ if ((SKIP_TESTS == 0)); then
         sleep 0.2
       done
     fi
-    if .venv/bin/pytest -q -m pi; then
+    if .venv/bin/pytest -q --disable-warnings -m pi; then
       ok "Every model loaded and ran on the Hailo-10H."
     else
       fail "A model failed on the Hailo-10H (output above). Another hailo-ollama on port 8000 must run with HAILO_OLLAMA_VDEVICE_GROUP_ID=SHARED."
