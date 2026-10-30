@@ -583,7 +583,8 @@ if ((SKIP_REALSENSE == 0)); then
           fail "F455 firmware update was declined."
         fi
       else
-        fail "F455 firmware mismatch. Supply a compatible signed image with --firmware-image; older units may need staged updates."
+        # Face ID needs matching firmware; everything else in the AI Box works without it.
+        warn "F455 firmware $OPFW does not match $EXPECTED_RSID_FW, so Face ID is unavailable. Update it with: scripts/f455_firmware.sh (staged, asks before each step)."
       fi
     else
       ok "F455 firmware matches $EXPECTED_RSID_FW."
@@ -740,6 +741,12 @@ if ((HEF_OTHER)); then
 else
   ok "Model files: all $HEF_EXPECTED are the expected builds (Whisper-Base: GenAI $WHISPER_ZOO)."
 fi
-((SKIP_REALSENSE)) || ok "RealSense SDK $EXPECTED_RSID_SDK, F455 OPFW $EXPECTED_RSID_FW."
+if ((SKIP_REALSENSE == 0)); then
+  if [[ "${OPFW:-}" == "$EXPECTED_RSID_FW" ]]; then
+    ok "RealSense SDK $EXPECTED_RSID_SDK, F455 OPFW $OPFW."
+  else
+    warn "F455 OPFW ${OPFW:-not detected}; Face ID needs $EXPECTED_RSID_FW (update: scripts/f455_firmware.sh)."
+  fi
+fi
 printf 'Start with: cd %s && scripts/run_aibox.sh\n' "$ROOT"
 printf 'Live benchmark: %s/scripts/bench_live.py\n' "$ROOT"

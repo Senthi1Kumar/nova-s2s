@@ -172,14 +172,37 @@ scripts/pi_setup.sh --skip-models
 scripts/pi_setup.sh --skip-realsense
 ```
 
-If the F455 firmware differs, supply a **SKU-compatible signed image**:
+A USB power change requires a reboot.
+
+### F455 firmware
+
+Face ID needs F455/F450 operational firmware (OPFW) 9.16.1.1, which matches RealSense ID SDK 3.6.1.
+Other versions produce a setup warning, and everything except Face ID still works. To update, run
+the following after `pi_setup.sh`, with `run_aibox.sh` stopped:
 
 ```bash
-scripts/pi_setup.sh --firmware-image /path/to/signed-firmware.bin
+scripts/f455_firmware.sh --plan      # what it would do for this camera
+scripts/f455_firmware.sh             # flash hop by hop; asks before each one
 ```
 
-Older cameras can require staged updates. The script never force-flashes firmware. A USB power
-change requires a reboot.
+Each old firmware generation must be flashed with the SDK release from its own era. The script reads
+the camera's OPFW version and serial number, and derives the SKU from the serial number using the
+same rule as SDK 3.6.1. It then plans the hops. Old updaters are built from their release tags, and
+signed images are downloaded from Intel's GitHub releases. Neither is stored in this repository;
+both go to `runtime/`.
+
+| Hop | When OPFW is | Updater (RealSense ID SDK) | Image |
+|---|---|---|---|
+| 1 | below 2.0.10.45 | v0.12.4 `fw-updater-cli` (the first SDK with firmware updates) | `F450_2.0.10.45_signed.bin` |
+| 2 | below 3.1.0.29 | v0.19.0 `rsid-fw-update` | `F450_3.1.0.29_SKU<n>_SIGNED.bin` |
+| 3 | not 9.16.1.1 | v3.6.1 `rsid-fw-update` (built by setup) | `F450_9.16.1.1_SKU<n>_SIGNED.bin` |
+
+Hops 2 and 3 have been run on a 2.0.10.45 unit. Hop 1 has not been run on a 1.x unit yet.
+`--from 1.6.1.1007 --dry-run` rehearses a plan: it builds the updaters and downloads the images
+without flashing. Each hop takes 1–2 minutes. Do not unplug the camera or power off the Pi while it
+flashes. An update can erase faces enrolled on the camera, so re-enroll them in Face ID afterwards.
+The script never downgrades firmware. `pi_setup.sh --firmware-image PATH` still flashes a single
+image that you supply.
 
 Setup writes non-secret paths to `runtime/setup.env`. The API key is stored separately in `.env`.
 
