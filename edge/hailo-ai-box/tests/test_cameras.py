@@ -121,3 +121,24 @@ async def test_reopen_waits_for_previous_stream_to_release_device():
     cams = Cameras(Settings(), opener=lambda name, path: ExclusiveCapture())
     assert len(await _take(cams, 2)) == 2
     assert len(await _take(cams, 2)) == 2  # immediate reopen succeeds
+
+
+def test_resolve_device_prefers_first_pattern_and_skips_excluded(tmp_path):
+    from aibox.backends.cameras import resolve_device
+
+    for name in ("usb-Intel_Intel_F450_X-video-index0", "usb-Sonix_Cam-video-index0"):
+        (tmp_path / name).touch()
+    any_usb = f"{tmp_path}/usb-*-video-index0"
+    c920e = f"{tmp_path}/usb-046d_Logi_Webcam_C920e_*-video-index0"
+    realsense = f"{tmp_path}/usb-Intel_Intel_F45*"
+    # No C920e: the USB source falls back to the other webcam, never the RealSense.
+    assert resolve_device(f"{c920e}|{any_usb}", (realsense,)) == f"{tmp_path}/usb-Sonix_Cam-video-index0"
+    (tmp_path / "usb-046d_Logi_Webcam_C920e_A1-video-index0").touch()
+    assert resolve_device(f"{c920e}|{any_usb}", (realsense,)).endswith("C920e_A1-video-index0")
+    assert resolve_device("/dev/video7") == "/dev/video7"  # explicit paths pass through
+
+
+def test_resolve_device_none_when_nothing_connected(tmp_path):
+    from aibox.backends.cameras import resolve_device
+
+    assert resolve_device(f"{tmp_path}/usb-*-video-index0") is None

@@ -13,7 +13,7 @@
 static const char *const k_task_id[6] = { "detection", "pose", "segmentation", "lanes", "dms", "ocr" };
 static const char *const k_task_name = "Object Detection\nPose Estimation\nSegmentation\nLane Detection\nDriver Monitoring\nOCR";
 static const char *const k_src_id[2] = { "c920e", "f455" };
-static const char *const k_src_name = "C920e (USB webcam)\nF455 (depth camera)";
+static const char *const k_src_name = "USB webcam (C920e)\nF455 (depth camera)";
 #define N_CAM 2
 static const cb_color_t k_pal[5] = { CB_CYAN, CB_GREEN, CB_ORANGE, CB_VIOLET, CB_YELLOW };
 

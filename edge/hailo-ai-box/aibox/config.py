@@ -6,11 +6,13 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+# By camera model, not unit: /dev/v4l/by-id names carry each camera's serial number. Patterns are
+# resolved when a stream opens, so a camera plugged in later works too. The USB source ("c920e")
+# prefers a Logitech C920e and falls back to any other USB webcam.
 DEFAULT_CAMERAS = {
-    "c920e": "/dev/v4l/by-id/usb-046d_Logi_Webcam_C920e_A12773AF-video-index0",
-    "f455": (
-        "/dev/v4l/by-id/usb-Intel_Intel_F450_10446228093399A27FM10464-100-video-index0"
-    ),
+    "c920e": ("/dev/v4l/by-id/usb-046d_Logi_Webcam_C920e_*-video-index0"
+              "|/dev/v4l/by-id/usb-*-video-index0"),
+    "f455": "/dev/v4l/by-id/usb-Intel_Intel_F45*-video-index0",
 }
 
 

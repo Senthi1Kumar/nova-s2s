@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import glob
 import threading
 import time
 from collections.abc import AsyncIterator, Callable
@@ -19,10 +21,29 @@ MAX_READ_FAILURES = 30
 REOPEN_WAIT_S = 3.0
 
 
+REALSENSE_GLOB = "/dev/v4l/by-id/usb-Intel_Intel_F45*"
+
+
+def resolve_device(spec: str, exclude: tuple[str, ...] = ()) -> str | None:
+    """A device path, or the first connected device for '|'-separated glob patterns tried in
+    order (skipping devices that match `exclude`); None when nothing is connected."""
+    for pattern in spec.split("|"):
+        if not glob.has_magic(pattern):
+            return pattern
+        for match in sorted(glob.glob(pattern)):
+            if not any(fnmatch.fnmatch(match, x) for x in exclude):
+                return match
+    return None
+
+
 def open_v4l2(name: str, path: str) -> Any:
     import cv2
 
-    cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+    # Only the F455 source may resolve to the RealSense; the USB source falls back to any webcam.
+    device = resolve_device(path, () if name == "f455" else (REALSENSE_GLOB,))
+    if device is None:
+        raise RuntimeError(f"camera {name} is not connected (no device matches {path})")
+    cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
     mode = CAPTURE_MODES.get(name)
     if mode:
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*mode[0]))

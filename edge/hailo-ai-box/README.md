@@ -193,6 +193,19 @@ scripts/run_aibox.sh
 - Pi loopback API: `http://127.0.0.1:8442`.
 - LVGL starts automatically when `studio_lvgl/build-gpu/aibox_studio` exists.
 
+Cameras are found when a stream starts, so a camera plugged in later also works. The **USB camera**
+source uses a Logitech C920e if one is connected, otherwise any other USB webcam (never the
+RealSense). To choose one explicitly:
+
+```bash
+ls /dev/v4l/by-id/                                    # connected cameras
+scripts/run_aibox.sh --camera /dev/video0             # or a /dev/v4l/by-id/... path
+scripts/run_aibox.sh --f455 /dev/v4l/by-id/usb-Intel_...-video-index0
+```
+
+Cameras, the F455, and the XVF3800 are optional. Without them, setup reports warnings and still
+builds everything. Uploads, preset videos, chat, and the image APIs keep working.
+
 To run the server without LVGL, or restart LVGL separately:
 
 ```bash

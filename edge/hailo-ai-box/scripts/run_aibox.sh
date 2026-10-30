@@ -3,7 +3,20 @@
 # Loads runtime/setup.env and optional .env secrets without printing them.
 # Env: AIBOX_HTTPS_PORT (8443), AIBOX_HTTP_PORT (8442), AIBOX_FAKE=1 (no NPU, no ollama),
 #      AIBOX_LVGL=0 to skip the LVGL Studio. Ctrl-C stops everything this script started.
+# Options: --camera DEVICE  USB camera for the "USB camera" source, e.g. /dev/video0 or a
+#                           /dev/v4l/by-id path (default: a C920e, else any USB webcam).
+#          --f455 DEVICE    RealSense F455 RGB device (default: auto-detected).
 set -euo pipefail
+CAMERA_ARG="" F455_ARG=""
+while (($#)); do
+  case "$1" in
+    --camera) CAMERA_ARG=${2:?--camera needs a device path}; shift ;;
+    --f455) F455_ARG=${2:?--f455 needs a device path}; shift ;;
+    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 if [[ -f "$ROOT/runtime/setup.env" ]]; then
@@ -16,6 +29,11 @@ if [[ -f "$ROOT/.env" ]]; then
   source "$ROOT/.env"
   set +a
 fi
+for dev in "$CAMERA_ARG" "$F455_ARG"; do
+  [[ -z "$dev" || -e "$dev" ]] || { echo "Camera device not found: $dev (see: ls /dev/v4l/by-id)" >&2; exit 2; }
+done
+[[ -z "$CAMERA_ARG" ]] || export AIBOX_CAMERA_C920E="$CAMERA_ARG"
+[[ -z "$F455_ARG" ]] || export AIBOX_CAMERA_F455="$F455_ARG"
 HTTPS_PORT="${AIBOX_HTTPS_PORT:-8443}"
 HTTP_PORT="${AIBOX_HTTP_PORT:-8442}"
 LOGS="$ROOT/runtime/logs"
@@ -91,6 +109,8 @@ if [[ "${AIBOX_LVGL:-1}" != "0" && -x "$LVGL_BIN" ]]; then
   "$ROOT/studio_lvgl/scripts/run_on_pi.sh" gpu --fullscreen --url "http://127.0.0.1:${HTTP_PORT}" >"$LOGS/lvgl.log" 2>&1 &
   PIDS+=("$!")
   echo "started LVGL Studio pid ${PIDS[-1]}"
+elif [[ "${AIBOX_LVGL:-1}" != "0" ]]; then
+  echo "LVGL Studio is not built; run scripts/pi_setup.sh (it builds studio_lvgl/build-gpu)" >&2
 fi
 
 # 6. URL

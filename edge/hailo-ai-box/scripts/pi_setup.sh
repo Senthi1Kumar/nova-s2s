@@ -571,7 +571,9 @@ if ((SKIP_REALSENSE == 0)); then
     RSID_INFO=$(printf 'v\nq\n' | timeout 15 "$RSID_CLI" 2>&1 || true)
     OPFW=$(sed -n 's/^OPFW[[:space:]]*:[[:space:]]*\([^[:space:]]*\).*/\1/p' <<<"$RSID_INFO" | head -n1)
     printf 'F455 OPFW: %s (required %s)\n' "${OPFW:-not detected}" "$EXPECTED_RSID_FW"
-    if [[ "$OPFW" != "$EXPECTED_RSID_FW" ]]; then
+    if [[ -z "$OPFW" ]]; then
+      warn "F455 not detected; Face ID is unavailable until it is connected. Rerun setup to check its firmware."
+    elif [[ "$OPFW" != "$EXPECTED_RSID_FW" ]]; then
       if [[ -n "$FIRMWARE_IMAGE" ]] && ((CHECK_ONLY == 0)); then
         [[ -s "$FIRMWARE_IMAGE" ]] || { echo "Firmware image not found: $FIRMWARE_IMAGE" >&2; exit 1; }
         warn "Old F455 firmware can require staged, SKU-compatible signed updates. Do not force an incompatible image."
@@ -611,15 +613,25 @@ find_camera() {
   done
   return 1
 }
-C920E=$(find_camera 'usb-046d_Logi_Webcam_C920e_*-video-index0' || true)
-F455=$(find_camera 'usb-Intel_*-video-index0' || true)
-[[ -n "$C920E" ]] && ok "C920e: $C920E" || fail "C920e UVC device not found."
-[[ -n "$F455" ]] && ok "F455 RGB: $F455" || fail "F455 UVC device not found."
-[[ -e /dev/ttyACM0 ]] && ok "F455 serial: /dev/ttyACM0" || fail "F455 serial device /dev/ttyACM0 not found."
+find_usb_webcam() {
+  local path
+  for path in /dev/v4l/by-id/usb-*-video-index0; do
+    [[ -e "$path" && "$path" != *Intel_Intel_F45* ]] && { printf '%s\n' "$path"; return 0; }
+  done
+  return 1
+}
+# The server resolves cameras when a stream opens, so these are reported, not pinned.
+USB_CAM=$(find_camera 'usb-046d_Logi_Webcam_C920e_*-video-index0' || find_usb_webcam || true)
+F455=$(find_camera 'usb-Intel_Intel_F45*-video-index0' || true)
+# Peripherals are optional: the AI Box still serves uploads, presets, chat and the image APIs.
+[[ -n "$USB_CAM" ]] && ok "USB webcam: $USB_CAM" \
+  || warn "No USB webcam connected; the USB camera live view is unavailable."
+[[ -n "$F455" ]] && ok "F455 RGB: $F455" || warn "F455 camera not connected; its live view and Face ID are unavailable."
+[[ -e /dev/ttyACM0 ]] && ok "F455 serial: /dev/ttyACM0" || warn "F455 serial /dev/ttyACM0 not found; Face ID is unavailable."
 if command -v arecord >/dev/null 2>&1 && arecord -l | grep -qi 'xvf3800'; then
   ok "XVF3800 capture device found."
 else
-  fail "XVF3800 microphone not found in arecord -l."
+  warn "XVF3800 microphone not connected; Voice AI needs it (or another microphone)."
 fi
 if command -v aplay >/dev/null 2>&1 && aplay -l | grep -qi 'xvf3800'; then
   ok "XVF3800 playback device found."
@@ -717,8 +729,6 @@ if ((CHECK_ONLY == 0)); then
     printf 'AIBOX_QWEN3_VL_HEF=%q\n' "$QWEN3_HEF"
     printf 'AIBOX_PIPER_VOICE=%q\n' "$PIPER_VOICE"
     printf 'AIBOX_REALSENSE_LIB=%q\n' "$RSID_LIB"
-    printf 'AIBOX_CAMERA_C920E=%q\n' "$C920E"
-    printf 'AIBOX_CAMERA_F455=%q\n' "$F455"
   } > runtime/setup.env
   ok "Wrote $ROOT/runtime/setup.env"
 fi

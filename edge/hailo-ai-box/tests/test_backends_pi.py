@@ -12,9 +12,6 @@ from aibox.config import Settings
 from aibox.media import decode_audio
 
 pytestmark = pytest.mark.pi
-WAV = os.path.expanduser(
-    "~/repos/test_nova_repo/nova-s2s/edge/nova-hailo/bench/corpus/speech_v1/audio/"
-    "sp_019__default__ch1.wav")
 
 
 @pytest.fixture(scope="module")
@@ -39,12 +36,13 @@ def test_resident_set_and_vlm_in_slot(svc):
 
 
 async def test_whisper(svc):
-    pcm = decode_audio(open(WAV, "rb").read()) * 3.0  # XVF3800 ch1 needs gain x3
-    pcm = np.clip(pcm, -1, 1)
+    # Piper speech keeps the test self-contained on any Pi (no recorded corpus needed).
+    pcm = decode_audio(await svc.tts.synthesize("Hello from the AI box."))
     t0 = time.perf_counter()
     text = await svc.asr.transcribe(pcm)
     print(f"whisper {len(pcm) / 16000:.1f}s audio -> {time.perf_counter() - t0:.2f}s: {text!r}")
-    assert "rock" in text.lower()
+    words = {w.strip(".,!?").lower() for w in text.split()}
+    assert {"hello", "box"} <= words, text
 
 
 async def test_piper(svc):

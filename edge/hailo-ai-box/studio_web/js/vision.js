@@ -5,7 +5,7 @@ const TASKS = [
   ['detection', 'Object Detection'], ['pose', 'Pose'], ['segmentation', 'Segmentation'],
   ['lanes', 'Lane Detection'], ['dms', 'Driver Monitoring'], ['ocr', 'OCR'],
 ];
-const SOURCES_BASE = [['c920e', 'C920e camera (box)'], ['f455', 'F455 camera (box)'],
+const SOURCES_BASE = [['c920e', 'USB camera (box)'], ['f455', 'F455 camera (box)'],
   ['client', "This device's camera"], ['upload', 'Upload image']];
 let SOURCES = SOURCES_BASE;
 const SKELETON = [[0, 1], [0, 2], [1, 3], [2, 4], [5, 6], [5, 7], [7, 9], [6, 8], [8, 10], [5, 11], [6, 12],
