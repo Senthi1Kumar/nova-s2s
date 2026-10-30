@@ -197,7 +197,14 @@ both go to `runtime/`.
 | 2 | below 3.1.0.29 | v0.19.0 `rsid-fw-update` | `F450_3.1.0.29_SKU<n>_SIGNED.bin` |
 | 3 | not 9.16.1.1 | v3.6.1 `rsid-fw-update` (built by setup) | `F450_9.16.1.1_SKU<n>_SIGNED.bin` |
 
-Hops 2 and 3 have been run on a 2.0.10.45 unit. Hop 1 has not been run on a 1.x unit yet.
+On a camera older than 9.16, hop 3 runs twice. The first pass installs OPFW 9.16, and the old
+firmware then rejects the larger 9.16 face networks (`err 7: NNLED sz 4326972 > 3670016`). The
+second pass runs under 9.16 and installs NNLED, DNET, RECOG, and the other networks. The script
+offers the second pass automatically. It considers the camera done only when OPFW, NNLED, DNET, and
+RECOG all match 9.16.1.1. A camera left with 9.16 OPFW and old networks can enroll, but
+authentication times out (`Failed to recv sync bytes`). Rerunning the script finishes it.
+
+Hops 2 and 3, including both passes, have been run on 2.0.10.45 units. Hop 1 ran on a 1.6.1.1007 unit.
 `--from 1.6.1.1007 --dry-run` rehearses a plan: it builds the updaters and downloads the images
 without flashing. Each hop takes 1–2 minutes. Do not unplug the camera or power off the Pi while it
 flashes. An update can erase faces enrolled on the camera, so re-enroll them in Face ID afterwards.

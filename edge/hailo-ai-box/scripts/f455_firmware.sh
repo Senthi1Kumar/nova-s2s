@@ -48,9 +48,32 @@ confirm() {
 version_lt() { [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]; }
 
 RSID_CLI=$RSID_REPO/build-device/bin/rsid-cli
-current_opfw() {
-  printf 'v\nq\n' | timeout 15 "$RSID_CLI" 2>&1 \
-    | sed -n 's/^OPFW[[:space:]]*:[[:space:]]*\([^[:space:]]*\).*/\1/p' | head -n1 || true
+# The 9.16.1.1 image also carries the face networks; Face ID needs all of them, not just OPFW.
+declare -A TARGET_MODULES=([OPFW]=$TARGET [NNLED]=19.8.25.2 [DNET]=26.2.25.0 [RECOG]=29.12.25.0)
+declare -A MODULES=()
+read_modules() {
+  local name version
+  MODULES=()
+  while read -r name version; do
+    MODULES[$name]=$version
+  done < <(printf 'v\nq\n' | timeout 15 "$RSID_CLI" 2>&1 \
+    | sed -n 's/^\([A-Z0-9]*\)[[:space:]]*:[[:space:]]*\([0-9][0-9.]*\).*/\1 \2/p' || true)
+}
+modules_behind() {
+  local name
+  for name in OPFW NNLED DNET RECOG; do
+    [[ "${MODULES[$name]:-}" == "${TARGET_MODULES[$name]}" ]] \
+      || printf '%s %s->%s  ' "$name" "${MODULES[$name]:-?}" "${TARGET_MODULES[$name]}"
+  done
+}
+wait_for_camera() {
+  printf 'Waiting for the camera to restart...\n'
+  for _ in $(seq 1 30); do
+    read_modules
+    [[ -n "${MODULES[OPFW]:-}" ]] && return 0
+    sleep 2
+  done
+  die "The camera did not come back after flashing; do not unplug it. Power-cycle the Pi, then rerun this script."
 }
 
 # Mirrors the serial-number rule in SDK 3.6.1 (src/FwUpdate/F45x/FwUpdaterF45x.cc).
@@ -105,7 +128,8 @@ if [[ -n "$FROM" ]]; then
   CURRENT=$FROM
   warn "Rehearsal: planning as if the camera reported OPFW $FROM (nothing is flashed)."
 else
-  CURRENT=$(current_opfw)
+  read_modules
+  CURRENT=${MODULES[OPFW]:-}
   [[ -n "$CURRENT" ]] || die "The camera did not report its firmware; check $PORT and the USB cable."
 fi
 ok "Serial $SERIAL -> SKU $SKU, OPFW $CURRENT (Face ID needs $TARGET)."
@@ -118,9 +142,13 @@ if version_lt "$TARGET" "$CURRENT"; then
   die "OPFW $CURRENT is newer than $TARGET; this script does not downgrade."
 elif [[ "$CURRENT" != "$TARGET" ]]; then
   HOPS+=("v3.6.1|rsid-fw-update|F450_${TARGET}_SKU${SKU}_SIGNED.bin|$TARGET")
+elif [[ -z "$FROM" && -n "$(modules_behind)" ]]; then
+  # An interrupted 9.16 update leaves OPFW current and the face networks old.
+  warn "OPFW is $TARGET but the face networks are not: $(modules_behind)"
+  HOPS+=("v3.6.1|rsid-fw-update|F450_${TARGET}_SKU${SKU}_SIGNED.bin|$TARGET")
 fi
 if ((${#HOPS[@]} == 0)); then
-  ok "Firmware is already $TARGET; nothing to do."
+  ok "Firmware is already $TARGET, including the face networks; nothing to do."
   exit 0
 fi
 
@@ -130,6 +158,8 @@ for i in "${!HOPS[@]}"; do
   printf '  %d. %-14s %-34s -> OPFW %s\n' "$((i + 1))" "$tag $tool" "$image" "$after"
 done
 cat <<'EOF'
+  On a camera older than 9.16, the last hop runs twice: the old firmware rejects the larger
+  9.16 face networks (err 7: NNLED size), and the second pass installs them under 9.16.
   Each hop takes 1-2 minutes. Do not unplug the camera or power off the Pi while it flashes.
   An update can erase faces enrolled on the camera; re-enroll them in Face ID afterwards.
 EOF
@@ -149,25 +179,41 @@ if ((DRY_RUN)); then
   exit 0
 fi
 
-for i in "${!HOPS[@]}"; do
-  IFS='|' read -r tag tool image after <<<"${HOPS[$i]}"
-  step "Hop $((i + 1))/${#HOPS[@]}: OPFW $(current_opfw) -> $after"
+flash() {
+  local tag=$1 tool=$2 image=$3 bin lib
   if [[ "$tag" == v3.6.1 ]]; then
     bin=$RSID_REPO/build-device/bin/$tool lib=$RSID_REPO/build-device/lib
   else
     bin=$WORK/$tag/build/bin/$tool lib=$WORK/$tag/build/lib
   fi
+  LD_LIBRARY_PATH="$lib" "$bin" --file "$DOWNLOADS/$image" --port "$PORT" --interactive
+}
+
+read_modules
+for i in "${!HOPS[@]}"; do
+  IFS='|' read -r tag tool image after <<<"${HOPS[$i]}"
+  step "Hop $((i + 1))/${#HOPS[@]}: OPFW ${MODULES[OPFW]:-?} -> $after"
   confirm "Flash $image with the $tag updater now?" || die "Stopped before hop $((i + 1)); the camera is unchanged."
-  LD_LIBRARY_PATH="$lib" "$bin" --file "$DOWNLOADS/$image" --port "$PORT" --interactive \
-    || die "The $tag updater reported an error; do not unplug the camera. Rerun this script to resume."
-  printf 'Waiting for the camera to restart...\n'
-  now=""
-  for _ in $(seq 1 30); do
-    now=$(current_opfw)
-    [[ -n "$now" ]] && break
-    sleep 2
+  if [[ "$tag" != v3.6.1 ]]; then
+    flash "$tag" "$tool" "$image" \
+      || die "The $tag updater reported an error; do not unplug the camera. Rerun this script to resume."
+    wait_for_camera
+    [[ "${MODULES[OPFW]}" == "$after" ]] \
+      || die "After hop $((i + 1)) the camera reports OPFW ${MODULES[OPFW]}, expected $after. Rerun this script."
+    ok "OPFW is now $after."
+    continue
+  fi
+  for pass in 1 2; do
+    flash "$tag" "$tool" "$image" || warn "Pass $pass of the $tag updater ended with an error (see above)."
+    wait_for_camera
+    [[ -z "$(modules_behind)" ]] && break
+    if ((pass == 1)) && [[ "${MODULES[OPFW]}" == "$TARGET" ]]; then
+      warn "OPFW is now $TARGET; the face networks still need the second pass: $(modules_behind)"
+      confirm "Run the second pass now?" || die "Stopped. Rerun this script to finish the face networks."
+    else
+      die "The camera is not fully on $TARGET: $(modules_behind). Rerun this script; if it repeats, keep the log above."
+    fi
   done
-  [[ "$now" == "$after" ]] || die "After hop $((i + 1)) the camera reports OPFW '${now:-nothing}', expected $after."
-  ok "OPFW is now $after."
+  ok "OPFW and face networks are now $TARGET."
 done
 ok "F455 firmware is $TARGET. Face ID is ready; re-enroll faces if the update erased them."
