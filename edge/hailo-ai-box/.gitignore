@@ -1,6 +1,5 @@
 /runtime/
 .venv/
-/.docs/
 *.hef
 .env
 __pycache__/
@@ -12,3 +11,4 @@ __pycache__/
 /models/
 studio_lvgl/build*/
 studio_lvgl/*.log
+/.docs/

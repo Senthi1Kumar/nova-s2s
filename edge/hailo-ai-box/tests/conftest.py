@@ -16,7 +16,7 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture
 def settings():
-    return Settings(fake=True)
+    return Settings(fake=True, voice_vad=False)
 
 
 @pytest.fixture

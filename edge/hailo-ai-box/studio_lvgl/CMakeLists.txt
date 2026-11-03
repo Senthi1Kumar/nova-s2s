@@ -51,7 +51,7 @@ set(STUDIO_WARN -Wall -Wextra -Werror)
 file(GLOB STUDIO_FONTS ${CMAKE_CURRENT_SOURCE_DIR}/fonts/cb_*.c)
 add_executable(aibox_studio
   src/main.c src/app.c src/display.c src/theme.c src/net.c src/ws.c src/json.c
-  src/ui_kit.c src/logo_brain_chip.c src/voice.c src/sparkline.c src/nova/avatar.c src/nova/avatar_model.c src/nova/nova_mood.c src/nova/nova_fsm.c src/cb_ambient.c src/cb_snapshot.c
+  src/ui_kit.c src/logo_brain_chip.c src/voice.c src/voice_pcm.c src/sparkline.c src/nova/avatar.c src/nova/avatar_model.c src/nova/nova_mood.c src/nova/nova_fsm.c src/cb_ambient.c src/cb_snapshot.c
   src/screens/voice.c src/screens/overview.c src/screens/device.c src/screens/inspector.c
   src/screens/vision.c src/screens/chat.c src/screens/face.c
   ${STUDIO_FONTS})

@@ -27,7 +27,8 @@ def svc():
 
 def test_resident_set_and_vlm_in_slot(svc):
     items = {i["id"]: i for i in svc.governor.models()}
-    for mid in RESIDENT_VISION + ["whisper-base", "piper-amy"]:
+    tts_id = "phonon-31m-en" if svc.settings.tts_backend == "phonon" else "piper-amy"
+    for mid in RESIDENT_VISION + [svc.settings.asr_model, tts_id]:
         assert items[mid]["state"] == "resident", items[mid]
     assert items["qwen3-vl"]["state"] == "resident"
     assert svc.governor.genai_owner() == "vlm:qwen3-vl"
@@ -36,7 +37,7 @@ def test_resident_set_and_vlm_in_slot(svc):
 
 
 async def test_whisper(svc):
-    # Piper speech keeps the test self-contained on any Pi (no recorded corpus needed).
+    # Local TTS keeps the test self-contained on any Pi (no recorded corpus needed).
     pcm = decode_audio(await svc.tts.synthesize("Hello from the AI box."))
     t0 = time.perf_counter()
     text = await svc.asr.transcribe(pcm)
@@ -45,12 +46,12 @@ async def test_whisper(svc):
     assert {"hello", "box"} <= words, text
 
 
-async def test_piper(svc):
+async def test_tts(svc):
     t0 = time.perf_counter()
     wav = await svc.tts.synthesize("Hello from the AI box")
     with wave.open(io.BytesIO(wav)) as w:
         dur = w.getnframes() / w.getframerate()
-    print(f"piper {dur:.2f}s audio in {time.perf_counter() - t0:.2f}s")
+    print(f"{svc.settings.tts_backend} {dur:.2f}s audio in {time.perf_counter() - t0:.2f}s")
     assert dur > 0.5
 
 

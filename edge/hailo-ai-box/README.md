@@ -4,6 +4,8 @@ Edge AI inference server and demo Studio for **Raspberry Pi 5 + Hailo-10H (AI HA
 It serves chat LLMs, VLMs, computer vision, ASR, TTS, and RealSense ID face authentication over
 one FastAPI service. Web Studio runs on LAN laptops/phones; LVGL Studio runs on the Pi display.
 
+Design notes (streaming Voice AI, ASR to Hailo HEF with the Dataflow Compiler) are kept locally and are not in git. The voice evaluation guide is tracked at [bench/voice/README.md](bench/voice/README.md).
+
 ## Architecture
 
 ```mermaid
@@ -20,8 +22,8 @@ flowchart LR
     CV[HailoRT vision<br/>detection, pose, lanes,<br/>segmentation, DMS, OCR]
     GEN[Hailo GenAI<br/>Qwen3-VL or Qwen2-VL]
     OLL[hailo-ollama<br/>small chat LLMs]
-    ASR[Hailo Whisper-Base]
-    TTS[Piper on CPU]
+    ASR[Hailo Whisper Small]
+    TTS[Phonon or Piper on CPU]
     RSID[RealSense ID backend]
   end
   NPU[(Hailo-10H<br/>one NPU and one GenAI slot)]
@@ -72,6 +74,35 @@ sequenceDiagram
   A->>A: Inspector event and telemetry
 ```
 
+## Voice AI streaming and microphone routes
+
+Voice uses Pipecat 1.15.0 behind `/v1/voice/stream` with protocol version 2. PCM16 input and JSON control messages share an ordered transport. The server emits partial and final transcripts, streamed tokens, and raw PCM16LE reply audio (mono, 16 kHz, no WAV) between `tts_start` and `tts_end`, tagged with turn IDs and sentence sequence numbers. LLM text is queued for TTS at natural clause boundaries or after eight complete words; Phonon 31M then streams native chunks as they are generated while later tokens arrive. Piper uses complete-sentence chunks. A zero `tts_start.bytes` means the total is unknown until the authoritative `tts_end.bytes`. LVGL and Web own playback timing and play audio as it arrives; the server does not add a second simulated playback clock. Cancellation and disconnect close the active chat generator and invalidate older audio. The wire contract is the docstring of `aibox/voice/protocol.py`.
+
+**ASR models.** Whisper Small is the default on the Hailo-10H. Set `AIBOX_ASR_MODEL=whisper-base` or `whisper-tiny` to select a smaller, faster HEF; setup downloads the selected GenAI v5.3.0 model. `AIBOX_ASR_LANGUAGE=en` forces English.
+
+**TTS backends.** Phonon 31M English (`ptts==0.5.0`, CPU) is the default. Set `AIBOX_TTS_BACKEND=piper` to use Piper Amy low instead. Setup installs the runtime and resolves the selected model for offline use. Phonon's default `duration_delta=-0.25` measured about 1.15× faster speech; override it with `AIBOX_PHONON_DURATION_DELTA` (`0` restores the original rate).
+
+**Speech gate.** Before ASR, Silero VAD checks each captured turn. Turns without enough speech are dropped and reported as `ignored` events instead of being transcribed. Server settings:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AIBOX_VOICE_VAD` | on | Enable the Silero speech gate |
+| `AIBOX_VOICE_VAD_THRESHOLD` | `0.5` | Silero speech probability threshold |
+| `AIBOX_VOICE_MIN_SPEECH_MS` | `300` | Minimum speech duration for a turn |
+| `AIBOX_VOICE_MIN_SPEECH_RATIO` | `0.15` | Minimum speech fraction of the turn |
+| `AIBOX_VOICE_PARTIALS` | on | Emit partial transcripts |
+| `AIBOX_VOICE_BARGE_IN` | off | Allow interrupting a reply by speaking |
+| `AIBOX_ASR_LANGUAGE` | `en` | ASR language |
+| `AIBOX_ASR_MODEL` | `whisper-small` | Whisper Tiny, Base, or Small HEF |
+
+**Barge-in** is opt-in. Enable it on the server with `AIBOX_VOICE_BARGE_IN`, and on the client with `STUDIO_BARGE_IN` (LVGL) or the "Barge-in (beta)" checkbox (Web). The server confirms an interruption only after enough speech is heard; an unconfirmed attempt is dropped and the reply continues.
+
+**Microphone routes.** `run_aibox.sh` picks the route with `python -m aibox.audio.profile --shell`. XVF3800 is preferred. `AIBOX_XVF_CHANNEL` selects its capture channel: `1` (default) is the AEC residual, `0` is the processed output. The default stays at `1` until the evaluation in [bench/voice/README.md](bench/voice/README.md) decides. WM8960 uses PipeWire WebRTC AEC: playback goes to `echo-cancel-sink` and capture comes from `echo-cancel-source` through PortAudio's `pulse` device. `scripts/setup_voice_audio.sh` configures the route. LVGL reads `NOVA_CAPTURE_DEVICE`, `NOVA_PLAYBACK_DEVICE`, `NOVA_CAPTURE_CHANNEL` and `NOVA_MIC_GAIN` for generic microphones and gain. Web Studio prefers the XVF3800 microphone and speaker when Chromium exposes them and uses its onboard AEC/NS without a second browser processing chain; other microphones use browser processing and the system default speaker. LVGL's direct ALSA device ownership can block simultaneous browser playback on the Pi, so test those clients separately.
+
+The default turn judge is deterministic timeout control. Local D3-edge is experimental until Pi latency, memory, and quality benchmarks pass; select it with `AIBOX_TURN_JUDGE=d3_edge` after installing `transformers` and a matching `torch` yourself. Hosted Jev is only an optional benchmark reference and is not required for offline operation.
+
+Wake-word detection and speaker verification are parked for a separate design discussion. No wake model is bundled or reused. See the [voice benchmark guide](bench/voice/README.md).
+
 ## Hardware
 
 Required for the complete demo:
@@ -94,8 +125,8 @@ Optional: Adafruit GPS with `gpsd` (a satellite fix usually requires a windowsil
   matching.
 - `hailo-ollama` with `qwen3:1.7b`, `qwen2.5:1.5b`, `llama3.2:1b`, and `qwen2:1.5b`.
 - Qwen3-VL-2B-Instruct HEF; Qwen2-VL is optional.
-- Whisper-Base, YOLOv8m, YOLOv8m pose, YOLOv5m segmentation, UFLD v2 lanes,
-  SCRFD, Paddle OCR detection/recognition, and Piper Amy low.
+- Whisper Small (Tiny and Base are selectable), YOLOv8m, YOLOv8m pose, YOLOv5m segmentation,
+  UFLD v2 lanes, SCRFD, Paddle OCR detection/recognition, Phonon 31M English, and Piper Amy low fallback.
 - **RealSense ID SDK 3.6.1** and **F455 OPFW 9.16.1.1**.
 - CMake, Ninja, SDL2, EGL/GLES, PortAudio, ffmpeg, V4L2, ALSA, and build tools.
   `scripts/pi_setup.sh` checks and installs the required Debian packages.
@@ -135,7 +166,8 @@ and the Python binding. It then installs the rest:
 | `hailo-ollama` | Builds Hailo's public `v5.3.0` source into `/usr/local`, about 4 minutes; replaces an older `hailo-gen-ai-model-zoo` package after asking |
 | YOLOv8m, pose, YOLOv5m-seg, SCRFD | Downloads Hailo Model Zoo `v5.3.0` Hailo-10H builds |
 | UFLD v2 lanes, Paddle OCR det/rec | Downloads Hailo's Hailo-10H resource builds (the same files hailo-apps uses) |
-| Whisper-Base, Qwen2-VL, Qwen3-VL | Downloads the GenAI Model Zoo `v5.3.0` builds |
+| Selected Whisper Tiny/Base/Small, Qwen2-VL, Qwen3-VL | Downloads the GenAI Model Zoo `v5.3.0` builds |
+| Phonon 31M English and Piper Amy low | Installs `ptts==0.5.0` and `piper-tts` through `uv`; downloads Piper's ONNX voice/config and initializes Phonon so its model is cached for offline use |
 | Ollama chat models | Pulls them through a temporary `hailo-ollama` on port 8001 |
 
 Setup identifies each HEF build by its exact byte size, which differs in every Model Zoo release,
@@ -286,8 +318,8 @@ Every integrated model and the processor it uses:
 | Face/preview tracking | SCRFD-10G | **Hailo-10H NPU** for the preview box and five landmarks; CPU smoothing and oval overlay |
 | Driver monitoring | SCRFD-10G + YOLOv8m pose + YOLOv8m | **Hailo-10H NPU**; CPU heuristics, not a full iris/gaze tracker |
 | OCR | Paddle OCR detection (`ocr_det`) + recognition (`ocr`) | **Hailo-10H NPU** for both stages; CPU DB crop and CTC decoding |
-| Speech-to-text | Whisper-Base | **Hailo-10H NPU**, HailoRT Python GenAI `Speech2Text` |
-| Text-to-speech | Piper `en_US-amy-low` ONNX | **Pi CPU**, `piper-tts`/ONNX Runtime |
+| Speech-to-text | Whisper Small (default), Tiny, or Base | **Hailo-10H NPU**, HailoRT Python GenAI `Speech2Text` |
+| Text-to-speech | Phonon 31M English (default) or Piper `en_US-amy-low` fallback | **Pi CPU**, `ptts` or `piper-tts`/ONNX Runtime |
 | Face enrollment, verification, anti-spoofing | RealSense ID recognition models inside the F455 | **Intel camera's own silicon**, not Pi CPU and not Hailo NPU; `rsid_py.FaceAuthenticator` runs on the host only for control |
 
 Both Studios draw filled class-colored segmentation masks with labels. LVGL renders the four
@@ -299,10 +331,10 @@ highest-confidence masks to bound CPU and memory use.
 |---|---|
 | `hailo_platform.VDevice(group_id="SHARED")`, `create_infer_model()`, `configure()` | Detection, pose, segmentation, lanes, SCRFD, and OCR HEFs |
 | `hailo_platform.genai.VLM` | Qwen3-VL and Qwen2-VL text/image prompts, including text-only Nova chat |
-| `hailo_platform.genai.Speech2Text` | Whisper-Base transcription for Nova Voice |
+| `hailo_platform.genai.Speech2Text` | Whisper Tiny, Base, or Small transcription for Nova Voice |
 | `hailo-ollama` with `HAILO_OLLAMA_VDEVICE_GROUP_ID=SHARED` | Alternate local-chat LLMs through its HTTP `/api/chat` interface |
 | `rsid_py.FaceAuthenticator` over `/dev/ttyACM0` | F455 enrollment, user queries/deletion, configuration, and authentication control |
-| `piper-tts` on CPU | Nova Voice speech output |
+| `ptts` (Phonon) or `piper-tts`/ONNX Runtime on CPU | Nova Voice speech output |
 
 The F455 performs face detection for authentication, encrypted template storage, face matching,
 and anti-spoofing internally with `AlgoFlow.All`. No embedding or faceprint is sent to the Pi. The
@@ -340,7 +372,7 @@ Browser uploads are limited to 200 MB and expire after 24 hours. YouTube downloa
 | `POST /v1/vision/detect`, `POST /v1/vision/ask` | CV inference and VLM questions |
 | `WS /v1/vision/stream` | Camera/video frames and overlays |
 | `GET`, `POST /v1/vision/videos` | Preset list and video upload |
-| `POST /v1/audio/transcriptions`, `POST /v1/audio/speech` | Whisper and Piper |
+| `POST /v1/audio/transcriptions`, `POST /v1/audio/speech` | Whisper and the selected local TTS backend |
 | `WS /v1/voice/stream` | Speech-to-speech turns with cancellation |
 | `GET /v1/face/users` | Sensor users plus host name/role roster |
 | `POST /v1/face/enroll` | Enroll `{"name":"Driver Name","role":"driver"}` |
@@ -361,8 +393,8 @@ requires confirmation. The white tracking oval turns green after successful auth
 ```
 
 Hardware tests are under `tests/*_pi.py`; run them with Ollama available and no other AI Box NPU owner.
-The live benchmark checks all six CV tasks, VLM OCR, warm chat, Piper, Whisper round-trip, and
-optional model swaps. It writes an optional JSON report with `--output runtime/bench-live.json`.
+The live benchmark checks all six CV tasks, VLM OCR, warm chat, the selected TTS backend,
+Whisper round-trip, and optional model swaps. It writes an optional JSON report with `--output runtime/bench-live.json`.
 
 Representative Pi measurements (fixture-dependent, not a general accuracy benchmark):
 

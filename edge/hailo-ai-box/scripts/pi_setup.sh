@@ -223,6 +223,7 @@ PACKAGES=(
   build-essential cmake ninja-build pkg-config git curl ca-certificates rsync
   python3 python3-dev python3-pip python3-venv ffmpeg v4l-utils alsa-utils
   libsdl2-dev libegl-dev libgles-dev libportaudio2 portaudio19-dev libudev-dev libssl-dev
+  pipewire pipewire-pulse wireplumber pulseaudio-utils libspa-0.2-modules
 )
 MISSING=()
 if ((SKIP_SYSTEM == 0)); then
@@ -365,13 +366,22 @@ HEF_DIR=${AIBOX_HEF_DIR:-/usr/local/hailo/resources/models/hailo10h}
 HEF_MZ=https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v$EXPECTED_HAILO/hailo10h
 HEF_S3=https://hailo-csdata.s3.eu-west-2.amazonaws.com/resources/hefs/h10
 HEF_GENAI=https://dev-public.hailo.ai/v$EXPECTED_HAILO/blob
-# Keep Whisper on the same release as the vision HEFs. The v5.1.1 build transcribes the XVF3800
-# cabin corpus slightly better (47% vs 55% WER), but next to the v5.3.0 vision set it leaves no
-# room on the NPU for Qwen3-VL (HAILO_RESOURCE_EXHAUSTED).
+# Keep Whisper on the same release as the vision HEFs. The v5.1.1 Base build transcribes the
+# XVF3800 cabin corpus slightly better (47% vs 55% WER), but next to the v5.3.0 vision set it leaves
+# no room on the NPU for Qwen3-VL (HAILO_RESOURCE_EXHAUSTED).
 WHISPER_ZOO=${AIBOX_WHISPER_ZOO:-v5.3.0}
-case "$WHISPER_ZOO" in
-  v5.1.1) WHISPER_BYTES=136889274 ;;
-  v5.3.0) WHISPER_BYTES=130206034 ;;
+ASR_MODEL=${AIBOX_ASR_MODEL:-whisper-small}
+case "$ASR_MODEL" in
+  whisper-tiny) WHISPER_HEF=Whisper-Tiny.hef ;;
+  whisper-base) WHISPER_HEF=Whisper-Base.hef ;;
+  whisper-small) WHISPER_HEF=Whisper-Small.hef ;;
+  *) fail "AIBOX_ASR_MODEL must be whisper-tiny, whisper-base or whisper-small"; exit 1 ;;
+esac
+case "$WHISPER_ZOO:$ASR_MODEL" in
+  v5.1.1:whisper-base) WHISPER_BYTES=136889274 ;;
+  v5.3.0:whisper-tiny) WHISPER_BYTES=75307346 ;;
+  v5.3.0:whisper-base) WHISPER_BYTES=130206034 ;;
+  v5.3.0:whisper-small) WHISPER_BYTES=405920082 ;;
   *) WHISPER_BYTES="" ;;
 esac
 # url|bytes|build. The byte size identifies the build offline: it differs in every Model Zoo
@@ -384,7 +394,7 @@ declare -A HEFS=(
   [ufld_v2_tu.hef]="$HEF_S3/ufld_v2_tu.hef|64525344|Hailo-10H resources"
   [ocr_det.hef]="$HEF_S3/ocr_det.hef|7372679|Hailo-10H resources"
   [ocr.hef]="$HEF_S3/ocr.hef|7330636|Hailo-10H resources"
-  [Whisper-Base.hef]="https://dev-public.hailo.ai/$WHISPER_ZOO/blob/Whisper-Base.hef|$WHISPER_BYTES|GenAI $WHISPER_ZOO"
+  [$WHISPER_HEF]="https://dev-public.hailo.ai/$WHISPER_ZOO/blob/$WHISPER_HEF|$WHISPER_BYTES|GenAI $WHISPER_ZOO"
   [Qwen2-VL-2B-Instruct.hef]="$HEF_GENAI/Qwen2-VL-2B-Instruct.hef|3255444179|GenAI v5.3.0"
   [Qwen3-VL-2B-Instruct.hef]="$HEF_GENAI/Qwen3-VL-2B-Instruct.hef|3185773502|GenAI v5.3.0"
 )
@@ -450,7 +460,7 @@ if [[ ! -d "$HEF_DIR" ]] && ((CHECK_ONLY == 0)); then
   root_run mkdir -p "$HEF_DIR"
 fi
 [[ -d "$HEF_DIR" ]] || fail "HEF directory not found: $HEF_DIR"
-for hef in yolov8m.hef yolov8m_pose.hef yolov5m_seg.hef ufld_v2_tu.hef scrfd_10g.hef ocr_det.hef ocr.hef Whisper-Base.hef; do
+for hef in yolov8m.hef yolov8m_pose.hef yolov5m_seg.hef ufld_v2_tu.hef scrfd_10g.hef ocr_det.hef ocr.hef "$WHISPER_HEF"; do
   fetch_hef "$hef"
 done
 stop_if_failed
@@ -478,6 +488,15 @@ if ((SKIP_MODELS == 0)); then
   fetch_hef Qwen2-VL-2B-Instruct.hef
   download "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/low/en_US-amy-low.onnx" "$PIPER_VOICE"
   download "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/low/en_US-amy-low.onnx.json" "$PIPER_VOICE.json"
+  if [[ "${AIBOX_TTS_BACKEND:-phonon}" == "phonon" ]]; then
+    if ((CHECK_ONLY)); then
+      "$ROOT/.venv/bin/python" -c 'import ptts' && ok "Phonon runtime is installed." || fail "Phonon runtime ptts is missing."
+    elif "$ROOT/.venv/bin/python" -c 'import ptts; ptts.TTS(lang="en")'; then
+      ok "Phonon 31M English model is resolved for offline use."
+    else
+      fail "Phonon 31M English model setup failed."
+    fi
+  fi
   data_home=${XDG_DATA_HOME:-$HOME/.local/share}
   for model in qwen3:1.7b qwen2.5:1.5b llama3.2:1b qwen2:1.5b; do
     family=${model%%:*}; tag=${model##*:}
@@ -639,6 +658,13 @@ if command -v aplay >/dev/null 2>&1 && aplay -l | grep -qi 'xvf3800'; then
 else
   warn "XVF3800 playback device not found; check voice output."
 fi
+if grep -qiE 'xvf3800|wm8960' /proc/asound/cards 2>/dev/null; then
+  if ((CHECK_ONLY)); then
+    AIBOX_AEC_CHECK=1 bash scripts/setup_voice_audio.sh || fail "Voice audio AEC route is not configured."
+  else
+    bash scripts/setup_voice_audio.sh
+  fi
+fi
 if [[ -S /var/run/gpsd.sock ]]; then
   ok "gpsd socket found (satellite fix still depends on location)."
 else
@@ -729,6 +755,9 @@ if ((CHECK_ONLY == 0)); then
     printf 'AIBOX_HEF_DIR=%q\n' "$HEF_DIR"
     printf 'AIBOX_QWEN3_VL_HEF=%q\n' "$QWEN3_HEF"
     printf 'AIBOX_PIPER_VOICE=%q\n' "$PIPER_VOICE"
+    printf 'AIBOX_ASR_MODEL=%q\n' "$ASR_MODEL"
+    printf 'AIBOX_TTS_BACKEND=%q\n' "${AIBOX_TTS_BACKEND:-phonon}"
+    printf 'AIBOX_PHONON_DURATION_DELTA=%q\n' "${AIBOX_PHONON_DURATION_DELTA:--0.25}"
     printf 'AIBOX_REALSENSE_LIB=%q\n' "$RSID_LIB"
   } > runtime/setup.env
   ok "Wrote $ROOT/runtime/setup.env"
@@ -739,7 +768,7 @@ ok "HailoRT $EXPECTED_HAILO (CLI, driver, firmware, Python) and hailo-ollama $EX
 if ((HEF_OTHER)); then
   warn "Model files: $HEF_EXPECTED expected builds, $HEF_OTHER kept at a different build."
 else
-  ok "Model files: all $HEF_EXPECTED are the expected builds (Whisper-Base: GenAI $WHISPER_ZOO)."
+  ok "Model files: all $HEF_EXPECTED are the expected builds ($WHISPER_HEF: GenAI $WHISPER_ZOO)."
 fi
 if ((SKIP_REALSENSE == 0)); then
   if [[ "${OPFW:-}" == "$EXPECTED_RSID_FW" ]]; then

@@ -116,7 +116,7 @@ def test_chat_ws(client):
 
 # ---------------- audio ----------------
 def test_transcribe_stereo_44k(client):
-    r = client.post("/v1/audio/transcriptions", data={"model": "whisper-base"},
+    r = client.post("/v1/audio/transcriptions", data={"model": "whisper-small"},
                     files={"file": ("a.wav", wav_bytes(), "audio/wav")})
     j = r.json()
     assert r.status_code == 200 and j["text"] == "hello box"
@@ -237,14 +237,17 @@ def test_voice_stream(client):
         while True:
             m = ws.receive()
             msgs.append(m)
-            if m.get("bytes"):
+            if m.get("text") and __import__("json").loads(m["text"]).get("type") == "done":
                 break
     js = [__import__("json").loads(m["text"]) for m in msgs if m.get("text")]
     kinds = [j["type"] for j in js]
-    assert kinds[0] == "transcript" and js[0]["text"] == "hello box"
+    assert kinds[0] == "session"
+    assert "transcript" in kinds and js[1]["text"] == "hello box"
     assert "token" in kinds and kinds[-1] == "done"
     assert {"asr_ms", "llm_ttft_ms", "llm_ms", "tts_ms"} <= set(js[-1]["timings"])
-    assert msgs[-1]["bytes"][:4] == b"RIFF"
+    audio = next(m["bytes"] for m in msgs if m.get("bytes"))
+    assert audio[:4] != b"RIFF"
+    assert len(audio) % 1280 == 0
 
 
 def test_voice_empty_stop(client):
@@ -358,8 +361,10 @@ def test_voice_ws_disconnect_cancels(live, services):
         ws.send('{"type":"start"}')
         ws.send(np.zeros(8000, "<i2").tobytes())
         ws.send('{"type":"stop"}')
-        ws.recv()  # transcript
-        ws.recv()  # first token
+        while True:
+            event = __import__("json").loads(ws.recv())
+            if event.get("type") == "token":
+                break
     assert _wait(lambda: services.chat.cancelled)
 
 

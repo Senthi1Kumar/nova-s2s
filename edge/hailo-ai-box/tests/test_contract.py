@@ -76,7 +76,7 @@ def test_fake_governor_and_models(services):
     g = services.governor
     ids = {m["id"] for m in g.models()}
     assert {"qwen3:1.7b", "qwen2.5:1.5b", "llama3.2:1b", "qwen2:1.5b", "qwen3-vl", "qwen2-vl",
-            "whisper-base", "piper-amy", "yolov8m", "yolov8m_pose", "yolov5m_seg", "ufld_v2_tu",
+            "whisper-small", "piper-amy", "yolov8m", "yolov8m_pose", "yolov5m_seg", "ufld_v2_tu",
             "scrfd_10g", "ocr_det", "ocr"} <= ids
     assert all(m["state"] == "resident" for m in g.models())
     assert g.genai_state() == "idle" and g.vision_fps_cap() is None

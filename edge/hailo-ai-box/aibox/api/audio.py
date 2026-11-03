@@ -28,12 +28,13 @@ async def read_upload(f: UploadFile, what: str) -> bytes:
 async def transcriptions(
     request: Request,
     file: UploadFile = File(...),
-    model: str = Form("whisper-base"),
+    model: str | None = Form(None),
     language: str | None = Form(None),
     services: Services = Depends(get_services),
 ):
-    if model != "whisper-base":
-        raise HTTPException(404, f"model '{model}' not found")
+    model = model or services.settings.asr_model
+    if model != services.settings.asr_model:
+        raise HTTPException(404, f"model '{model}' not found; configured ASR is {services.settings.asr_model}")
     data = await read_upload(file, "audio")
     t0 = time.perf_counter()
     try:

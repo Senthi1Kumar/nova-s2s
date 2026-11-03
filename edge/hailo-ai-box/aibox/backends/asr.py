@@ -1,4 +1,4 @@
-"""Whisper-Base ASR on the NPU (hailo_platform.genai.Speech2Text; does not use the KV slot)."""
+"""Hailo Whisper ASR on the NPU (Speech2Text; does not use the KV slot)."""
 
 from __future__ import annotations
 
@@ -15,15 +15,19 @@ from .npu import NpuPool
 from .registry import Registry
 
 MAX_AUDIO_S = 60
+WHISPER_HEFS = {
+    "whisper-tiny": "Whisper-Tiny.hef",
+    "whisper-base": "Whisper-Base.hef",
+    "whisper-small": "Whisper-Small.hef",
+}
 
 
 class HailoWhisper(AsrService):
-    MODEL_ID = "whisper-base"
-
     def __init__(self, pool: NpuPool, registry: Registry | None = None,
                  hef_path: str | None = None) -> None:
         self.pool, self.registry = pool, registry
-        self.hef = hef_path or os.path.join(pool.settings.hef_dir, "Whisper-Base.hef")
+        self.model_id = pool.settings.asr_model
+        self.hef = hef_path or os.path.join(pool.settings.hef_dir, WHISPER_HEFS[self.model_id])
         self._s2t: Any = None
         self._lock = threading.Lock()  # one transcription at a time
 
@@ -38,18 +42,19 @@ class HailoWhisper(AsrService):
         if self.registry is None:
             self._s2t = loader()
             return True
-        self._s2t = self.registry.load(self.MODEL_ID, loader)
+        self._s2t = self.registry.load(self.model_id, loader)
         return self._s2t is not None
 
     def _run(self, pcm: np.ndarray, language: str | None) -> str:
         with self._lock:
-            kw = {"language": language} if language else {}
+            selected = language or self.pool.settings.asr_language
+            kw = {"language": selected} if selected else {}
             return str(self._s2t.generate_all_text(pcm, **kw)).strip()
 
     async def transcribe(self, pcm16k: np.ndarray, language: str | None = None) -> str:
         await self.pool.wait_ready()
         if self._s2t is None:
-            raise RuntimeError("whisper-base is not resident")
+            raise RuntimeError(f"{self.model_id} is not resident")
         pcm = np.array(pcm16k, dtype=np.float32, order="C").reshape(-1)  # writable copy
         if pcm.size == 0:
             return ""
@@ -57,7 +62,7 @@ class HailoWhisper(AsrService):
         t0 = time.perf_counter()
         text = await asyncio.to_thread(self._run, pcm, language)
         if self.registry is not None:
-            self.registry.record_call(self.MODEL_ID, (time.perf_counter() - t0) * 1000.0)
+            self.registry.record_call(self.model_id, (time.perf_counter() - t0) * 1000.0)
         return text
 
     def close(self) -> None:
@@ -68,4 +73,4 @@ class HailoWhisper(AsrService):
                 pass
             self._s2t = None
             if self.registry is not None:
-                self.registry.set_state(self.MODEL_ID, "unloaded")
+                self.registry.set_state(self.model_id, "unloaded")

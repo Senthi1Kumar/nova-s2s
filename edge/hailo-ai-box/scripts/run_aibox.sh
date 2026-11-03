@@ -34,6 +34,14 @@ for dev in "$CAMERA_ARG" "$F455_ARG"; do
 done
 [[ -z "$CAMERA_ARG" ]] || export AIBOX_CAMERA_C920E="$CAMERA_ARG"
 [[ -z "$F455_ARG" ]] || export AIBOX_CAMERA_F455="$F455_ARG"
+bash scripts/setup_voice_audio.sh
+AUDIO_PY="$ROOT/.venv/bin/python"
+[[ -x "$AUDIO_PY" ]] || AUDIO_PY="$(command -v python3)"
+if audio_env="$("$AUDIO_PY" -m aibox.audio.profile --shell 2>/dev/null)"; then
+  eval "$audio_env"
+else
+  echo "WARNING: audio profile detection failed; the LVGL client will pick devices itself" >&2
+fi
 HTTPS_PORT="${AIBOX_HTTPS_PORT:-8443}"
 HTTP_PORT="${AIBOX_HTTP_PORT:-8442}"
 LOGS="$ROOT/runtime/logs"

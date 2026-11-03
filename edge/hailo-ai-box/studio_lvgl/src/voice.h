@@ -3,8 +3,8 @@
 #include <stdint.h>
 
 /* Nova Voice client: WS /v1/voice/stream with the open-mic protocol of the voice addendum (sections 1 and 2).
-   One worker thread owns the socket, the energy VAD, the turn state machine and reply-WAV parsing; PortAudio's
-   callbacks only move samples through a lock-free ring (capture) and a try-locked buffer (playback), and never
+   One worker thread owns the socket, the energy VAD, the turn state machine and the streamed raw-PCM reply; PortAudio's
+   callbacks only move samples through lock-free rings (capture and playback), and never
    touch LVGL. The LVGL thread calls voice_take() for a snapshot. */
 typedef enum { VOICE_IDLE, VOICE_HEARD, VOICE_THINKING, VOICE_SPEAKING } voice_state_t;
 

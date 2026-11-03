@@ -30,7 +30,7 @@ FAKE_MODELS = [
     ("qwen2:1.5b", "chat", "hailo-ollama"),
     ("qwen3-vl", "vlm", "hailort-genai"),
     ("qwen2-vl", "vlm", "hailort-genai"),
-    ("whisper-base", "asr", "hailort"),
+    ("whisper-small", "asr", "hailort"),
     ("piper-amy", "tts", "piper"),
     ("yolov8m", "vision", "hailort"),
     ("yolov8m_pose", "vision", "hailort"),

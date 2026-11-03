@@ -1,6 +1,8 @@
 """The web Studio is plain static files served by create_app()."""
 
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
@@ -68,6 +70,74 @@ def test_voice_protocol_and_controls(client):
         assert needle in src or needle.replace("'", '"') in src, needle
     assert "qwen3:1.7b" in src
     assert "transcript" in src and "token" in src and "timings" in src
+
+
+def test_voice_reports_actual_browser_audio_processing(client):
+    src = client.get("/js/voice.js").text
+    assert "getSettings" in src
+    assert "audio_processing" in src
+    assert "echoCancellation" in src and "noiseSuppression" in src
+
+
+def test_voice_protocol_two_client_streams_sentence_pcm(client):
+    src = client.get("/js/voice.js").text
+    for needle in ("transcript_partial", "tts_start", "tts_end", "interrupted", "ignored", "turn_id", "sentence_seq"):
+        assert f'"{needle}"' in src or f"'{needle}'" in src or needle in src, needle
+    for event in ("tts_start", "tts_end", "interrupted", "ignored"):
+        assert f"'{event}'" in src
+    # raw PCM is scheduled on the AudioContext clock, never assembled into a WAV
+    assert "createBuffer(1" in src and "createBufferSource" in src and "playHead" in src
+    assert "CHUNK_BYTES = 3200" in src and "checkTurnEnd" in src
+    for gone in ("wavTotal", "maybePlay", "playQueue", "createObjectURL(new Blob(next", "createMediaElementSource"):
+        assert gone not in src, gone
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_voice_queued_audio_does_not_get_another_jitter_lead():
+    script = f"""
+        import assert from 'node:assert/strict';
+        globalThis.location = new URL('http://127.0.0.1:8442');
+        const voice = await import({str((STATIC / 'js' / 'voice.js').as_uri())!r});
+        assert.equal(typeof voice.playbackStartTime, 'function');
+        assert.equal(voice.playbackStartTime(0, 10), 10.8);
+        assert.equal(voice.playbackStartTime(12, 10), 12);
+        assert.equal(voice.playbackStartTime(10.5, 10), 10.5);
+        assert.equal(voice.playbackStartTime(9.5, 10), 10.8);
+    """
+    result = subprocess.run(
+        ["node", "--input-type=module", "--eval", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_voice_accepts_unknown_streaming_sentence_total(client):
+    src = client.get("/js/voice.js").text
+    assert "expect: m.bytes || 0" in src
+    assert "V.sent.expect && V.sent.got !== V.sent.expect" in src
+    assert "m.bytes != null && m.bytes !== V.sent.got" in src
+
+
+def test_voice_prefers_xvf3800_when_browser_exposes_it(client):
+    src = client.get("/js/voice.js").text
+    assert "XVF3800" in src
+    assert "reSpeaker" in src
+    assert "deviceId: { exact:" in src
+    assert "setSinkId" in src
+
+
+def test_xvf_capture_uses_onboard_dsp_without_browser_processing(client):
+    src = client.get("/js/voice.js").text
+    xvf_capture = src.split("const input =", 1)[1].split("const output", 1)[0]
+    assert "echoCancellation: false" in xvf_capture
+    assert "noiseSuppression: false" in xvf_capture
+
+
+def test_voice_barge_in_toggle_is_opt_in_and_persisted(client):
+    src = client.get("/js/voice.js").text
+    assert "Barge-in (beta)" in src and "vo-barge" in src
+    assert "bargeIn: false" in src and "barge_in: true" in src
+    assert "localStorage.getItem(BARGE_KEY)" in src and "localStorage.setItem(BARGE_KEY" in src
+    assert src.count("localStorage") == 2 and src.count("catch") >= 2
 
 
 def test_avatar_matches_lvgl_states(client):

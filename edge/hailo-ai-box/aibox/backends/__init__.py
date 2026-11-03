@@ -27,7 +27,7 @@ def build_services(settings: Settings) -> Services:
     from .governor import HailoGovernor, pi_temp_c
     from .npu import NpuPool
     from .registry import Emitter, ModelSpec, Registry
-    from .tts import PiperTts
+    from .tts import PhononTts, PiperTts
     from .vision import HailoVision
     from .vlm import VLM_MODELS, build_genai, vlm_hef
 
@@ -42,12 +42,16 @@ def build_services(settings: Settings) -> Services:
         path = vlm_hef(settings, m)
         size = round(os.path.getsize(path) / 1e6, 1) if os.path.exists(path) else None
         registry.register(ModelSpec(m, "vlm", "hailort-genai", size_mb=size, hef=path))
-    registry.register(ModelSpec("whisper-base", "asr", "hailort"))
-    registry.register(ModelSpec("piper-amy", "tts", "piper", device="cpu"))
+    registry.register(ModelSpec(settings.asr_model, "asr", "hailort"))
+    if settings.tts_backend == "phonon":
+        registry.register(ModelSpec(PhononTts.MODEL_ID, "tts", "ptts", device="cpu"))
+        tts = PhononTts(registry, duration_delta=settings.phonon_duration_delta)
+    else:
+        registry.register(ModelSpec(PiperTts.MODEL_ID, "tts", "piper", device="cpu"))
+        tts = PiperTts(settings.piper_voice, registry)
 
     vision = HailoVision(pool, registry)
     asr = HailoWhisper(pool, registry)
-    tts = PiperTts(settings.piper_voice, registry)
     slot, vlm, ollama, chat = build_genai(emit, pool, settings, registry)
     vlm.on_resource_exhausted = vision.evict_for_genai
 
